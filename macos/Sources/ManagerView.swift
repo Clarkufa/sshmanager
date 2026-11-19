@@ -72,8 +72,17 @@ private struct ManagerView: View {
             ServerPicker(profiles: manager.profiles) { manager.connect($0, new: true) }
         }
         .sheet(isPresented: $manager.managingBackups) { BackupView(manager: manager) }
-        .alert(item: $manager.notice) { notice in
-            Alert(title: Text(notice.title), message: Text(notice.text), dismissButton: .default(Text("ОК")))
+        .alert(manager.notice?.title ?? "",
+               isPresented: Binding(get: { manager.notice != nil }, set: { if !$0 { manager.notice = nil } }),
+               presenting: manager.notice) { notice in
+            if let confirm = notice.confirm {
+                Button("Нет", role: .cancel) {}.keyboardShortcut(.defaultAction)
+                Button("Да", role: .destructive, action: confirm)
+            } else {
+                Button("ОК", role: .cancel) {}
+            }
+        } message: { notice in
+            Text(notice.text)
         }
         .confirmationDialog("Удалить сервер?",
                             isPresented: Binding(get: { manager.deleteProfile != nil }, set: { if !$0 { manager.deleteProfile = nil } }),

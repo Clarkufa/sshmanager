@@ -140,7 +140,7 @@ class Shell(Gtk.Box):
         bar.pack_start(title, True, True, 0)
         bar.pack_start(button("Файлы", lambda: owner.open_files(profile)), False, False, 0)
         bar.pack_start(button("Без проброса портов", lambda: owner.open_session(profile, True, False)), False, False, 0)
-        bar.pack_start(button("Закрыть", lambda: owner.close_session(self)), False, False, 0)
+        bar.pack_start(button("Закрыть сеанс", lambda: owner.close_session(self)), False, False, 0)
         self.pack_start(bar, False, False, 0)
         self.terminal = Vte.Terminal()
         self.terminal.set_scrollback_lines(7000)
@@ -606,6 +606,8 @@ class Window(Gtk.ApplicationWindow):
         shell.terminal.grab_focus()
 
     def close_session(self, shell):
+        if shell not in self.shells or not confirm(self, "Вы уверены?", f"Закрыть SSH-сеанс «{shell.tab.get_text()}»?"):
+            return
         self.shells.remove(shell)
         shell.destroy()
         if not self.shells:

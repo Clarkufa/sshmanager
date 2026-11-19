@@ -16,9 +16,12 @@ def message(owner, text, kind=Gtk.MessageType.INFO):
     dialog.destroy()
 
 
-def confirm(owner, text):
+def confirm(owner, text, details=None):
     dialog = Gtk.MessageDialog(transient_for=owner, modal=True, message_type=Gtk.MessageType.QUESTION,
-                               buttons=Gtk.ButtonsType.YES_NO, text=text)
+                               buttons=Gtk.ButtonsType.NONE, text=text)
+    dialog.add_buttons("Нет", Gtk.ResponseType.NO, "Да", Gtk.ResponseType.YES)
+    if details is not None:
+        dialog.format_secondary_text(details)
     dialog.set_default_response(Gtk.ResponseType.NO)
     answer = dialog.run()
     dialog.destroy()

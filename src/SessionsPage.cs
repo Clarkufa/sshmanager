@@ -427,8 +427,10 @@ namespace SshManager
 
         private void CloseActive()
         {
-            if (active == null) return;
             var closing = active;
+            if (closing == null) return;
+            if (MessageBox.Show(this, "Закрыть SSH-сеанс «" + closing.Title + "»?", "Вы уверены?",
+                MessageBoxButtons.YesNo, MessageBoxIcon.Question, MessageBoxDefaultButton.Button2) != DialogResult.Yes) return;
             sessions.Remove(closing);
             closing.Dispose();
             Activate(sessions.OrderByDescending(session => session.LastUsed).FirstOrDefault(), true);

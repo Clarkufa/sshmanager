@@ -9,6 +9,7 @@ struct Notice: Identifiable {
     let id = UUID()
     let title: String
     let text: String
+    var confirm: (() -> Void)? = nil
 }
 
 final class Manager: ObservableObject {
@@ -184,6 +185,14 @@ final class Manager: ObservableObject {
     }
 
     func closeSession(_ session: TerminalSession) {
+        guard sessions.contains(where: { $0.id == session.id }) else { return }
+        notice = Notice(title: "Вы уверены?", text: "Закрыть SSH-сеанс «\(session.label)»?") { [weak self, weak session] in
+            guard let self, let session else { return }
+            self.removeSession(session)
+        }
+    }
+
+    private func removeSession(_ session: TerminalSession) {
         session.close()
         sessions.removeAll { $0.id == session.id }
         lastSessions.removeAll { $0 == session.id }
