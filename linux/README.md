@@ -4,17 +4,17 @@
 
 ## Установка
 
-Скачайте пакет или архив со [страницы релиза для Linux](https://github.com/Clarkufa/sshmanager/releases/tag/linux-v1.8.0).
+Скачайте пакет или архив со [страницы релиза для Linux](https://github.com/Clarkufa/sshmanager/releases/latest).
 
 На Debian и Ubuntu откройте папку с пакетом и установите его.
 
 ```sh
-sudo apt install ./ssh-manager-desktop_1.8.0_all.deb
+sudo apt install ./SSH-Manager-Linux.deb
 ```
 
 После установки SSH Manager появится в меню приложений. Из терминала он запускается командой `ssh-manager`.
 
-На других дистрибутивах распакуйте архив `ssh-manager-linux-1.8.0.tar.gz` и запустите `./ssh-manager`. Нужны Python 3.10+, PyGObject, GTK 3, VTE 2.91 (типовые пакеты GTK GIR / typelib), Paramiko, Cryptography и OpenSSH. Для сохранения паролей требуется работающий Secret Service, например GNOME Keyring, и команда `secret-tool`.
+На других дистрибутивах распакуйте архив `SSH-Manager-Linux.tar.gz` и запустите `./ssh-manager`. Нужны Python 3.10+, PyGObject, GTK 3, VTE 2.91 (типовые пакеты GTK GIR / typelib), Paramiko, Cryptography и OpenSSH. Для сохранения паролей требуется работающий Secret Service, например GNOME Keyring, и команда `secret-tool`.
 
 ## Подключения и файлы
 
@@ -23,11 +23,3 @@ sudo apt install ./ssh-manager-desktop_1.8.0_all.deb
 - Кнопка «Файлы» в каталоге и в терминале открывает отдельное окно SFTP. Для загрузки можно выбрать локальные файлы или перетащить их из файлового менеджера на правую панель.
 - Поле «Пароль SSH» сохраняет пароль в системном хранилище для конкретного адреса, порта и пользователя. Данные приложения хранятся в `${XDG_CONFIG_HOME:-~/.config}/ssh-manager`.
 - Защищённый архив Linux-версии включает конфиг, настройки, ключи из каталога конфига и сохранённые пароли. Обычный ZIP включает конфиг, настройки и ключи.
-
-## Сборка
-
-```sh
-sh linux/build.sh
-```
-
-Результаты появятся в `build/linux`. Для сборки `.deb` нужен `dpkg-deb`. Архив собирается и на дистрибутивах без него.

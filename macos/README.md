@@ -2,7 +2,7 @@
 
 Универсальная сборка для macOS 14 Sonoma и новее. Один DMG содержит приложение для Mac с Apple Silicon (arm64) и Intel (x86_64).
 
-[Скачать DMG](https://github.com/Clarkufa/sshmanager/releases/download/macos-v1.0.0/SSH-Manager-macOS.dmg) · [Релизы проекта](https://github.com/Clarkufa/sshmanager/releases)
+[Скачать DMG](https://github.com/Clarkufa/sshmanager/releases/latest/download/SSH-Manager-macOS.dmg) · [Релизы проекта](https://github.com/Clarkufa/sshmanager/releases)
 
 Откройте DMG и перетащите **SSH Manager** в **Программы**. У опубликованной сборки локальная подпись ad hoc. При первом запуске Gatekeeper может потребовать ручного подтверждения. [Справка Apple по запуску приложений](https://support.apple.com/guide/mac-help/open-a-mac-app-from-an-unidentified-developer-mh40616/mac).
 
@@ -13,15 +13,3 @@
 - Для сохранения пароля укажите SSH-пользователя и адрес без шаблонов. Пароль хранится в Связке ключей macOS. При входе SSH Manager может запросить подтверждение ключа сервера, код или парольную фразу ключа.
 - В двухпанельном окне SFTP можно передавать файлы и папки, загружать объекты перетаскиванием из Finder, выбирать поведение при совпадении имён и создавать, переименовывать или удалять файлы и пустые папки на сервере. SFTP использует отдельное соединение с тем же профилем OpenSSH без проброса портов.
 - Вкладки и тема сохраняются в `~/Library/Application Support/SSH Manager/tabs.xml`. Копии ZIP и защищённые `.sshbackup` используют формат Windows-версии. Защищённый архив может включать пароли. Перед импортом приложение показывает заменяемые файлы и сохраняет их прежние версии в `~/.ssh/.ssh-manager-restore`.
-
-## Сборка
-
-Установите Xcode с инструментами командной строки. В корне репозитория выполните:
-
-```sh
-./macos/build.sh
-```
-
-DMG появится в `build/macos`. При необходимости передайте скрипту другую папку для сборки. Терминал использует xterm.js 6.0.0 и Fit Addon 0.11.0. Закреплённые версии и лицензии входят в репозиторий, поэтому при сборке загрузка из npm не требуется. [xterm.js](https://xtermjs.org/).
-
-Для сборки с подписью Developer ID Application задайте `SSH_MANAGER_SIGN_IDENTITY`. Скрипт включит Hardened Runtime при подписании приложения. Нотаризация и прикрепление билета выполняются отдельно. [Документация Apple по нотаризации](https://developer.apple.com/documentation/security/notarizing-macos-software-before-distribution).
