@@ -3,11 +3,13 @@ import SwiftUI
 
 struct SSHManagerApp: App {
     @StateObject private var manager = Manager()
+    @StateObject private var updates = MacUpdates()
     var body: some Scene {
         Window("SSH Manager", id: "main") {
-            ManagerView(manager: manager)
+            ManagerView(manager: manager, updates: updates)
                 .frame(minWidth: 760, minHeight: 500)
                 .preferredColorScheme(manager.settings.appearance.scheme)
+                .onAppear { updates.check(manual: false) }
         }
         .defaultSize(width: 1040, height: 680)
         .commands {
@@ -27,6 +29,7 @@ struct SSHManagerApp: App {
                     .keyboardShortcut("r", modifiers: .command)
                 Button("Открыть OpenSSH config") { manager.openConfig() }
                 Button("Резервные копии…") { manager.managingBackups = true }
+                Button("Проверить обновления…") { updates.check(manual: true) }
                 Divider()
                 Menu("Оформление") {
                     ForEach(Appearance.allCases) { style in
@@ -45,6 +48,7 @@ struct SSHManagerApp: App {
 
 private struct ManagerView: View {
     @ObservedObject var manager: Manager
+    @ObservedObject var updates: MacUpdates
     @State private var query = ""
     @FocusState private var focusSearch: Bool
 
@@ -72,6 +76,7 @@ private struct ManagerView: View {
             ServerPicker(profiles: manager.profiles) { manager.connect($0, new: true) }
         }
         .sheet(isPresented: $manager.managingBackups) { BackupView(manager: manager) }
+        .sheet(isPresented: $updates.presented) { MacUpdateView(updates: updates) }
         .alert(manager.notice?.title ?? "",
                isPresented: Binding(get: { manager.notice != nil }, set: { if !$0 { manager.notice = nil } }),
                presenting: manager.notice) { notice in
@@ -143,7 +148,13 @@ private struct ManagerView: View {
                 } label: { Label("Новая вкладка", systemImage: "plus") }
                 .buttonStyle(.borderless)
                 Spacer()
+                if updates.available != nil {
+                    Button { updates.presented = true } label: { Image(systemName: "arrow.down.circle.fill") }
+                        .buttonStyle(.borderless).foregroundStyle(Color.accentColor)
+                        .help("Доступно обновление").accessibilityLabel("Доступно обновление")
+                }
                 Menu {
+                    Button("Проверить обновления…") { updates.check(manual: true) }
                     Button("Открыть OpenSSH config") { manager.openConfig() }
                     Button("Обновить список серверов") { manager.reload() }
                     Button("Резервные копии…") { manager.managingBackups = true }
@@ -314,6 +325,7 @@ private struct ManagerView: View {
     private func sessionDetail(_ session: TerminalSession) -> some View {
         SessionDetail(session: session, files: { manager.openFiles(session.profile) },
                       newSession: { manager.connect(session.profile, new: true, noForwarding: session.noForwarding) },
+                      newSessionWithoutForwarding: { manager.connect(session.profile, new: true, noForwarding: true) },
                       close: { manager.closeSession(session) })
             .id(session.id)
     }
@@ -348,6 +360,7 @@ private struct SessionDetail: View {
     @ObservedObject var session: TerminalSession
     let files: () -> Void
     let newSession: () -> Void
+    let newSessionWithoutForwarding: () -> Void
     let close: () -> Void
     @State private var rename = false
     @State private var label = ""
@@ -364,6 +377,9 @@ private struct SessionDetail: View {
                 Button(action: files) { Label("Файлы", systemImage: "folder") }
                 Button(action: newSession) { Label("Новый сеанс", systemImage: "plus") }
                 Menu {
+                    if !session.noForwarding {
+                        Button("Новый сеанс без проброса портов", action: newSessionWithoutForwarding)
+                    }
                     Button("Переименовать сеанс…") { label = session.label; rename = true }
                     Button("Закрыть сеанс", role: .destructive, action: close)
                 } label: { Image(systemName: "ellipsis.circle") }

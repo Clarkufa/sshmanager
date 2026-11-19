@@ -25,7 +25,7 @@ struct SSHRequest {
             result += ["-T", "-o", "RemoteCommand=none", "-o", "SessionType=subsystem",
                        "-o", "ControlMaster=no", "-o", "ControlPath=none", "-o", "BatchMode=no", "-s", "--", profile.alias, "sftp"]
         } else {
-            result += ["-o", "ExitOnForwardFailure=yes", "--", profile.alias]
+            result += ["--", profile.alias]
         }
         return result
     }

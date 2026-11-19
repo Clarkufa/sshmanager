@@ -33,11 +33,21 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - name: Test Linux updater
+        run: PYTHONPATH=linux python3 -B -m unittest discover -s linux/tests -v
       - name: Build DEB and TAR.GZ
         shell: bash
         run: |
           sh linux/build.sh build/linux
           version="$(PYTHONPATH=linux python3 -B -c 'from ssh_manager import VERSION; print(VERSION)')"
+          PYTHONPATH=linux python3 -B - "build/linux/ssh-manager-linux-${version}.tar.gz" "$version" <<'PY'
+          from pathlib import Path
+          from tempfile import TemporaryDirectory
+          import sys
+          from ssh_manager.updates import unpack_application
+          with TemporaryDirectory() as scratch:
+              unpack_application(Path(sys.argv[1]), Path(scratch) / "app", sys.argv[2])
+          PY
           mv "build/linux/ssh-manager-desktop_${version}_all.deb" build/linux/SSH-Manager-Linux.deb
           mv "build/linux/ssh-manager-linux-${version}.tar.gz" build/linux/SSH-Manager-Linux.tar.gz
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2

@@ -17,7 +17,18 @@ install -m 0644 "$source_dir/ssh_manager/"*.py "$app/ssh_manager/"
 install -m 0644 "$repo/assets/AppMark.png" "$app/icon.png"
 install -m 0644 "$source_dir/README.md" "$app/README.md"
 install -m 0644 "$repo/LICENSE" "$app/LICENSE"
-tar -C "$stage" -czf "$output/ssh-manager-linux-$version.tar.gz" "ssh-manager-$version"
+python3 -B - "$app" <<'PY'
+from hashlib import sha256
+import json
+from pathlib import Path
+import sys
+
+app = Path(sys.argv[1])
+checksums = {path.relative_to(app).as_posix(): sha256(path.read_bytes()).hexdigest()
+             for path in app.rglob("*") if path.is_file()}
+(app / ".ssh-manager-checksums.json").write_text(json.dumps(checksums, sort_keys=True) + "\n", encoding="utf-8")
+PY
+COPYFILE_DISABLE=1 tar -C "$stage" -czf "$output/ssh-manager-linux-$version.tar.gz" "ssh-manager-$version"
 
 if command -v dpkg-deb >/dev/null; then
     pkg="$stage/package"
@@ -39,6 +50,7 @@ Priority: optional
 Architecture: all
 Maintainer: SSH Manager contributors <3994042+Clarkufa@users.noreply.github.com>
 Depends: python3 (>= 3.10), python3-gi, gir1.2-gtk-3.0, gir1.2-vte-2.91, python3-paramiko, python3-cryptography, openssh-client, libsecret-tools
+Recommends: pkexec
 Homepage: https://github.com/Clarkufa/sshmanager
 Description: Native SSH and SFTP desktop manager
  OpenSSH connection profiles, embedded VTE sessions and graphical SFTP

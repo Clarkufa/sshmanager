@@ -18,6 +18,7 @@ from . import VERSION
 from .auth import AskPass, Vault, account_for, ssh_args
 from .config import Config, Profile
 from .files import FilesWindow
+from .update_ui import UpdateController
 from .widgets import button, chooser, confirm, menu_at, message, prompt
 
 
@@ -290,7 +291,11 @@ class Window(Gtk.ApplicationWindow):
         header.pack_start(version)
         self.theme = button("", self.switch_theme)
         header.pack_end(self.theme)
-        header.pack_end(button("Обновить", self.reload))
+        refresh = button("Обновить", self.reload)
+        refresh.set_tooltip_text("Перечитать список серверов")
+        header.pack_end(refresh)
+        self.updates = UpdateController(self)
+        header.pack_end(self.updates.control)
 
         panel = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=11, margin=17)
         heading = Gtk.Box(spacing=8)
@@ -337,6 +342,7 @@ class Window(Gtk.ApplicationWindow):
         self.add(self.stack)
         self.apply_theme()
         self.reload(show_error=False)
+        self.updates.check()
 
     def apply_theme(self):
         Gtk.Settings.get_default().set_property("gtk-application-prefer-dark-theme", self.settings["dark"])
@@ -348,6 +354,9 @@ class Window(Gtk.ApplicationWindow):
         self.save_settings()
 
     def can_close(self, *_):
+        if self.updates.installing:
+            message(self, "Дождитесь завершения установки обновления.")
+            return True
         return (any(shell.live for shell in self.shells) or bool(self.files)) and not confirm(self, "Закрыть активные сеансы и окна SFTP?")
 
     def reload(self, show_error=True):
