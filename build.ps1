@@ -43,11 +43,13 @@ if (-not $oscCode.Contains($oscTerminator)) { throw 'The VtNetCore OSC patch no 
 [IO.File]::WriteAllText($oscReader, $oscCode.Replace($oscTerminator, $replacement))
 $sources += (Get-ChildItem -LiteralPath $vtSource -Recurse -Filter '*.cs' -File).FullName
 $vtLicense = Join-Path $thirdParty 'VtNetCore-LICENSE.txt'
+$projectLicense = Join-Path $PSScriptRoot 'LICENSE'
 $icon = Join-Path $PSScriptRoot 'assets\SshManager.ico'
 $mark = Join-Path $PSScriptRoot 'assets\AppMark.png'
 $manifest = Join-Path $PSScriptRoot 'installer\app.manifest'
 & $dotnet $compiler /nologo /noconfig /nostdlib+ /target:winexe /platform:anycpu /optimize+ /deterministic+ /codepage:65001 `
-    "/out:$app" "/win32icon:$icon" "/win32manifest:$manifest" "/resource:$mark,SshManager.AppMark.png" "/resource:$vtLicense,SshManager.VtNetCore-LICENSE.txt" $refs $sources
+    "/out:$app" "/win32icon:$icon" "/win32manifest:$manifest" "/resource:$mark,SshManager.AppMark.png" `
+    "/resource:$vtLicense,SshManager.VtNetCore-LICENSE.txt" "/resource:$projectLicense,SshManager.LICENSE.txt" $refs $sources
 if ($LASTEXITCODE -ne 0) { throw 'App compilation failed.' }
 
 if (-not $AppOnly) {

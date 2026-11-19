@@ -16,6 +16,7 @@ install -m 0755 "$source_dir/ssh-manager" "$app/ssh-manager"
 install -m 0644 "$source_dir/ssh_manager/"*.py "$app/ssh_manager/"
 install -m 0644 "$repo/assets/AppMark.png" "$app/icon.png"
 install -m 0644 "$source_dir/README.md" "$app/README.md"
+install -m 0644 "$repo/LICENSE" "$app/LICENSE"
 tar -C "$stage" -czf "$output/ssh-manager-linux-$version.tar.gz" "ssh-manager-$version"
 
 if command -v dpkg-deb >/dev/null; then
@@ -27,6 +28,7 @@ if command -v dpkg-deb >/dev/null; then
     install -m 0644 "$app/icon.png" "$pkg/usr/lib/ssh-manager/icon.png"
     install -m 0644 "$app/icon.png" "$pkg/usr/share/icons/hicolor/256x256/apps/ssh-manager.png"
     install -m 0644 "$app/README.md" "$pkg/usr/share/doc/ssh-manager-desktop/README.md"
+    install -m 0644 "$app/LICENSE" "$pkg/usr/share/doc/ssh-manager-desktop/copyright"
     install -m 0644 "$source_dir/ssh-manager.desktop" "$pkg/usr/share/applications/ssh-manager.desktop"
     ln -s ../lib/ssh-manager/ssh-manager "$pkg/usr/bin/ssh-manager"
     cat > "$pkg/DEBIAN/control" <<EOF

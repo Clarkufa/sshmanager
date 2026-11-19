@@ -38,3 +38,7 @@ SSH Manager помогает работать с удалёнными серве
 - [Windows](docs/windows.md)
 - [macOS](macos/README.md)
 - [Linux](linux/README.md)
+
+## Лицензия
+
+Код SSH Manager распространяется по лицензии MIT. Сторонние компоненты сохраняют свои лицензии. [Текст лицензии MIT](LICENSE)

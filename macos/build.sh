@@ -22,6 +22,7 @@ for size in 16 32 128 256 512; do
 done
 iconutil -c icns "$scratch/SshManager.iconset" -o "$app/Contents/Resources/SshManager.icns"
 cp "$root/macos/Resources/Info.plist" "$app/Contents/Info.plist"
+cp "$root/LICENSE" "$app/Contents/Resources/LICENSE"
 cp -R "$root/macos/Resources/Terminal" "$app/Contents/Resources/"
 signer="${SSH_MANAGER_SIGN_IDENTITY:--}"
 if [[ "$signer" == "-" ]]; then
