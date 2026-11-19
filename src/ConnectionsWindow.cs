@@ -12,7 +12,10 @@ namespace SshManager
 {
     internal sealed class ConnectionsWindow : ThemedForm
     {
-        private const string FilesColumn = "FilesAction", TerminalColumn = "TerminalAction";
+        private const string PortColumn = "Port", FilesColumn = "FilesAction", TerminalColumn = "TerminalAction";
+        private const int ActionOuterPadding = 5, ActionInnerPadding = 7, ActionIcon = 16, ActionGap = 6;
+        private const TextFormatFlags ActionText = TextFormatFlags.VerticalCenter | TextFormatFlags.SingleLine |
+            TextFormatFlags.NoPadding | TextFormatFlags.EndEllipsis | TextFormatFlags.NoPrefix | TextFormatFlags.PreserveGraphicsClipping;
         private readonly Dictionary<string, SftpWindow> fileWindows = new Dictionary<string, SftpWindow>(StringComparer.Ordinal);
         private readonly string sshDirectory;
         private readonly ConfigFile file;
@@ -810,7 +813,7 @@ namespace SshManager
             list.Columns.Add(MakeColumn("Псевдоним", 30, 103));
             list.Columns.Add(MakeColumn("Адрес", 34, 105));
             list.Columns.Add(MakeColumn("Пользователь", 23, 103));
-            list.Columns.Add(new DataGridViewTextBoxColumn { HeaderText = "Порт", Width = 60, SortMode = DataGridViewColumnSortMode.NotSortable });
+            list.Columns.Add(new DataGridViewTextBoxColumn { Name = PortColumn, HeaderText = "Порт", Width = 64, SortMode = DataGridViewColumnSortMode.NotSortable });
             list.Columns.Add(MakeColumn("Вкладка", 22, 79));
             list.Columns.Add(new DataGridViewButtonColumn
             {
@@ -821,7 +824,34 @@ namespace SshManager
                 Name = TerminalColumn, HeaderText = "Терминал",
                 Width = 159, FlatStyle = FlatStyle.Flat, Resizable = DataGridViewTriState.False
             });
+            list.HandleCreated += (sender, args) => FitGridColumns(list, list.DeviceDpi);
+            list.FontChanged += (sender, args) => FitGridColumns(list, list.DeviceDpi);
+            list.DpiChangedAfterParent += (sender, args) => FitGridColumns(list, list.DeviceDpi);
             return list;
+        }
+
+        private static int GridPixels(int logical, int dpi) => Math.Max(1, (logical * dpi + 48) / 96);
+
+        private static void FitGridColumns(DataGridView list, int dpi)
+        {
+            if (!list.IsHandleCreated || list.IsDisposed) return;
+            using (var graphics = list.CreateGraphics())
+            {
+                var unlimited = new Size(Int32.MaxValue, Int32.MaxValue);
+                int portText = TextRenderer.MeasureText(graphics, "65535", list.Font, unlimited, TextFormatFlags.SingleLine).Width;
+                int portWidth = Math.Max(GridPixels(64, dpi), portText + list.DefaultCellStyle.Padding.Horizontal + GridPixels(4, dpi));
+                var port = list.Columns[PortColumn];
+                bool standardWidth = port.Width <= port.MinimumWidth;
+                port.MinimumWidth = portWidth;
+                if (standardWidth) port.Width = portWidth;
+
+                int padding = GridPixels(ActionIcon, dpi) + GridPixels(ActionGap, dpi) +
+                    2 * (GridPixels(ActionOuterPadding, dpi) + GridPixels(ActionInnerPadding, dpi));
+                int WidthFor(string text, int minimum) => Math.Max(GridPixels(minimum, dpi),
+                    TextRenderer.MeasureText(graphics, text, Theme.Emphasis, unlimited, ActionText).Width + padding + GridPixels(2, dpi));
+                list.Columns[FilesColumn].Width = WidthFor("Файлы", 100);
+                list.Columns[TerminalColumn].Width = Math.Max(WidthFor("Подключиться", 159), WidthFor("К сеансу · 999", 159));
+            }
         }
 
         private static DataGridViewTextBoxColumn MakeColumn(string label, float weight, int minimum)
@@ -837,11 +867,12 @@ namespace SshManager
             args.Paint(args.ClipBounds, DataGridViewPaintParts.Background | DataGridViewPaintParts.SelectionBackground | DataGridViewPaintParts.Border);
             var box = args.CellBounds;
             var graphics = args.Graphics;
-            var mode = graphics.SmoothingMode;
+            var previous = graphics.Save();
+            graphics.SetClip(box, CombineMode.Intersect);
             graphics.SmoothingMode = SmoothingMode.AntiAlias;
             int scale = DeviceDpi;
-            int iconSize = 16 * scale / 96;
-            int inset = 9 * scale / 96;
+            int iconSize = GridPixels(ActionIcon, scale);
+            int inset = GridPixels(9, scale);
             string content = Convert.ToString(args.FormattedValue);
             if (args.ColumnIndex == 0)
             {
@@ -851,15 +882,22 @@ namespace SshManager
             }
             else
             {
-                var pill = Rectangle.Inflate(box, -inset, -(box.Height / 6));
-                using (var path = Theme.Round(pill, Math.Max(3, inset - 2)))
-                using (var fill = new SolidBrush(Theme.Mint)) graphics.FillPath(fill, path);
-                graphics.DrawImage(Theme.Icon(column.Name == FilesColumn ? Glyph.Folder : Glyph.Terminal, Theme.Teal),
-                    new Rectangle(pill.Left + inset, box.Top + (box.Height - iconSize) / 2, iconSize, iconSize));
-                var text = new Rectangle(pill.Left + iconSize + inset * 2, pill.Top, pill.Width - iconSize - inset * 2, pill.Height);
-                TextRenderer.DrawText(graphics, content, Theme.Emphasis, text, Theme.Teal, TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis | TextFormatFlags.NoPrefix);
+                int outside = GridPixels(ActionOuterPadding, scale), inside = GridPixels(ActionInnerPadding, scale),
+                    gap = GridPixels(ActionGap, scale);
+                var pill = Rectangle.Inflate(box, -outside, -(box.Height / 6));
+                if (pill.Width > 2 && pill.Height > 2)
+                {
+                    int radius = Math.Min(GridPixels(7, scale), Math.Min(pill.Width, pill.Height) / 2);
+                    using (var path = Theme.Round(pill, radius))
+                    using (var fill = new SolidBrush(Theme.Mint)) graphics.FillPath(fill, path);
+                    graphics.DrawImage(Theme.Icon(column.Name == FilesColumn ? Glyph.Folder : Glyph.Terminal, Theme.Teal),
+                        new Rectangle(pill.Left + inside, pill.Top + (pill.Height - iconSize) / 2, iconSize, iconSize));
+                    var text = new Rectangle(pill.Left + inside + iconSize + gap, pill.Top,
+                        Math.Max(0, pill.Width - iconSize - gap - 2 * inside), pill.Height);
+                    TextRenderer.DrawText(graphics, content, Theme.Emphasis, text, Theme.Teal, ActionText);
+                }
             }
-            graphics.SmoothingMode = mode;
+            graphics.Restore(previous);
             args.Paint(args.ClipBounds, DataGridViewPaintParts.Focus);
             args.Handled = true;
         }

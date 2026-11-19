@@ -324,6 +324,14 @@ namespace SshManager
             return path;
         }
 
+        public static Rectangle OutlineBounds(Rectangle bounds, int dpi)
+        {
+            // Leave room for both halves of the antialiased stroke.
+            int inset = Math.Max(1, (dpi + 95) / 96);
+            return new Rectangle(bounds.X + inset, bounds.Y + inset,
+                bounds.Width - inset * 2 - 1, bounds.Height - inset * 2 - 1);
+        }
+
         public static bool IsFileError(Exception exception)
         {
             return exception is IOException || exception is UnauthorizedAccessException || exception is System.Security.SecurityException;
@@ -379,10 +387,10 @@ namespace SshManager
         protected override void OnPaint(PaintEventArgs e)
         {
             if (Width < 10 || Height < 10) return;
-            var area = new Rectangle(0, 0, Width - 1, Height - 1);
             var graphics = e.Graphics;
             graphics.Clear(BackColor);
-            graphics.SetClip(area, CombineMode.Intersect);
+            var area = Theme.OutlineBounds(ClientRectangle, DeviceDpi);
+            if (area.Width < 2 || area.Height < 2) return;
             graphics.SmoothingMode = SmoothingMode.AntiAlias;
             bool primary = style == ButtonStyle.Primary;
             bool selected = style == ButtonStyle.SelectedTab;
@@ -394,9 +402,9 @@ namespace SshManager
             else if (selected) fill = Theme.Mint;
             else if (hover && Enabled) fill = Theme.Selection;
             else if (outline) fill = Theme.Surface;
-            using (var path = Theme.Round(area, Math.Min(7 * DeviceDpi / 96, Math.Min(Width, Height) / 2 - 1)))
+            using (var path = Theme.Round(area, Math.Min(7 * DeviceDpi / 96, Math.Min(area.Width, area.Height) / 2)))
             using (var brush = new SolidBrush(fill))
-            using (var border = new Pen(Focused && ShowFocusCues ? Theme.Teal : Theme.Line))
+            using (var border = new Pen(Focused && ShowFocusCues ? Theme.Teal : Theme.Line, DeviceDpi / 96f))
             {
                 graphics.FillPath(brush, path);
                 if (outline || (Focused && ShowFocusCues)) graphics.DrawPath(border, path);
@@ -459,12 +467,13 @@ namespace SshManager
         {
             base.OnPaint(e);
             if (Width < 10 || Height < 10) return;
-            var box = new Rectangle(0, 0, Width - 1, Height - 1);
+            var box = Theme.OutlineBounds(ClientRectangle, DeviceDpi);
+            if (box.Width < 2 || box.Height < 2) return;
             e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
             using (var outside = new SolidBrush(Theme.Canvas)) e.Graphics.FillRectangle(outside, ClientRectangle);
             using (var fill = new SolidBrush(Theme.Surface))
-            using (var outline = new Pen(Input.Focused ? Theme.Teal : Theme.Line))
-            using (var path = Theme.Round(box, 7 * DeviceDpi / 96))
+            using (var outline = new Pen(Input.Focused ? Theme.Teal : Theme.Line, DeviceDpi / 96f))
+            using (var path = Theme.Round(box, Math.Min(7 * DeviceDpi / 96, Math.Min(box.Width, box.Height) / 2)))
             {
                 e.Graphics.FillPath(fill, path);
                 e.Graphics.DrawPath(outline, path);
