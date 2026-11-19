@@ -1,12 +1,16 @@
 # SSH Manager
 
-Нативный менеджер SSH и SFTP для Windows 10 версии 1809 и новее и Windows 11. Сохраняйте серверы по вкладкам, переключайтесь между терминалами и копируйте файлы в двухпанельном окне.
-
-[Отдельная версия для Linux на GTK](linux/README.md).
+Нативный менеджер SSH и SFTP для Windows, Linux и macOS. Сохраняйте серверы по вкладкам, переключайтесь между терминалами и копируйте файлы в двухпанельном окне.
 
 ## Скачать
 
-[Установщик MSI](https://github.com/Clarkufa/sshmanager/releases/latest/download/SshManagerSetup.msi) · [Переносной EXE](https://github.com/Clarkufa/sshmanager/releases/latest/download/SshManager.exe) · [Все релизы](https://github.com/Clarkufa/sshmanager/releases)
+- **Windows 10 (1809 и новее) и 11** — [установщик MSI](https://github.com/Clarkufa/sshmanager/releases/latest/download/SshManagerSetup.msi) · [переносной EXE](https://github.com/Clarkufa/sshmanager/releases/latest/download/SshManager.exe)
+- **Linux** — [релиз с DEB и TAR.GZ](https://github.com/Clarkufa/sshmanager/releases/tag/linux-v1.8.0) · [документация Linux](linux/README.md)
+- **macOS 14 и новее** — [универсальный DMG для Apple Silicon и Intel](https://github.com/Clarkufa/sshmanager/releases/download/macos-v1.0.0/SSH-Manager-macOS.dmg) · [документация macOS](macos/README.md)
+
+[Все релизы](https://github.com/Clarkufa/sshmanager/releases)
+
+## Версия для Windows
 
 Начиная с версии 1.8.0 приложение проверяет наличие новой стабильной версии при запуске. В каталоге также есть кнопка «Обновления». После скачивания проверяется SHA‑256 из GitHub Releases, затем менеджер запрашивает подтверждение установки и перезапуска. Установленная версия обновляется через Windows Installer, переносная заменяет свой EXE.
 
