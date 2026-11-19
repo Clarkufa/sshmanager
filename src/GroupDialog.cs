@@ -13,7 +13,7 @@ namespace SshManager
 
     internal class NameDialog : ThemedForm
     {
-        public NameDialog(string title, string labelText, string value, string commitText, Action<string> save)
+        public NameDialog(string title, string labelText, string value, string commitText, Action<string> save, int maxLength = 32)
         {
             Text = title;
             Font = Theme.Body;
@@ -31,7 +31,7 @@ namespace SshManager
             layout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
             layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 38));
             var label = new Label { Text = labelText, AutoSize = true, Font = Theme.Emphasis, Margin = new Padding(0) };
-            var name = new TextBox { AccessibleName = labelText, Text = value ?? "", Dock = DockStyle.Fill, MaxLength = 32, Margin = new Padding(0) };
+            var name = new TextBox { AccessibleName = labelText, Text = value ?? "", Dock = DockStyle.Fill, MaxLength = maxLength, Margin = new Padding(0) };
             layout.Controls.Add(label, 0, 0);
             layout.Controls.Add(Theme.Frame(name, new Padding(0, 0, 0, 4)), 0, 1);
             var actions = new FlowLayoutPanel { Dock = DockStyle.Fill, FlowDirection = FlowDirection.RightToLeft, WrapContents = false, Margin = new Padding(0) };

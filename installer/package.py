@@ -60,7 +60,7 @@ def setup_dialogs():
 def package(app, output, file_version):
     product_version = ".".join(file_version.split(".")[:3])
     # Stable for this release. Change ProductCode when publishing a new product version.
-    product = "{9CB8F93C-824A-4F68-8498-2EF8FE42DEF2}"
+    product = "{C9D54CE3-0C94-4C9D-B5BE-42429635184A}"
     upgrade = "{7EDB1B69-D679-4CE9-9AF4-5EE3D7BC3E0D}"
     file_id = "AppExecutable"
 

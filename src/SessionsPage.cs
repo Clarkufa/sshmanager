@@ -112,7 +112,7 @@ namespace SshManager
         private readonly TextBox search;
         private readonly ListBox list;
         private readonly Label count, selectedTitle, selectedDetail, empty;
-        private readonly Button duplicate, close;
+        private readonly Button duplicate, close, files;
         private readonly SurfaceButton themeButton;
         private readonly ContextMenuStrip sessionMenu;
         private readonly Timer timer;
@@ -124,6 +124,7 @@ namespace SshManager
         public event Action ShowServers;
         public event Action PickServer;
         public event Action ThemeRequested;
+        public event Action<SessionTarget> ShowFiles;
 
         public SessionsPage(Func<SessionTarget, Size, PseudoTerminal> startProcess = null)
         {
@@ -201,6 +202,7 @@ namespace SshManager
             sessionMenu = Theme.Menu();
             sessionMenu.Items.Add(Theme.MenuItem("Переименовать сеанс", Glyph.Edit, (sender, args) => RenameActive()));
             sessionMenu.Items.Add(Theme.MenuItem("Новый сеанс этого сервера", Glyph.Plus, (sender, args) => DuplicateActive()));
+            sessionMenu.Items.Add(Theme.MenuItem("Файлы (SFTP)", Glyph.Folder, (sender, args) => OpenFiles()));
             var withoutForwarding = Theme.MenuItem("Новый сеанс без проброса портов", Glyph.Terminal,
                 (sender, args) => DuplicateActive(withoutForwarding: true));
             sessionMenu.Items.Add(withoutForwarding);
@@ -230,14 +232,16 @@ namespace SshManager
             selectedDetail = new Label { Dock = DockStyle.Fill, TextAlign = ContentAlignment.MiddleLeft, AutoEllipsis = true, ForeColor = Theme.Muted, Margin = new Padding(0) };
             info.Controls.Add(selectedTitle, 0, 0);
             info.Controls.Add(selectedDetail, 0, 1);
+            info.SetColumnSpan(selectedDetail, 2);
             var buttons = new FlowLayoutPanel { Anchor = AnchorStyles.Right, AutoSize = true, WrapContents = false, Margin = new Padding(0) };
             duplicate = Theme.Button("Новый сеанс этого сервера", 220, glyph: Glyph.Plus, quiet: true);
             duplicate.Click += (sender, args) => DuplicateActive();
+            files = Theme.Button("Файлы", 86, glyph: Glyph.Folder);
+            files.Click += (sender, args) => OpenFiles();
             close = Theme.Button("Закрыть", 81, danger: true, quiet: true);
             close.Click += (sender, args) => CloseActive();
-            buttons.Controls.AddRange(new Control[] { duplicate, close });
+            buttons.Controls.AddRange(new Control[] { files, duplicate, close });
             info.Controls.Add(buttons, 1, 0);
-            info.SetRowSpan(buttons, 2);
             workspace.Controls.Add(info, 0, 0);
 
             var display = new Panel { Dock = DockStyle.Fill, Margin = new Padding(0), BackColor = NativeTerminalView.Background };
@@ -370,8 +374,13 @@ namespace SshManager
                 (active.Target.Group.Length == 0 ? "" : "  ·  " + active.Target.Group) +
                 (active.ForwardingFailed ? "  ·  ошибка проброса порта" : active.Target.WithoutForwarding ? "  ·  без проброса" : "") +
                 (active.IsOpen ? "" : "  ·  завершён");
-            close.Enabled = duplicate.Enabled = active != null;
+            close.Enabled = duplicate.Enabled = files.Enabled = active != null;
             empty.Visible = active == null;
+        }
+
+        private void OpenFiles()
+        {
+            if (active != null) ShowFiles?.Invoke(active.Target);
         }
 
         private void DrawSession(object sender, DrawItemEventArgs args)

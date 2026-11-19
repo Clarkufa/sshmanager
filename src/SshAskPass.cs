@@ -41,7 +41,7 @@ namespace SshManager
             set("SSH_ASKPASS", Application.ExecutablePath);
             set("SSH_ASKPASS_REQUIRE", "force");
             set(SessionVariable, session);
-            set(AccountVariable, target.Account);
+            set(AccountVariable, target?.Account ?? "");
             set(ThemeVariable, Theme.IsDark ? "1" : "0");
         }
 
@@ -103,7 +103,7 @@ namespace SshManager
             bool password = displayPrompt == account + "'s password:" ||
                 displayPrompt.Equals("(" + account + ") Password:", StringComparison.OrdinalIgnoreCase) ||
                 displayPrompt.Equals("Password:", StringComparison.OrdinalIgnoreCase);
-            if (password && TryReply(session))
+            if (password && !String.IsNullOrEmpty(account) && TryReply(session))
             {
                 code = 0;
                 return true;

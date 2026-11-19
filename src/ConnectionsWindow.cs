@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Drawing;
 using System.Drawing.Drawing2D;
 using System.IO;
@@ -10,6 +11,8 @@ namespace SshManager
 {
     internal sealed class ConnectionsWindow : ThemedForm
     {
+        private const string FilesColumn = "FilesAction", TerminalColumn = "TerminalAction";
+        private readonly Dictionary<string, SftpWindow> fileWindows = new Dictionary<string, SftpWindow>(StringComparer.Ordinal);
         private readonly string sshDirectory;
         private readonly ConfigFile file;
         private readonly GroupFile groupFile;
@@ -139,12 +142,12 @@ namespace SshManager
             grid.SelectionChanged += (sender, args) => UpdateActions();
             grid.CellMouseClick += (sender, args) =>
             {
-                if (args.Button == MouseButtons.Left && args.RowIndex >= 0 && args.ColumnIndex == grid.Columns.Count - 1)
-                    Connect((Connection)grid.Rows[args.RowIndex].Tag);
+                if (args.Button == MouseButtons.Left && args.RowIndex >= 0 && args.ColumnIndex >= 0)
+                    RunGridAction(grid.Columns[args.ColumnIndex], (Connection)grid.Rows[args.RowIndex].Tag);
             };
             grid.CellDoubleClick += (sender, args) =>
             {
-                if (args.RowIndex >= 0 && args.ColumnIndex >= 0 && args.ColumnIndex < grid.Columns.Count - 1)
+                if (args.RowIndex >= 0 && args.ColumnIndex >= 0 && !(grid.Columns[args.ColumnIndex] is DataGridViewButtonColumn))
                     EditConnection((Connection)grid.Rows[args.RowIndex].Tag);
             };
             grid.CellPainting += PaintGridCell;
@@ -157,10 +160,10 @@ namespace SshManager
             grid.KeyDown += (sender, args) =>
             {
                 if (Selected == null) return;
-                if ((args.KeyCode == Keys.Enter || args.KeyCode == Keys.Space) && grid.CurrentCell.ColumnIndex == grid.Columns.Count - 1)
+                if ((args.KeyCode == Keys.Enter || args.KeyCode == Keys.Space) &&
+                    RunGridAction(grid.CurrentCell.OwningColumn, Selected))
                 {
                     args.Handled = args.SuppressKeyPress = true;
-                    Connect(Selected);
                     return;
                 }
                 if (!IsMenuKey(args)) return;
@@ -176,6 +179,7 @@ namespace SshManager
             {
                 Theme.MenuItem("Подключиться", Glyph.Terminal, (sender, args) => Connect(menuConnection)),
                 Theme.MenuItem("Новый сеанс", Glyph.Plus, (sender, args) => Connect(menuConnection, forceNew: true)),
+                Theme.MenuItem("Файлы (SFTP)", Glyph.Folder, (sender, args) => OpenFiles(menuConnection)),
                 Theme.MenuItem("Открыть в Windows Terminal", Glyph.Terminal, (sender, args) => ConnectExternal(menuConnection)),
                 Theme.MenuItem("Изменить", Glyph.Edit, (sender, args) => EditConnection(menuConnection)),
                 moveMenu,
@@ -267,6 +271,7 @@ namespace SshManager
             Theme.Apply(this);
             Theme.RefreshSwitcher(themeButton);
             sessions?.RefreshThemeButton();
+            foreach (var window in fileWindows.Values) Theme.Apply(window);
         }
 
         private void RefreshList(string selectAlias)
@@ -285,7 +290,8 @@ namespace SshManager
                 var groupName = group == null ? "" : group.Name;
                 if (query.Length > 0 && !new[] { connection.Alias, host, user, groupName }.Any(text => text.IndexOf(query, StringComparison.OrdinalIgnoreCase) >= 0)) continue;
                 var port = connection.Get("port");
-                var row = grid.Rows[grid.Rows.Add(connection.Alias, Dash(host), Dash(user), Dash(port), Dash(groupName), SessionAction(connection))];
+                var row = grid.Rows[grid.Rows.Add(connection.Alias, Dash(host), Dash(user), Dash(port), Dash(groupName),
+                    "Файлы", SessionAction(connection))];
                 row.Tag = connection;
                 if (String.Equals(selectAlias, connection.Alias, StringComparison.Ordinal)) toSelect = row;
             }
@@ -602,11 +608,50 @@ namespace SshManager
             catch (IOException ex) { Theme.ShowError(this, ex); }
         }
 
+        private bool RunGridAction(DataGridViewColumn column, Connection connection)
+        {
+            if (column.Name == FilesColumn) OpenFiles(connection);
+            else if (column.Name == TerminalColumn) Connect(connection);
+            else return false;
+            return true;
+        }
+
+        private void OpenFiles(Connection connection)
+        {
+            if (connection != null) OpenFiles(new SessionTarget(connection, groups.ForAlias(connection.Alias)));
+        }
+
+        private void OpenFiles(SessionTarget target)
+        {
+            string id = target.Alias + "\n" + target.Address;
+            if (fileWindows.TryGetValue(id, out var open))
+            {
+                if (open.WindowState == FormWindowState.Minimized) open.WindowState = FormWindowState.Normal;
+                open.Show();
+                open.Activate();
+                return;
+            }
+            string config = Path.Combine(sshDirectory, "config");
+            var window = new SftpWindow(target, () =>
+            {
+                var entry = new ConfigFile(config).Load().Connections().FirstOrDefault(item =>
+                    String.Equals(item.Alias, target.Alias, StringComparison.OrdinalIgnoreCase) &&
+                    new SessionTarget(item, null).Address == target.Address);
+                if (entry == null) throw new IOException("Профиль сервера изменился. Откройте «Файлы» из каталога подключений.");
+                var configOverride = String.Equals(sshDirectory, Terminal.SshDirectory, StringComparison.OrdinalIgnoreCase) ? null : config;
+                return new SftpClient(target.Alias, PasswordTarget.From(entry), configOverride);
+            });
+            fileWindows.Add(id, window);
+            window.FormClosed += (sender, args) => fileWindows.Remove(id);
+            window.Show(this);
+        }
+
         private SessionsPage SessionWorkspace()
         {
             if (sessions != null) return sessions;
             sessions = new SessionsPage { Visible = false };
             sessions.ThemeRequested += ToggleTheme;
+            sessions.ShowFiles += OpenFiles;
             sessions.PickServer += () =>
             {
                 var connections = document == null ? new Connection[0] : document.Connections().ToArray();
@@ -625,7 +670,7 @@ namespace SshManager
                 sessionsButton.Text = open == 0 ? "Сеансы" : "Сеансы · " + open;
                 sessionsButton.AccessibleName = sessionsButton.Text;
                 foreach (DataGridViewRow row in grid.Rows)
-                    if (row.Tag is Connection) row.Cells[grid.Columns.Count - 1].Value = SessionAction((Connection)row.Tag);
+                    if (row.Tag is Connection) row.Cells[TerminalColumn].Value = SessionAction((Connection)row.Tag);
             };
             Controls.Add(sessions);
             return sessions;
@@ -675,14 +720,18 @@ namespace SshManager
                 RowsDefaultCellStyle = new DataGridViewCellStyle { BackColor = Theme.Surface, ForeColor = Theme.Ink,
                     SelectionBackColor = Theme.Selection, SelectionForeColor = Theme.Ink }
             };
-            list.Columns.Add(MakeColumn("Псевдоним", 30, 114));
+            list.Columns.Add(MakeColumn("Псевдоним", 30, 103));
             list.Columns.Add(MakeColumn("Адрес", 34, 105));
-            list.Columns.Add(MakeColumn("Пользователь", 23, 110));
+            list.Columns.Add(MakeColumn("Пользователь", 23, 103));
             list.Columns.Add(new DataGridViewTextBoxColumn { HeaderText = "Порт", Width = 60, SortMode = DataGridViewColumnSortMode.NotSortable });
-            list.Columns.Add(MakeColumn("Вкладка", 22, 94));
+            list.Columns.Add(MakeColumn("Вкладка", 22, 79));
             list.Columns.Add(new DataGridViewButtonColumn
             {
-                HeaderText = "Терминал",
+                Name = FilesColumn, HeaderText = "SFTP", Width = 100, FlatStyle = FlatStyle.Flat, Resizable = DataGridViewTriState.False
+            });
+            list.Columns.Add(new DataGridViewButtonColumn
+            {
+                Name = TerminalColumn, HeaderText = "Терминал",
                 Width = 159, FlatStyle = FlatStyle.Flat, Resizable = DataGridViewTriState.False
             });
             return list;
@@ -695,7 +744,9 @@ namespace SshManager
         }
         private void PaintGridCell(object sender, DataGridViewCellPaintingEventArgs args)
         {
-            if (args.RowIndex < 0 || (args.ColumnIndex != 0 && args.ColumnIndex != grid.Columns.Count - 1)) return;
+            if (args.RowIndex < 0 || args.ColumnIndex < 0) return;
+            var column = grid.Columns[args.ColumnIndex];
+            if (args.ColumnIndex != 0 && !(column is DataGridViewButtonColumn)) return;
             args.Paint(args.ClipBounds, DataGridViewPaintParts.Background | DataGridViewPaintParts.SelectionBackground | DataGridViewPaintParts.Border);
             var box = args.CellBounds;
             var graphics = args.Graphics;
@@ -716,7 +767,8 @@ namespace SshManager
                 var pill = Rectangle.Inflate(box, -inset, -(box.Height / 6));
                 using (var path = Theme.Round(pill, Math.Max(3, inset - 2)))
                 using (var fill = new SolidBrush(Theme.Mint)) graphics.FillPath(fill, path);
-                graphics.DrawImage(Theme.Icon(Glyph.Terminal, Theme.Teal), new Rectangle(pill.Left + inset, box.Top + (box.Height - iconSize) / 2, iconSize, iconSize));
+                graphics.DrawImage(Theme.Icon(column.Name == FilesColumn ? Glyph.Folder : Glyph.Terminal, Theme.Teal),
+                    new Rectangle(pill.Left + inset, box.Top + (box.Height - iconSize) / 2, iconSize, iconSize));
                 var text = new Rectangle(pill.Left + iconSize + inset * 2, pill.Top, pill.Width - iconSize - inset * 2, pill.Height);
                 TextRenderer.DrawText(graphics, content, Theme.Emphasis, text, Theme.Teal, TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis | TextFormatFlags.NoPrefix);
             }
