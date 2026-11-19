@@ -10,6 +10,15 @@ const terminal = new Terminal({
 const fit = new FitAddon.FitAddon();
 terminal.loadAddon(fit);
 terminal.open(element);
+element.addEventListener("mousedown", event => {
+    const secondaryClick = event.button === 2 || (event.button === 0 && event.ctrlKey);
+    if (!secondaryClick || (terminal.modes.mouseTrackingMode !== "none" && !event.shiftKey)) return;
+    event.preventDefault();
+    event.stopPropagation();
+    terminal.focus();
+    post("paste");
+}, {capture: true});
+element.addEventListener("contextmenu", event => event.preventDefault());
 terminal.attachCustomKeyEventHandler(event => {
     if (!event.metaKey) return true;
     if (event.type !== "keydown") return false;

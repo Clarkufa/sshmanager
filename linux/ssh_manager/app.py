@@ -133,6 +133,7 @@ class Shell(Gtk.Box):
         self.live = True
         self.broker = None
         self.closed = False
+        self.shift_paste_held = False
         bar = Gtk.Box(spacing=8)
         title = Gtk.Label(label=profile.address, xalign=0, ellipsize=Pango.EllipsizeMode.END)
         title.get_style_context().add_class("section-title")
@@ -151,6 +152,10 @@ class Shell(Gtk.Box):
         self.terminal.set_colors(foreground, background, [])
         self.terminal.connect("child-exited", self.exited)
         self.terminal.connect("key-press-event", self.shortcut)
+        self.terminal.connect("button-press-event", self.force_right_click)
+        self.terminal.connect("button-release-event", self.force_right_click)
+        # VTE handles mouse reporting first. Paste only if it leaves the click unhandled.
+        self.terminal.connect_after("button-press-event", self.right_click)
         scroll = Gtk.ScrolledWindow()
         scroll.add(self.terminal)
         self.pack_start(scroll, True, True, 0)
@@ -158,6 +163,25 @@ class Shell(Gtk.Box):
         self.show_all()
         self.terminal.grab_focus()
         threading.Thread(target=self.prepare, daemon=True).start()
+
+    def force_right_click(self, terminal, event):
+        if event.button != 3:
+            return False
+        if event.type == Gdk.EventType.BUTTON_RELEASE:
+            handled = self.shift_paste_held
+            self.shift_paste_held = False
+            return handled
+        if event.state & Gdk.ModifierType.SHIFT_MASK and self.right_click(terminal, event):
+            self.shift_paste_held = True
+            return True
+        return False
+
+    def right_click(self, terminal, event):
+        if event.type != Gdk.EventType.BUTTON_PRESS or event.button != 3 or not self.live or self.closed:
+            return False
+        terminal.grab_focus()
+        terminal.paste_clipboard()
+        return True
 
     def shortcut(self, terminal, event):
         needed = Gdk.ModifierType.CONTROL_MASK | Gdk.ModifierType.SHIFT_MASK

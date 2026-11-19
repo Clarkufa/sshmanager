@@ -33,7 +33,10 @@ struct SSHRequest {
     func environment(prompt: Bool) -> [String: String] {
         var env = ProcessInfo.processInfo.environment
         env["TERM"] = "xterm-256color"
-        env["LC_CTYPE"] = "UTF-8"
+        // macOS accepts this bare locale name, but OpenSSH may forward it to a server that doesn't.
+        if env["LC_CTYPE"]?.caseInsensitiveCompare("UTF-8") == .orderedSame {
+            env.removeValue(forKey: "LC_CTYPE")
+        }
         // Enable a native prompt for headless SFTP, or to use a saved password from the app.
         if prompt || passwordHost != nil, let executable = Bundle.main.executablePath {
             env["SSH_ASKPASS"] = executable

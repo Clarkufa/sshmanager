@@ -53,6 +53,7 @@ namespace SshManager
         private static readonly Color SelectedBackground = Color.FromArgb(43, 79, 98);
         private static readonly Color CursorColor = Color.FromArgb(144, 225, 199);
         private const int Inset = 10;
+        private const int WmContextMenu = 0x007B;
 
         private readonly Font normalFont, boldFont;
         private readonly StringFormat textFormat;
@@ -299,6 +300,13 @@ namespace SshManager
             args.Handled = true;
         }
 
+        protected override void WndProc(ref Message message)
+        {
+            // Pointer events are handled in OnMouseDown. Keep the keyboard context menu.
+            if (message.Msg == WmContextMenu && message.LParam != new IntPtr(-1)) return;
+            base.WndProc(ref message);
+        }
+
         protected override void OnMouseDown(MouseEventArgs args)
         {
             base.OnMouseDown(args);
@@ -308,6 +316,11 @@ namespace SshManager
             {
                 mouseButton = args.Button == MouseButtons.Left ? 0 : args.Button == MouseButtons.Middle ? 1 : args.Button == MouseButtons.Right ? 2 : -1;
                 if (mouseButton >= 0) ReportMouse(args.Location, mouseButton, false);
+                return;
+            }
+            if (args.Button == MouseButtons.Right)
+            {
+                Paste();
                 return;
             }
             if (args.Button != MouseButtons.Left) return;

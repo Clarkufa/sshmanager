@@ -215,7 +215,8 @@ final class TerminalSession: NSObject, ObservableObject, WKScriptMessageHandler,
         } else if type == "copy", let text = payload["text"] as? String, !text.isEmpty {
             NSPasteboard.general.clearContents()
             NSPasteboard.general.setString(text, forType: .string)
-        } else if type == "paste", let text = NSPasteboard.general.string(forType: .string) {
+        } else if type == "paste", exitCode == nil, channel != nil,
+                  let text = NSPasteboard.general.string(forType: .string), !text.isEmpty {
             Task { @MainActor [weak self] in
                 _ = try? await self?.view.callAsyncJavaScript("window.pasteTerminal(text);", arguments: ["text": text], in: nil, contentWorld: .page)
             }
