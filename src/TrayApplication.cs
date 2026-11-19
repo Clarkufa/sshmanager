@@ -49,9 +49,8 @@ namespace SshManager
     {
         private readonly Form window;
         private readonly ContextMenuStrip menu;
-        private readonly NotifyIcon notification;
+        private readonly TrayIcon notification;
         private FormWindowState restoreState;
-        private bool restorePending;
         private bool restoring;
 
         public TrayWindow(Form window)
@@ -62,25 +61,15 @@ namespace SshManager
             menu.Items.Add(Theme.MenuItem("Открыть SSH Manager", Glyph.Terminal, (sender, args) => RequestRestore()));
             menu.Items.Add(new ToolStripSeparator());
             menu.Items.Add("Выход", null, (sender, args) => Application.Exit());
-            notification = new NotifyIcon
-            {
-                Text = "SSH Manager", Icon = window.Icon ?? SystemIcons.Application, ContextMenuStrip = menu, Visible = true
-            };
-            notification.MouseClick += (sender, args) => { if (args.Button == MouseButtons.Left) RequestRestore(); };
+            notification = new TrayIcon(window.Icon ?? SystemIcons.Application, menu, Restore);
             window.Resize += OnResize;
             window.FormClosing += OnClosing;
         }
 
-        public void RequestRestore()
-        {
-            if (restorePending || !window.IsHandleCreated || window.IsDisposed || window.Disposing) return;
-            restorePending = true;
-            window.BeginInvoke((Action)Restore);
-        }
+        public void RequestRestore() => notification.RequestRestore();
 
         private void Restore()
         {
-            restorePending = false;
             if (window.IsDisposed || window.Disposing) return;
             var state = restoreState;
             restoring = true;
@@ -94,18 +83,56 @@ namespace SshManager
                     const int restore = 9;
                     ShowWindow(window.Handle, state == FormWindowState.Maximized ? showMaximized : restore);
                 }
+                BringOntoScreen(window);
             }
             finally { restoring = false; }
             var modal = Application.OpenForms.Cast<Form>().LastOrDefault(form => form.Visible && form.Modal);
             var target = modal ?? window;
+            if (modal != null) BringOntoScreen(modal);
             target.Activate();
-            SetForegroundWindow(target.Handle);
+            if (!SetForegroundWindow(target.Handle))
+            {
+                // Restore the Z order without making the window permanently topmost.
+                const uint noSize = 0x0001, noMove = 0x0002, noActivate = 0x0010;
+                SetWindowPos(target.Handle, IntPtr.Zero, 0, 0, 0, 0, noSize | noMove | noActivate);
+                var attention = new FlashInfo
+                {
+                    Size = (uint)Marshal.SizeOf(typeof(FlashInfo)), Window = window.Handle, Flags = 2, Count = 3
+                };
+                FlashWindowEx(ref attention);
+            }
+        }
+
+        private static void BringOntoScreen(Form form)
+        {
+            Rectangle bounds = form.Bounds;
+            var caption = new Rectangle(bounds.X, bounds.Y, bounds.Width, Math.Min(bounds.Height, SystemInformation.CaptionHeight + 12));
+            foreach (var screen in Screen.AllScreens)
+            {
+                var visible = Rectangle.Intersect(screen.WorkingArea, caption);
+                if (visible.Width >= Math.Min(64, caption.Width) && visible.Height >= Math.Min(12, caption.Height))
+                    return;
+            }
+
+            var work = Screen.FromPoint(Cursor.Position).WorkingArea;
+            var state = form.WindowState;
+            if (state == FormWindowState.Maximized)
+            {
+                form.WindowState = FormWindowState.Normal;
+                bounds = form.Bounds;
+            }
+            form.Location = new Point(work.X + Math.Max(0, (work.Width - bounds.Width) / 2),
+                work.Y + Math.Max(0, (work.Height - bounds.Height) / 2));
+            if (state == FormWindowState.Maximized) form.WindowState = state;
         }
 
         private void OnResize(object sender, EventArgs args)
         {
             if (restoring) return;
-            if (window.WindowState == FormWindowState.Minimized) window.Hide();
+            if (window.WindowState == FormWindowState.Minimized)
+            {
+                if (notification.EnsureRegistered()) window.Hide();
+            }
             else restoreState = window.WindowState;
         }
 
@@ -113,7 +140,8 @@ namespace SshManager
         {
             if (args.CloseReason != CloseReason.UserClosing) return;
             args.Cancel = true;
-            window.Hide();
+            if (notification.EnsureRegistered()) window.Hide();
+            else window.WindowState = FormWindowState.Minimized;
         }
 
         public void Dispose()
@@ -132,6 +160,20 @@ namespace SshManager
 
         [DllImport("user32.dll")]
         private static extern bool SetForegroundWindow(IntPtr hwnd);
+
+        [DllImport("user32.dll")]
+        private static extern bool SetWindowPos(IntPtr hwnd, IntPtr insertAfter, int x, int y, int width, int height, uint flags);
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct FlashInfo
+        {
+            public uint Size;
+            public IntPtr Window;
+            public uint Flags, Count, Timeout;
+        }
+
+        [DllImport("user32.dll")]
+        private static extern bool FlashWindowEx(ref FlashInfo info);
     }
 
     internal sealed class ActivationWindow : NativeWindow, IDisposable
