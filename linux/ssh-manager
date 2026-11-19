@@ -1,0 +1,20 @@
+#!/usr/bin/python3
+import os
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+if __name__ == "__main__":
+    if sys.argv[1:] == ["--version"]:
+        from ssh_manager import VERSION
+
+        print(VERSION)
+        sys.exit(0)
+    if len(sys.argv) == 2 and os.environ.get("SSH_MANAGER_ASKPASS"):
+        from ssh_manager.auth import askpass
+
+        sys.exit(askpass(sys.argv[1]))
+    from ssh_manager.app import main
+
+    sys.exit(main())

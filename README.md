@@ -2,6 +2,8 @@
 
 Нативный менеджер SSH и SFTP для Windows 10 версии 1809 и новее и Windows 11. Сохраняйте серверы по вкладкам, переключайтесь между терминалами и копируйте файлы в двухпанельном окне.
 
+[Отдельная версия для Linux на GTK](linux/README.md).
+
 ## Скачать
 
 [Установщик MSI](https://github.com/Clarkufa/sshmanager/releases/latest/download/SshManagerSetup.msi) · [Переносной EXE](https://github.com/Clarkufa/sshmanager/releases/latest/download/SshManager.exe) · [Все релизы](https://github.com/Clarkufa/sshmanager/releases)

@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=SSH Manager
+Comment=SSH and SFTP connection manager
+Comment[ru]=Менеджер подключений SSH и SFTP
+Exec=ssh-manager
+Icon=ssh-manager
+Terminal=false
+StartupNotify=true
+Categories=Network;RemoteAccess;
+Keywords=SSH;SFTP;OpenSSH;Terminal;
