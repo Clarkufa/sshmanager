@@ -29,9 +29,11 @@ namespace SshManager
         private readonly SurfaceButton updateButton;
         private readonly CancellationTokenSource updateLifetime = new CancellationTokenSource();
         private AppUpdate availableUpdate;
+        private readonly Panel pages;
         private readonly TableLayoutPanel catalog;
         private readonly ContextMenuStrip backupMenu;
         private readonly BackupCommands backup;
+        private readonly Label source;
         private readonly Label status;
         private readonly Label empty;
         private readonly ContextMenuStrip serverMenu;
@@ -57,7 +59,7 @@ namespace SshManager
             catch (Exception ex) when (Theme.IsFileError(ex)) { /* Reload reports this when the window opens. */ }
             Theme.IsDark = groups.DarkTheme;
             backup = new BackupCommands(this, sshDirectory, groupsPath, () => Reload(openStartupTab: true));
-            Text = "SSH Manager";
+            Text = "SSH Manager " + AppUpdates.CurrentVersion.ToString(3);
             Icon = Icon.ExtractAssociatedIcon(Application.ExecutablePath);
             Font = Theme.Body;
             ForeColor = Theme.Ink;
@@ -68,14 +70,20 @@ namespace SshManager
             ClientSize = new Size(980, 570);
             MinimumSize = new Size(800, 480);
 
-            var layout = new TableLayoutPanel { Dock = DockStyle.Fill, Padding = new Padding(24, 15, 24, 13), ColumnCount = 1, RowCount = 5 };
+            var frame = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 2 };
+            frame.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+            frame.RowStyles.Add(new RowStyle(SizeType.Absolute, 47));
+            pages = new Panel { Dock = DockStyle.Fill, Margin = Padding.Empty };
+            frame.Controls.Add(pages, 0, 0);
+            Controls.Add(frame);
+
+            var layout = new TableLayoutPanel { Dock = DockStyle.Fill, Padding = new Padding(24, 15, 24, 0), ColumnCount = 1, RowCount = 4 };
             catalog = layout;
             layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 62));
             layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 49));
             layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 46));
             layout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
-            layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 32));
-            Controls.Add(layout);
+            pages.Controls.Add(layout);
 
             add = Theme.Button("Добавить сервер", 158, true, Glyph.Plus);
             add.Click += (sender, args) => EditConnection(null);
@@ -222,20 +230,22 @@ namespace SshManager
             list.Controls.Add(empty);
             empty.BringToFront();
 
-            var footer = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 3, Margin = new Padding(0) };
+            var footer = new TableLayoutPanel
+            {
+                Dock = DockStyle.Fill, ColumnCount = 3, Margin = Padding.Empty, Padding = new Padding(24, 0, 24, 5)
+            };
             footer.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
             footer.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
             footer.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
-            var source = new Label { Text = path, Dock = DockStyle.Fill, TextAlign = ContentAlignment.BottomLeft, AutoEllipsis = true, ForeColor = Theme.Muted, Margin = new Padding(0) };
-            status = new Label { Anchor = AnchorStyles.Bottom | AnchorStyles.Right, AutoSize = true, ForeColor = Theme.Muted, Margin = new Padding(10, 0, 0, 0) };
-            updateButton = Theme.Button("Обновления", 170, glyph: Glyph.Refresh, quiet: true);
-            updateButton.Height = 28;
-            updateButton.Anchor = AnchorStyles.Bottom | AnchorStyles.Right;
+            source = new Label { Text = path, Dock = DockStyle.Fill, TextAlign = ContentAlignment.MiddleLeft, AutoEllipsis = true, ForeColor = Theme.Muted, Margin = Padding.Empty };
+            status = new Label { Anchor = AnchorStyles.Right, AutoSize = true, ForeColor = Theme.Muted, Margin = new Padding(10, 0, 12, 0) };
+            updateButton = Theme.Button("Обновления", 170, glyph: Glyph.Refresh);
+            updateButton.Anchor = AnchorStyles.Right;
             updateButton.Click += async (sender, args) => await CheckUpdates(interactive: true);
             footer.Controls.Add(source, 0, 0);
-            footer.Controls.Add(updateButton, 1, 0);
-            footer.Controls.Add(status, 2, 0);
-            layout.Controls.Add(footer, 0, 4);
+            footer.Controls.Add(status, 1, 0);
+            footer.Controls.Add(updateButton, 2, 0);
+            frame.Controls.Add(footer, 0, 1);
 
             Shown += (sender, args) => Reload(openStartupTab: true);
             Shown += async (sender, args) => await CheckUpdates(interactive: false);
@@ -735,6 +745,8 @@ namespace SshManager
             {
                 sessions.Hide();
                 catalog.Show();
+                source.Show();
+                status.Show();
                 grid.Focus();
             };
             sessions.Changed += () =>
@@ -745,7 +757,7 @@ namespace SshManager
                 foreach (DataGridViewRow row in grid.Rows)
                     if (row.Tag is Connection) row.Cells[TerminalColumn].Value = SessionAction((Connection)row.Tag);
             };
-            Controls.Add(sessions);
+            pages.Controls.Add(sessions);
             return sessions;
         }
 
@@ -753,6 +765,8 @@ namespace SshManager
         {
             var workspace = SessionWorkspace();
             catalog.Hide();
+            source.Hide();
+            status.Hide();
             workspace.Show();
             workspace.BringToFront();
             workspace.FocusTerminal();
