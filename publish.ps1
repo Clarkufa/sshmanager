@@ -114,7 +114,7 @@ try {
         if ((Get-Item -LiteralPath $path).Length -eq 0) { throw "Release asset '$path' is empty." }
     }
 
-    gh release create $tag @upload --repo $repository --target $commit --title "SSH Manager $version" --notes-file $notes --draft --latest=false
+    gh release create $tag @upload --repo $repository --target $commit --title "SSH Manager $version - Windows, macOS, Linux" --notes-file $notes --draft --latest=false
     if ($LASTEXITCODE -ne 0) { throw "Could not create release draft $tag with all platform builds." }
 
     $draftJson = gh release view $tag --repo $repository --json isDraft,assets
