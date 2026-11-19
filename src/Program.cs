@@ -19,6 +19,8 @@ namespace SshManager
             if (SshAskPass.TryRun(args, out int code)) return code;
             if (args.Length == 3 && args[0] == "--terminal")
                 return Terminal.RunInConsole(args[1], args[2]);
+            if (args.Length > 0 && args[0] == "--apply-update")
+                return UpdateWorker.Apply(args);
             Application.EnableVisualStyles();
             Application.SetCompatibleTextRenderingDefault(false);
             var groups = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "SSH Manager", "tabs.xml");

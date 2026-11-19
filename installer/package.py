@@ -3,6 +3,7 @@
 from pathlib import Path
 import ctypes
 import sys
+import uuid
 from tempfile import TemporaryDirectory
 
 import msilib
@@ -59,9 +60,8 @@ def setup_dialogs():
 
 def package(app, output, file_version):
     product_version = ".".join(file_version.split(".")[:3])
-    # Stable for this release. Change ProductCode when publishing a new product version.
-    product = "{C9D54CE3-0C94-4C9D-B5BE-42429635184A}"
     upgrade = "{7EDB1B69-D679-4CE9-9AF4-5EE3D7BC3E0D}"
+    product = "{" + str(uuid.uuid5(uuid.UUID(upgrade), product_version)).upper() + "}"
     file_id = "AppExecutable"
 
     with TemporaryDirectory(dir=output.parent) as staging:
@@ -101,6 +101,7 @@ def package(app, output, file_version):
                 ("DesktopShortcut", "{65891664-0782-4E24-9625-F536DD0C67F4}", "DesktopFolder", 4, None, "DesktopShortcutKey"),
             ],
             "Registry": [("ShortcutKey", 1, r"Software\SshManager\Installer", "Shortcut", "#1", "MenuShortcut"),
+                         ("InstallPath", 1, r"Software\SshManager\Installer", "InstallPath", f"[#{file_id}]", "MenuShortcut"),
                          ("DesktopShortcutKey", 1, r"Software\SshManager\Installer", "DesktopShortcut", "#1", "DesktopShortcut")],
             "Feature": [("App", None, "SSH Manager", None, 1, 1, "INSTALLDIR", 0),
                         ("DesktopShortcut", "App", "Ярлык на рабочем столе", None, 0, 2, None, 0)],

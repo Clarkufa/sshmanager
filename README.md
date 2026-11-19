@@ -1,8 +1,12 @@
 # SSH Manager
 
-Лёгкий менеджер подключений для Windows 10 версии 1809 и новее и Windows 11. Для SSH нужен компонент «Клиент OpenSSH». Windows Terminal понадобится для команды «Открыть в Windows Terminal».
+Нативный менеджер SSH и SFTP для Windows 10 версии 1809 и новее и Windows 11. Сохраняйте серверы по вкладкам, переключайтесь между терминалами и копируйте файлы в двухпанельном окне.
 
-Скрипт сборки создаёт `SshManager.exe` и `SshManagerSetup.msi`. EXE можно запустить напрямую. Установщик ставит приложение для текущего пользователя, добавляет ярлык в меню «Пуск» и предлагает создать ярлык на рабочем столе. Закрепление на панели задач выполняется из меню приложения в «Пуск».
+## Скачать
+
+[Установщик MSI](https://github.com/Clarkufa/sshmanager/releases/latest/download/SshManagerSetup.msi) · [Переносной EXE](https://github.com/Clarkufa/sshmanager/releases/latest/download/SshManager.exe) · [Все релизы](https://github.com/Clarkufa/sshmanager/releases)
+
+Начиная с версии 1.8.0 приложение проверяет наличие новой стабильной версии при запуске. В каталоге также есть кнопка «Обновления». После скачивания проверяется SHA‑256 из GitHub Releases, затем менеджер запрашивает подтверждение установки и перезапуска. Установленная версия обновляется через Windows Installer, переносная заменяет свой EXE.
 
 ## Подключения и вкладки
 
@@ -46,8 +50,6 @@ SFTP использует настройки того же профиля OpenSS
 
 Встроенный терминал использует WinForms, Windows ConPTY и [VtNetCore](third_party/VtNetCore-LICENSE.txt). Исходники библиотеки закреплены архивом из коммита `4e723ac24e42316e533e6aa4c427ab5273077214` и компилируются вместе с приложением. При сборке парсер OSC дополняется поддержкой завершителя `ESC \`.
 
-## Иконка приложения
+## Публикация релиза
 
-Иконка создана встроенным ImageGen и сохранена в `assets/SshManager.ico`. Изображение для шапки находится в `assets/AppMark.png`.
-
-> Use case: logo-brand. Design one square application icon for a premium modern Windows SSH connection manager. A bold pale mint terminal prompt chevron and short cursor sit on a dark ink navy rounded square, with a restrained blue-to-teal beveled edge and subtle dimensional shading. Optical center, large confident shapes with high contrast, icon fills most of the square, no tiny details. The remaining space outside the rounded tile is true transparent alpha. Crisp, legible at 16 pixels. No lettering, no external shadow, no framing device, no mockup, no glossy chrome. A single finished asset.
+Обновите версию в `src/AssemblyInfo.cs` и `installer/app.manifest`, затем отправьте коммит в GitHub. Войдите через GitHub CLI и запустите `./publish.ps1 -NotesFile путь-к-описанию.md`. Скрипт соберёт MSI и EXE, сверит версию и опубликует оба файла в GitHub Releases с тегом этой версии.

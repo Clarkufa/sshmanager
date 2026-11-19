@@ -14,7 +14,7 @@ $framework = Join-Path $env:WINDIR 'Microsoft.NET\Framework64\v4.0.30319'
 if (-not (Test-Path -LiteralPath $framework)) {
     $framework = Join-Path $env:WINDIR 'Microsoft.NET\Framework\v4.0.30319'
 }
-$refs = 'mscorlib','System','System.Core','System.Drawing','System.Windows.Forms','System.Xml','System.Xml.Linq','System.IO.Compression' |
+$refs = 'mscorlib','System','System.Core','System.Drawing','System.Windows.Forms','System.Xml','System.Xml.Linq','System.IO.Compression','System.Runtime.Serialization' |
     ForEach-Object { '/reference:' + (Join-Path $framework ($_ + '.dll')) }
 
 $output = (New-Item -ItemType Directory -Path $OutputDirectory -Force).FullName

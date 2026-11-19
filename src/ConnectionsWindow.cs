@@ -4,6 +4,7 @@ using System.Drawing;
 using System.Drawing.Drawing2D;
 using System.IO;
 using System.Linq;
+using System.Threading;
 using System.Threading.Tasks;
 using System.Windows.Forms;
 
@@ -25,6 +26,9 @@ namespace SshManager
         private readonly Button sessionsButton;
         private readonly Button backupButton;
         private readonly SurfaceButton themeButton;
+        private readonly SurfaceButton updateButton;
+        private readonly CancellationTokenSource updateLifetime = new CancellationTokenSource();
+        private AppUpdate availableUpdate;
         private readonly TableLayoutPanel catalog;
         private readonly ContextMenuStrip backupMenu;
         private readonly BackupCommands backup;
@@ -218,19 +222,88 @@ namespace SshManager
             list.Controls.Add(empty);
             empty.BringToFront();
 
-            var footer = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2, Margin = new Padding(0) };
+            var footer = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 3, Margin = new Padding(0) };
             footer.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+            footer.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
             footer.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
             var source = new Label { Text = path, Dock = DockStyle.Fill, TextAlign = ContentAlignment.BottomLeft, AutoEllipsis = true, ForeColor = Theme.Muted, Margin = new Padding(0) };
             status = new Label { Anchor = AnchorStyles.Bottom | AnchorStyles.Right, AutoSize = true, ForeColor = Theme.Muted, Margin = new Padding(10, 0, 0, 0) };
+            updateButton = Theme.Button("Обновления", 170, glyph: Glyph.Refresh, quiet: true);
+            updateButton.Height = 28;
+            updateButton.Anchor = AnchorStyles.Bottom | AnchorStyles.Right;
+            updateButton.Click += async (sender, args) => await CheckUpdates(interactive: true);
             footer.Controls.Add(source, 0, 0);
-            footer.Controls.Add(status, 1, 0);
+            footer.Controls.Add(updateButton, 1, 0);
+            footer.Controls.Add(status, 2, 0);
             layout.Controls.Add(footer, 0, 4);
 
             Shown += (sender, args) => Reload(openStartupTab: true);
+            Shown += async (sender, args) => await CheckUpdates(interactive: false);
         }
 
         private Connection Selected { get { return grid.CurrentRow == null ? null : (Connection)grid.CurrentRow.Tag; } }
+
+        private async Task CheckUpdates(bool interactive)
+        {
+            if (!updateButton.Enabled) return;
+            updateButton.Enabled = false;
+            if (interactive) updateButton.Text = "Проверка…";
+            var token = updateLifetime.Token;
+            string staged = null;
+            try
+            {
+                availableUpdate = await Task.Run(() =>
+                {
+                    if (!interactive) UpdateWorker.CleanOldStages();
+                    return AppUpdates.Check(UpdateWorker.IsInstalled(Application.ExecutablePath), token);
+                });
+                if (IsDisposed || !interactive) return;
+                if (availableUpdate == null)
+                {
+                    MessageBox.Show(this, "Установлена актуальная версия " + AppUpdates.CurrentVersion.ToString(3) + ".",
+                        "Обновления", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                    return;
+                }
+
+                var update = availableUpdate;
+                using (var dialog = new UpdateDialog(update))
+                    if (dialog.ShowDialog(this) != DialogResult.OK) return;
+                var progress = new Progress<int>(percent =>
+                {
+                    if (!IsDisposed && !updateButton.Enabled) updateButton.Text = "Загрузка · " + percent + "%";
+                });
+                staged = await Task.Run(() => AppUpdates.Download(update, progress, token));
+                if (IsDisposed) return;
+                if (!backupButton.Enabled || Application.OpenForms.Cast<Form>().Any(window => window.Modal && window.Visible))
+                    throw new IOException("Завершите текущее действие перед установкой обновления.");
+
+                bool sessionsOpen = (sessions?.CountOpen() ?? 0) > 0 || fileWindows.Count > 0;
+                string message = "Установить версию " + update.Version.ToString(3) + " и перезапустить SSH Manager?";
+                if (sessionsOpen) message += "\n\nОткрытые сеансы SSH и окна SFTP будут закрыты.";
+                if (MessageBox.Show(this, message, "Установить обновление", MessageBoxButtons.YesNo,
+                    MessageBoxIcon.Question, MessageBoxDefaultButton.Button2) != DialogResult.Yes) return;
+
+                UpdateWorker.Schedule(update, staged);
+                staged = null;
+                Application.Exit();
+            }
+            catch (OperationCanceledException) { }
+            catch (Exception ex) when (Theme.IsFileError(ex) || ex is InvalidDataException || ex is System.Runtime.Serialization.SerializationException ||
+                ex is System.Xml.XmlException || ex is System.ComponentModel.Win32Exception)
+            {
+                if (interactive && !IsDisposed) Theme.ShowError(this, ex);
+            }
+            finally
+            {
+                if (staged != null) UpdateWorker.CleanStage(staged);
+                if (!IsDisposed)
+                {
+                    updateButton.Text = availableUpdate == null ? "Обновления" : "Обновить до " + availableUpdate.Version.ToString(3);
+                    updateButton.AccessibleName = updateButton.Text;
+                    updateButton.Enabled = true;
+                }
+            }
+        }
 
         private async Task RunBackup(Func<Task> action)
         {
@@ -781,6 +854,7 @@ namespace SshManager
         {
             if (disposing)
             {
+                updateLifetime.Cancel();
                 if (serverMenu != null) serverMenu.Dispose();
                 if (backupMenu != null) backupMenu.Dispose();
                 if (tabMenu != null) tabMenu.Dispose();
