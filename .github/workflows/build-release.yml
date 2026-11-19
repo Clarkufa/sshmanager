@@ -1,0 +1,64 @@
+name: Build release packages
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  windows:
+    runs-on: windows-2025
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: '3.12'
+      - name: Build MSI and portable EXE
+        shell: pwsh
+        run: ./build.ps1 -OutputDirectory build/release
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: windows-release
+          path: |
+            build/release/SshManagerSetup.msi
+            build/release/SshManager.exe
+          if-no-files-found: error
+
+  linux:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Build DEB and TAR.GZ
+        shell: bash
+        run: |
+          sh linux/build.sh build/linux
+          version="$(PYTHONPATH=linux python3 -B -c 'from ssh_manager import VERSION; print(VERSION)')"
+          mv "build/linux/ssh-manager-desktop_${version}_all.deb" build/linux/SSH-Manager-Linux.deb
+          mv "build/linux/ssh-manager-linux-${version}.tar.gz" build/linux/SSH-Manager-Linux.tar.gz
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: linux-release
+          path: |
+            build/linux/SSH-Manager-Linux.deb
+            build/linux/SSH-Manager-Linux.tar.gz
+          if-no-files-found: error
+
+  macos:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Build universal DMG
+        shell: bash
+        run: ./macos/build.sh build/macos
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: macos-release
+          path: build/macos/SSH-Manager-macOS.dmg
+          if-no-files-found: error
