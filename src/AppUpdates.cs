@@ -311,8 +311,8 @@ namespace SshManager
         private static int InstallMsi(string package, string destination, bool desktop)
         {
             var msi = Path.Combine(Environment.SystemDirectory, "msiexec.exe");
-            var arguments = "/i " + Terminal.Quote(package) + " /qb /norestart " +
-                Terminal.Quote("INSTALLDIR=" + Path.GetDirectoryName(destination)) + (desktop ? " DESKTOPSHORTCUT=1" : "");
+            var arguments = "/i " + Terminal.Quote(package) + " /qb /norestart INSTALLDIR=" +
+                Terminal.Quote(Path.GetDirectoryName(destination)) + (desktop ? " DESKTOPSHORTCUT=1" : "");
             using (var setup = Process.Start(new ProcessStartInfo(msi, arguments) { UseShellExecute = false }))
             {
                 setup.WaitForExit();
