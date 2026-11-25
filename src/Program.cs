@@ -8,6 +8,7 @@ using System.Runtime.InteropServices;
 using System.Security.Principal;
 using System.Text;
 using System.Windows.Forms;
+using Microsoft.Win32;
 
 namespace SshManager
 {
@@ -21,12 +22,42 @@ namespace SshManager
                 return Terminal.RunInConsole(args[1], args[2]);
             if (args.Length > 0 && args[0] == "--apply-update")
                 return UpdateWorker.Apply(args);
+            if (args.Length == 3 && args[0] == "--msi-check-running")
+                return CheckApplicationClosed(args[1], Int32.TryParse(args[2], out int uiLevel) && uiLevel > 2);
             Application.EnableVisualStyles();
             Application.SetCompatibleTextRenderingDefault(false);
             var groups = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "SSH Manager", "tabs.xml");
             using (var identity = WindowsIdentity.GetCurrent())
                 TrayApplication.Run("SshManager." + identity.User.Value, () => new ConnectionsWindow(Terminal.SshDirectory, groups));
             return 0;
+        }
+
+        private static int CheckApplicationClosed(string destination, bool interactive)
+        {
+            string installed;
+            using (var settings = Registry.CurrentUser.OpenSubKey(@"Software\SshManager\Installer"))
+                installed = settings?.GetValue("InstallPath") as string;
+
+            bool running = false;
+            foreach (var process in Process.GetProcessesByName(Path.GetFileNameWithoutExtension(AppUpdates.ExecutableName)))
+            {
+                using (process)
+                {
+                    try
+                    {
+                        var path = process.MainModule.FileName;
+                        if (String.Equals(path, destination, StringComparison.OrdinalIgnoreCase) ||
+                            String.Equals(path, installed, StringComparison.OrdinalIgnoreCase)) running = true;
+                    }
+                    catch (InvalidOperationException) { }
+                    catch (Win32Exception) { }
+                }
+            }
+            if (!running) return 0;
+            if (interactive)
+                MessageBox.Show("SSH Manager запущен. Выберите «Выход» в меню значка рядом с часами и снова запустите установщик.",
+                    "Установка SSH Manager", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            return 1;
         }
     }
 

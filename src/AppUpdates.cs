@@ -266,13 +266,8 @@ namespace SshManager
                 if (installed)
                 {
                     int result = InstallMsi(payload, destination, args[7] == "desktop");
-                    if (result == 3010)
-                    {
-                        MessageBox.Show("Windows просит перезагрузку для завершения обновления.", "SSH Manager",
-                            MessageBoxButtons.OK, MessageBoxIcon.Information);
-                        return 0;
-                    }
-                    if (result != 0) throw new IOException("Windows Installer завершил обновление с кодом " + result + ".");
+                    if (result != 0 && result != 3010)
+                        throw new IOException("Windows Installer завершил обновление с кодом " + result + ".");
                     CheckVersion(destination, version);
                     Launch(destination);
                 }

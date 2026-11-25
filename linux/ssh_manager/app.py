@@ -1,5 +1,6 @@
 import argparse
 import os
+import re
 import signal
 import subprocess
 import sys
@@ -12,7 +13,7 @@ import gi
 gi.require_version("Gtk", "3.0")
 gi.require_version("Gdk", "3.0")
 gi.require_version("Vte", "2.91")
-from gi.repository import Gdk, Gio, GLib, Gtk, Pango, Vte
+from gi.repository import Gdk, Gio, GLib, GObject, Gtk, Pango, Vte
 
 from . import VERSION
 from .auth import AskPass, Vault, account_for, ssh_args
@@ -30,6 +31,10 @@ STYLE = b"""
 .group-strip button { border-radius: 6px; }
 vte-terminal { padding: 9px; }
 """
+
+def prepare_terminal_paste(text):
+    text = re.sub(r"(?:\x1b\[|\x9b)[0-?]*[ -/]*[@-~]|\^\[\[20[01]~", "", text)
+    return re.sub(r"[\x00-\x08\x0a-\x0c\x0e-\x1f\x7f-\x9f]", "", text.replace("\r\n", "\r").replace("\n", "\r"))
 
 
 class CatalogRow(Gtk.ListBoxRow):
@@ -153,6 +158,7 @@ class Shell(Gtk.Box):
         self.terminal.set_colors(foreground, background, [])
         self.terminal.connect("child-exited", self.exited)
         self.terminal.connect("key-press-event", self.shortcut)
+        self.terminal.connect("paste-clipboard", self.on_paste_clipboard)
         self.terminal.connect("button-press-event", self.force_right_click)
         self.terminal.connect("button-release-event", self.force_right_click)
         # VTE handles mouse reporting first. Paste only if it leaves the click unhandled.
@@ -181,18 +187,49 @@ class Shell(Gtk.Box):
         if event.type != Gdk.EventType.BUTTON_PRESS or event.button != 3 or not self.live or self.closed:
             return False
         terminal.grab_focus()
-        terminal.paste_clipboard()
+        self.paste_clipboard(terminal)
         return True
 
+    def on_paste_clipboard(self, terminal):
+        GObject.signal_stop_emission_by_name(terminal, "paste-clipboard")
+        self.paste_clipboard(terminal)
+
+    def paste_clipboard(self, terminal):
+        if self.live and not self.closed:
+            clipboard = Gtk.Clipboard.get_for_display(terminal.get_display(), Gdk.SELECTION_CLIPBOARD)
+            clipboard.request_text(self.paste_text, terminal)
+
+    def paste_text(self, clipboard, text, terminal):
+        if not text or not self.live or self.closed:
+            return
+        text = prepare_terminal_paste(text)
+        if "\r" in text and not confirm(self.owner, "Текст содержит переносы строк. Вставка может сразу выполнить команды. Продолжить?"):
+            return
+        if text and self.live and not self.closed:
+            terminal.feed_child(text.encode("utf-8"))
+
     def shortcut(self, terminal, event):
-        needed = Gdk.ModifierType.CONTROL_MASK | Gdk.ModifierType.SHIFT_MASK
-        if event.state & needed != needed:
-            return False
-        key = Gdk.keyval_name(event.keyval).lower()
-        if key == "c":
+        control, shift = Gdk.ModifierType.CONTROL_MASK, Gdk.ModifierType.SHIFT_MASK
+        modifiers = event.state & Gtk.accelerator_get_default_mod_mask()
+        key = Gdk.keyval_to_lower(event.keyval)
+        letters = {Gdk.KEY_a, Gdk.KEY_c, Gdk.KEY_v}
+        if modifiers in (control, control | shift) and not Gdk.KEY_a <= key <= Gdk.KEY_z and key != Gdk.KEY_Insert:
+            keymap = Gdk.Keymap.get_for_display(terminal.get_display())
+            found, _, values = keymap.get_entries_for_keycode(event.hardware_keycode)
+            if found:
+                key = next((value for value in map(Gdk.keyval_to_lower, values) if value in letters), key)
+            key = {Gdk.KEY_Cyrillic_ef: Gdk.KEY_a, Gdk.KEY_Cyrillic_es: Gdk.KEY_c,
+                   Gdk.KEY_Cyrillic_em: Gdk.KEY_v}.get(key, key)
+        copy = (key == Gdk.KEY_c and (modifiers == control | shift or
+                modifiers == control and terminal.get_has_selection()) or key == Gdk.KEY_Insert and modifiers == control)
+        paste = (key == Gdk.KEY_v and modifiers in (control, control | shift) or
+                 key == Gdk.KEY_Insert and modifiers == shift)
+        if copy:
             terminal.copy_clipboard_format(Vte.Format.TEXT)
-        elif key == "v":
-            terminal.paste_clipboard()
+        elif paste:
+            self.paste_clipboard(terminal)
+        elif key == Gdk.KEY_a and modifiers == control | shift:
+            terminal.select_all()
         else:
             return False
         return True

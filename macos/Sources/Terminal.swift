@@ -140,6 +140,21 @@ final class TerminalChannel {
     }
 }
 
+private final class TerminalWebView: WKWebView {
+    var editCommand: ((String) -> Bool)?
+
+    override func performKeyEquivalent(with event: NSEvent) -> Bool {
+        let modifiers = event.modifierFlags.intersection([.command, .control, .option, .shift])
+        if modifiers == .command {
+            let typed = event.charactersIgnoringModifiers?.lowercased() ?? ""
+            let key = typed.range(of: "^[a-z]$", options: .regularExpression) != nil ? typed :
+                ([0: "a", 8: "c", 9: "v"][Int(event.keyCode)] ?? typed)
+            if editCommand?(key) == true { return true }
+        }
+        return super.performKeyEquivalent(with: event)
+    }
+}
+
 final class TerminalSession: NSObject, ObservableObject, WKScriptMessageHandler, WKNavigationDelegate {
     let id = UUID()
     let profile: Profile
@@ -167,7 +182,9 @@ final class TerminalSession: NSObject, ObservableObject, WKScriptMessageHandler,
         configuration.preferences.javaScriptCanOpenWindowsAutomatically = false
         bridge = TerminalMessageBridge(session: self)
         configuration.userContentController.add(bridge, name: "terminal")
-        view = WKWebView(frame: .zero, configuration: configuration)
+        let terminalView = TerminalWebView(frame: .zero, configuration: configuration)
+        terminalView.editCommand = { [weak self] key in self?.edit(key) ?? false }
+        view = terminalView
         view.underPageBackgroundColor = NSColor(red: 18.0 / 255, green: 24.0 / 255, blue: 35.0 / 255, alpha: 1)
         view.navigationDelegate = self
         view.loadFileURL(source, allowingReadAccessTo: source.deletingLastPathComponent())
@@ -215,12 +232,38 @@ final class TerminalSession: NSObject, ObservableObject, WKScriptMessageHandler,
         } else if type == "copy", let text = payload["text"] as? String, !text.isEmpty {
             NSPasteboard.general.clearContents()
             NSPasteboard.general.setString(text, forType: .string)
-        } else if type == "paste", exitCode == nil, channel != nil,
-                  let text = NSPasteboard.general.string(forType: .string), !text.isEmpty {
-            Task { @MainActor [weak self] in
-                _ = try? await self?.view.callAsyncJavaScript("window.pasteTerminal(text);", arguments: ["text": text], in: nil, contentWorld: .page)
-            }
+        } else if type == "paste" {
+            paste()
         }
+    }
+
+    private func edit(_ key: String) -> Bool {
+        switch key {
+        case "c": view.evaluateJavaScript("window.copyTerminal?.()")
+        case "v": paste()
+        case "a": view.evaluateJavaScript("window.selectTerminal?.()")
+        default: return false
+        }
+        return true
+    }
+
+    private func paste() {
+        guard !closed, exitCode == nil, let target = channel,
+              let clipboard = NSPasteboard.general.string(forType: .string) else { return }
+        let text = clipboard.replacingOccurrences(of: #"(?:\x1b\[|\x9b)[0-?]*[ -/]*[@-~]|\^\[\[20[01]~"#,
+                                                  with: "", options: .regularExpression)
+            .replacingOccurrences(of: "\r\n", with: "\r").replacingOccurrences(of: "\n", with: "\r")
+            .replacingOccurrences(of: #"[\x00-\x08\x0a-\x0c\x0e-\x1f\x7f-\x9f]"#, with: "", options: .regularExpression)
+        guard !text.isEmpty else { return }
+        if text.contains("\r") {
+            let alert = NSAlert()
+            alert.messageText = "Вставка в терминал"
+            alert.informativeText = "Текст содержит переносы строк. Вставка может сразу выполнить команды. Продолжить?"
+            alert.addButton(withTitle: "Отмена")
+            alert.addButton(withTitle: "Вставить")
+            guard alert.runModal() == .alertSecondButtonReturn else { return }
+        }
+        if !closed && exitCode == nil && channel === target { target.send(Data(text.utf8)) }
     }
 
     private func start(columns: UInt16, rows: UInt16) {

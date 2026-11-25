@@ -4,6 +4,7 @@ using System.Drawing.Text;
 using System.Globalization;
 using System.Runtime.InteropServices;
 using System.Text;
+using System.Text.RegularExpressions;
 using System.Windows.Forms;
 using VtNetCore.VirtualTerminal;
 using VtNetCore.VirtualTerminal.Model;
@@ -256,9 +257,13 @@ namespace SshManager
         {
             base.OnKeyDown(args);
             if (session == null || args.Handled) return;
-            if (args.Control && args.Shift && args.KeyCode == Keys.C) CopySelection();
-            else if (args.Control && args.Shift && args.KeyCode == Keys.V) Paste();
-            else if (args.Shift && (args.KeyCode == Keys.PageUp || args.KeyCode == Keys.PageDown))
+            var keyData = args.KeyData;
+            if (keyData == (Keys.Control | Keys.Shift | Keys.C) || keyData == (Keys.Control | Keys.Insert) ||
+                (keyData == (Keys.Control | Keys.C) && HasSelection)) CopySelection();
+            else if (keyData == (Keys.Control | Keys.Shift | Keys.V) || keyData == (Keys.Control | Keys.V) ||
+                keyData == (Keys.Shift | Keys.Insert)) Paste();
+            else if (keyData == (Keys.Control | Keys.Shift | Keys.A)) SelectVisibleText();
+            else if (args.Modifiers == Keys.Shift && (args.KeyCode == Keys.PageUp || args.KeyCode == Keys.PageDown))
                 ScrollHistory((args.KeyCode == Keys.PageUp ? 1 : -1) * Math.Max(1, GridSize.Height - 1));
             else
             {
@@ -401,15 +406,33 @@ namespace SshManager
             catch (ExternalException) { Theme.ShowError(this, new InvalidOperationException("Буфер обмена занят. Повторите попытку.")); }
         }
 
+        private void SelectVisibleText()
+        {
+            int top = Math.Max(0, Engine.ViewPort.TopRow - session.Screen.HistoryOffset);
+            var size = GridSize;
+            selection = new TextRange { Start = new TextPosition(0, top),
+                End = new TextPosition(size.Width - 1, top + size.Height - 1) };
+            Invalidate();
+        }
+
+        internal static string PreparePaste(string text)
+        {
+            text = Regex.Replace(text, @"(?:\x1b\[|\x9b)[0-?]*[ -/]*[@-~]|\^\[\[20[01]~", "");
+            return Regex.Replace(text.Replace("\r\n", "\r").Replace('\n', '\r'), @"[\x00-\x08\x0a-\x0c\x0e-\x1f\x7f-\x9f]", "");
+        }
+
         private void Paste()
         {
             if (session == null || !session.IsOpen) return;
+            var target = session;
             try
             {
-                var text = Clipboard.GetText().Replace("\r\n", "\r").Replace('\n', '\r');
+                var text = PreparePaste(Clipboard.GetText());
                 if (text.Length == 0) return;
-                if (Engine.BracketedPasteMode) text = "\u001b[200~" + text + "\u001b[201~";
-                Send(Encoding.UTF8.GetBytes(text));
+                if (text.IndexOf('\r') >= 0 && MessageBox.Show(this,
+                    "Текст содержит переносы строк. Вставка может сразу выполнить команды. Продолжить?", "Вставка в терминал",
+                    MessageBoxButtons.YesNo, MessageBoxIcon.Question, MessageBoxDefaultButton.Button2) != DialogResult.Yes) return;
+                if (ReferenceEquals(session, target) && target.IsOpen) Send(Encoding.UTF8.GetBytes(text));
             }
             catch (ExternalException) { Theme.ShowError(this, new InvalidOperationException("Буфер обмена занят. Повторите попытку.")); }
         }

@@ -19,14 +19,27 @@ element.addEventListener("mousedown", event => {
     post("paste");
 }, {capture: true});
 element.addEventListener("contextmenu", event => event.preventDefault());
+element.addEventListener("paste", event => {
+    event.preventDefault();
+    event.stopPropagation();
+    post("paste");
+}, {capture: true});
+const copySelection = () => post("copy", {text: terminal.getSelection()});
 terminal.attachCustomKeyEventHandler(event => {
-    if (!event.metaKey) return true;
-    if (event.type !== "keydown") return false;
-    switch (event.key.toLowerCase()) {
-        case "c": post("copy", {text: terminal.getSelection()}); event.preventDefault(); break;
-        case "v": post("paste"); event.preventDefault(); break;
-        case "a": terminal.selectAll(); event.preventDefault(); break;
-    }
+    if (event.type !== "keydown" || event.altKey) return true;
+    const typed = event.key.toLowerCase();
+    const key = /^[a-z]$/.test(typed) ? typed : ({KeyA: "a", KeyC: "c", KeyV: "v"}[event.code] || typed);
+    const command = event.metaKey && !event.ctrlKey && !event.shiftKey;
+    const control = event.ctrlKey && !event.metaKey;
+    const copy = (key === "c" && (command || (control && (event.shiftKey || terminal.hasSelection())))) ||
+        (key === "insert" && control && !event.shiftKey);
+    const paste = (key === "v" && (command || (control && event.shiftKey))) ||
+        (key === "insert" && event.shiftKey && !event.metaKey && !event.ctrlKey);
+    if (copy) copySelection();
+    else if (paste) post("paste");
+    else if (key === "a" && (command || (control && event.shiftKey))) terminal.selectAll();
+    else return true;
+    event.preventDefault();
     return false;
 });
 terminal.onData(text => post("input", {text}));
@@ -37,7 +50,8 @@ window.receive = (encoded, batch) => {
     const bytes = Uint8Array.from(atob(encoded), character => character.charCodeAt(0));
     terminal.write(bytes, () => post("drained", {batch}));
 };
-window.pasteTerminal = text => terminal.paste(text);
+window.copyTerminal = copySelection;
+window.selectTerminal = () => terminal.selectAll();
 window.focusTerminal = () => { fit.fit(); terminal.focus(); };
 fit.fit();
 post("ready", {cols: terminal.cols, rows: terminal.rows});

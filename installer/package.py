@@ -86,7 +86,10 @@ def package(app, output, file_version):
 
         tables = {
             "Property": [("UpgradeCode", upgrade), ("ARPNOMODIFY", "1"), ("DefaultUIFont", "UiFont"),
+                         ("REBOOT", "ReallySuppress"),
                          ("SecureCustomProperties", "OLDERPRODUCTS;NEWERPRODUCTS;DESKTOPSHORTCUT")],
+            "Binary": [("AppCheck", msilib.Binary(str(app)))],
+            "CustomAction": [("CheckApplicationClosed", 2, "AppCheck", '--msi-check-running "[#AppExecutable]" [UILevel]')],
             "Directory": [
                 ("TARGETDIR", None, "SourceDir"),
                 ("LocalAppDataFolder", "TARGETDIR", "."),
@@ -130,6 +133,7 @@ def package(app, output, file_version):
             "RegisterProduct", "PublishFeatures", "PublishProduct", "InstallFinalize",
         }
         tables["InstallExecuteSequence"] = [action for action in sequence.InstallExecuteSequence if action[0] in actions]
+        tables["InstallExecuteSequence"].append(("CheckApplicationClosed", None, 1450))
         tables["InstallExecuteSequence"].append(("RemoveExistingProducts", "OLDERPRODUCTS", 1520))
         for name, rows in tables.items():
             msilib.add_data(db, name, rows)
