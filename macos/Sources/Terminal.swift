@@ -145,7 +145,8 @@ private final class TerminalWebView: WKWebView {
 
     override func performKeyEquivalent(with event: NSEvent) -> Bool {
         let modifiers = event.modifierFlags.intersection([.command, .control, .option, .shift])
-        if modifiers == .command {
+        if modifiers == .command, let responder = window?.firstResponder as? NSView,
+           responder === self || responder.isDescendant(of: self) {
             let typed = event.charactersIgnoringModifiers?.lowercased() ?? ""
             let key = typed.range(of: "^[a-z]$", options: .regularExpression) != nil ? typed :
                 ([0: "a", 8: "c", 9: "v"][Int(event.keyCode)] ?? typed)
