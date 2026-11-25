@@ -19,6 +19,7 @@ Requires:       /usr/bin/ssh
 Requires:       /usr/bin/secret-tool
 Recommends:     /usr/bin/pkexec
 Recommends:     freerdp
+Recommends:     libayatana-appindicator-gtk3
 
 %description
 Manage OpenSSH profiles, SSH sessions in an embedded VTE terminal, SFTP

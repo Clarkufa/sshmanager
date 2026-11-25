@@ -1,5 +1,6 @@
 """Portable Linux archives for SSH Manager, with authenticated encryption for passwords."""
 
+import datetime
 import hashlib
 import io
 import os
@@ -15,7 +16,7 @@ from gi.repository import GLib, Gtk
 from .auth import account_for
 from .config import Document, parse_settings, read, write
 from .rdp import DesktopProfile
-from .widgets import chooser, confirm, menu_at, message, prompt
+from .widgets import chooser, confirm, dialog_buttons, message, themed
 
 
 MAGIC = b"SSHMLNX1"
@@ -173,14 +174,6 @@ def restore(config, vault, contents, valid):
     return recovery if recovery.exists() else None
 
 
-def backup_menu(owner):
-    menu_at(owner.get_focus() or owner, None, [
-        ("Экспорт защищённой копии…", lambda: choose_export(owner, True)),
-        ("Экспорт ZIP без паролей…", lambda: choose_export(owner, False)),
-        ("Импорт копии…", lambda: choose_import(owner)),
-    ])
-
-
 def background(owner, work, done):
     def deliver(result, error):
         if owner.get_realized():
@@ -201,25 +194,66 @@ def background(owner, work, done):
     threading.Thread(target=run, daemon=True).start()
 
 
-def choose_export(owner, encrypted):
-    suffix = ".sshbackup" if encrypted else ".zip"
-    path = chooser(owner, "Экспорт резервной копии", Gtk.FileChooserAction.SAVE, "ssh-manager" + suffix)
+FILTERS = (("Защищённая копия (*.sshbackup)", "*.sshbackup"), ("Архив ZIP (*.zip)", "*.zip"))
+
+
+def password_dialog(owner, creating):
+    """«Защита резервной копии» (two fields) or «Пароль резервной копии» (docs/ui-spec.md §4.6)."""
+    dialog = themed(Gtk.Dialog(title="Защита резервной копии" if creating else "Пароль резервной копии",
+                               transient_for=owner, modal=True))
+    dialog_buttons(dialog, "Сохранить" if creating else "Продолжить")
+    area = dialog.get_content_area()
+    area.set_border_width(16)
+    area.set_spacing(8)
+    fields = []
+    for caption in (("Пароль", "Повторите пароль") if creating else ("Пароль",)):
+        area.add(Gtk.Label(label=caption, xalign=0))
+        entry = Gtk.Entry(visibility=False, activates_default=True, width_chars=40)
+        area.add(entry)
+        fields.append(entry)
+    if creating:
+        note = Gtk.Label(label="Защищённая копия включает сохранённые пароли SSH и RDP.", xalign=0, wrap=True)
+        note.get_style_context().add_class("sshm-muted")
+        area.add(note)
+    dialog.show_all()
+    try:
+        while dialog.run() == Gtk.ResponseType.OK:
+            value = fields[0].get_text()
+            if not value:
+                message(dialog, "Введите пароль.", Gtk.MessageType.ERROR)
+            elif creating and value != fields[1].get_text():
+                message(dialog, "Пароли не совпадают.", Gtk.MessageType.ERROR)
+            else:
+                return value
+        return None
+    finally:
+        dialog.destroy()
+
+
+def choose_export(owner):
+    name = "ssh-manager-" + datetime.datetime.now().strftime("%Y%m%d-%H%M%S") + ".sshbackup"
+    path = chooser(owner, "Экспорт архива", Gtk.FileChooserAction.SAVE, name, filters=FILTERS)
     if not path:
         return
+    if not path.lower().endswith((".sshbackup", ".zip")):
+        path += ".sshbackup"
     password = None
-    if encrypted:
-        password = prompt(owner, "Пароль резервной копии", hidden=True)
+    if path.lower().endswith(".sshbackup"):
+        password = password_dialog(owner, True)
         if not password:
             return
-        if password != prompt(owner, "Повторите пароль резервной копии", hidden=True):
-            message(owner, "Пароли не совпадают.", Gtk.MessageType.ERROR)
-            return
-    background(owner, lambda: export(owner.config, owner.vault, path, password),
-               lambda count: message(owner, f"Копия сохранена. Паролей SSH и RDP в архиве: {count}."))
+
+    def done(count):
+        text = "Резервная копия сохранена.\n\n" + path
+        text += f"\n\nСохранённых паролей SSH и RDP: {count}" if password else "\n\nZIP сохраняет подключения без паролей SSH и RDP."
+        message(owner, text)
+
+    background(owner, lambda: export(owner.config, owner.vault, path, password), done)
 
 
 def choose_import(owner):
-    path = chooser(owner, "Импорт резервной копии", Gtk.FileChooserAction.OPEN)
+    path = chooser(owner, "Импорт архива", Gtk.FileChooserAction.OPEN,
+                   filters=(("Резервная копия (*.sshbackup, *.zip)", "*.sshbackup"),) + FILTERS)
     if not path:
         return
     try:
@@ -227,7 +261,7 @@ def choose_import(owner):
     except OSError as error:
         message(owner, error, Gtk.MessageType.ERROR)
         return
-    password = prompt(owner, "Пароль резервной копии", hidden=True) if encrypted else None
+    password = password_dialog(owner, False) if encrypted else None
     if encrypted and password is None:
         return
 
@@ -235,16 +269,19 @@ def choose_import(owner):
         contents, valid = result
         secrets = [name for name in contents if name.startswith(PASS_PREFIX)]
         desktop = sum(name.startswith(PASS_PREFIX + RDP_PREFIX) for name in secrets)
-        details = f"Файлов: {len(contents) - len(secrets)}, паролей SSH: {len(secrets) - desktop}, RDP: {desktop}"
-        if not confirm(owner, f"Восстановить настройки SSH, RDP и файлы из архива?\n{details}"):
+        summary = f"Файлов: {len(contents) - len(secrets)}"
+        if secrets:
+            summary += f"\nПаролей SSH: {len(secrets) - desktop}\nПаролей RDP: {desktop}"
+        if not confirm(owner, "Импортировать резервную копию?", summary +
+                       "\n\nПредыдущие версии заменяемых файлов будут сохранены."):
             return
 
         def done(recovery):
             owner.settings = owner.config.settings()
-            owner.active_group = owner.settings["default"]
+            owner.active_group = owner.settings["default"] if owner.group_record(owner.settings["default"]) else ""
             owner.apply_theme()
             owner.reload()
-            message(owner, "Резервная копия восстановлена." + (f"\nПрежние файлы: {recovery}" if recovery else ""))
+            message(owner, "Резервная копия восстановлена." + (f"\n\nПредыдущие файлы сохранены здесь:\n{recovery}" if recovery else ""))
 
         background(owner, lambda: restore(owner.config, owner.vault, contents, valid), done)
 

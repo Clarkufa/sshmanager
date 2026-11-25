@@ -29,7 +29,7 @@ def load_backup():
         sys.modules.setdefault("gi", gi)
         sys.modules.setdefault("gi.repository", repository)
         sys.modules.setdefault("ssh_manager.widgets", types.SimpleNamespace(
-            chooser=None, confirm=None, menu_at=None, message=None, prompt=None))
+            chooser=None, confirm=None, dialog_buttons=None, menu_at=None, message=None, prompt=None, themed=None))
     return importlib.import_module("ssh_manager.backup")
 
 

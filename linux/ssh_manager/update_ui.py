@@ -9,16 +9,51 @@ from gi.repository import Gio, GLib, Gtk
 
 from . import VERSION
 from .updates import Update
-from .widgets import button, confirm, message
+from .widgets import action_button, confirm, dialog_buttons, message, set_button_text, themed
 
 
 class UpdateController:
     def __init__(self, owner):
         self.owner = owner
         self.root = Path(__file__).resolve().parent.parent
-        self.control = button("Обновления", lambda: self.check(manual=True))
+        self.control = action_button("Обновления", self.clicked, icon="refresh")
         self.checking = False
         self.installing = False
+        self.available = None
+
+    def clicked(self):
+        if self.available is not None:
+            self.offer(self.available)
+        else:
+            self.check(manual=True)
+
+    def offer(self, update):
+        """«Обновление SSH Manager» with the new and current versions (docs/ui-spec.md §4.7)."""
+        dialog = themed(Gtk.Dialog(title="Обновление SSH Manager", transient_for=self.owner, modal=True))
+        dialog_buttons(dialog, "Скачать обновление", cancel="Позже")
+        area = dialog.get_content_area()
+        area.set_border_width(18)
+        area.set_spacing(6)
+        title = Gtk.Label(label=f"Доступна версия {update.version}", xalign=0)
+        title.get_style_context().add_class("sshm-title")
+        area.add(title)
+        current = Gtk.Label(label=f"У вас версия {VERSION}", xalign=0)
+        current.get_style_context().add_class("sshm-muted")
+        area.add(current)
+        link = Gtk.LinkButton.new_with_label(f"https://github.com/Clarkufa/sshmanager/releases/tag/v{update.version}",
+                                             "Что нового на GitHub")
+        link.set_halign(Gtk.Align.START)
+        area.add(link)
+        dialog.show_all()
+        accepted = dialog.run() == Gtk.ResponseType.OK
+        dialog.destroy()
+        if not accepted:
+            return
+        details = "При установке системного пакета могут потребоваться права администратора."
+        if any(session.live for session in self.owner.sessions) or self.owner.files:
+            details = "Открытые сеансы SSH и окна SFTP будут закрыты.\n" + details
+        if confirm(self.owner, f"Установить версию {update.version} и перезапустить SSH Manager?", details):
+            self._install(update)
 
     def check(self, manual=False):
         if self.checking or self.installing:
@@ -26,28 +61,27 @@ class UpdateController:
         self.checking = True
         self.control.set_sensitive(False)
         if manual:
-            self.control.set_label("Проверяем…")
+            set_button_text(self.control, "Проверка…")
         self._run(lambda: Update.check(self.root), lambda update, error: self._checked(update, error, manual))
 
     def _checked(self, update, error, manual):
         self.checking = False
         self.control.set_sensitive(True)
-        self.control.set_label(f"Обновление {update.version}" if update else "Обновления")
+        self.available = update
+        set_button_text(self.control, f"Обновить до {update.version}" if update else "Обновления")
         if not manual:
             return
         if error:
             message(self.owner, f"Не удалось проверить обновления. {error}", Gtk.MessageType.ERROR)
         elif not update:
             message(self.owner, f"Установлена актуальная версия {VERSION}.")
-        elif confirm(self.owner, f"Доступна версия {update.version}. Установить?",
-                     "После установки приложение перезапустится и закроет активные SSH-сеансы и передачи файлов. "
-                     "При установке системного пакета могут потребоваться права администратора."):
-            self._install(update)
+        else:
+            self.offer(update)
 
     def _install(self, update):
         self.installing = True
         self.control.set_sensitive(False)
-        self.control.set_label("Устанавливаем…")
+        set_button_text(self.control, "Загрузка…")
 
         def job():
             package = update.download()
@@ -61,7 +95,7 @@ class UpdateController:
     def _installed(self, result, download_error):
         self.installing = False
         self.control.set_sensitive(True)
-        self.control.set_label("Обновления")
+        set_button_text(self.control, f"Обновить до {self.available.version}" if self.available else "Обновления")
         if download_error:
             message(self.owner, f"Не удалось скачать обновление. {download_error}", Gtk.MessageType.ERROR)
             return
@@ -107,10 +141,12 @@ class UpdateController:
             os.close(reader)
         # Keep the write end until exit. The child does not inherit it.
         self.restart_pipe = writer
-        for shell in self.owner.shells[:]:
-            shell.destroy()
+        for session in self.owner.sessions[:]:
+            session.stop()
+            session.destroy()
         for window in list(self.owner.files.values()):
             window.destroy()
+        self.owner.quitting = True
         self.owner.get_application().quit()
 
     @staticmethod

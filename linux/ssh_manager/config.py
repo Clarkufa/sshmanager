@@ -229,7 +229,11 @@ def parse_settings(contents):
         raise ValueError("Некорректный список RDP-подключений.")
     for entry in initial["desktops"]:
         try:
-            profile = DesktopProfile(**entry).validate()
+            if not isinstance(entry, dict):
+                raise TypeError
+            # Newer versions may add fields: keep the ones this version knows.
+            known = {key: value for key, value in entry.items() if key in DesktopProfile.__dataclass_fields__}
+            profile = DesktopProfile(**known).validate()
         except TypeError as error:
             raise ValueError("Некорректное RDP-подключение.") from error
         if profile.id in desktop_ids or profile.group not in ids:

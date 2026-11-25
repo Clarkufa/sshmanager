@@ -7,23 +7,25 @@ from pathlib import Path
 from gi.repository import Gdk, Gio, GLib, Gtk
 
 from .transfer import Cancelled, Copies, Remote, local_items, remote_items
-from .widgets import button, chooser, confirm, menu_at, message, prompt
+from .theme import mark
+from .widgets import action_button, chooser, confirm, menu_at, message, prompt, themed
 
 
 class Pane(Gtk.Box):
-    def __init__(self, title, browse):
+    def __init__(self, title, browse, extra):
         super().__init__(orientation=Gtk.Orientation.VERTICAL, spacing=8)
-        head = Gtk.Box(spacing=6)
-        name = Gtk.Label(label=title, xalign=0)
-        name.get_style_context().add_class("section-title")
+        name = Gtk.Label(label=title, xalign=0, ellipsize=3)
+        mark(name, "sshm-emphasis")
         self.path = ""
         self.entry = Gtk.Entry(placeholder_text="Путь к папке")
         self.entry.connect("activate", lambda widget: browse(widget.get_text()))
-        head.pack_start(name, True, True, 0)
-        head.pack_start(button("Вверх", lambda: browse("..")), False, False, 0)
-        head.pack_start(button("Обновить", lambda: browse(self.path)), False, False, 0)
-        self.pack_start(head, False, False, 0)
+        self.pack_start(name, False, False, 0)
         self.pack_start(self.entry, False, False, 0)
+        head = Gtk.Box(spacing=4)
+        head.pack_start(action_button("Вверх", lambda: browse(".."), "quiet", icon="move_left", width=82), False, False, 0)
+        head.pack_start(action_button("Обновить", lambda: browse(self.path), "quiet", icon="refresh", width=104), False, False, 0)
+        head.pack_start(extra, False, False, 0)
+        self.pack_start(head, False, False, 0)
         self.model = Gtk.ListStore(str, str, str, str, object)
         self.view = Gtk.TreeView(model=self.model, enable_search=True, search_column=1)
         self.view.get_selection().set_mode(Gtk.SelectionMode.MULTIPLE)
@@ -40,8 +42,9 @@ class Pane(Gtk.Box):
         self.view.append_column(Gtk.TreeViewColumn("Размер", Gtk.CellRendererText(xalign=1), text=2))
         self.view.append_column(Gtk.TreeViewColumn("Изменён", Gtk.CellRendererText(), text=3))
         self.view.connect("row-activated", lambda view, index, column: self.open(index, browse))
-        scroll = Gtk.ScrolledWindow(shadow_type=Gtk.ShadowType.IN)
+        scroll = Gtk.ScrolledWindow()
         scroll.add(self.view)
+        mark(scroll, "sshm-frame")
         self.pack_start(scroll, True, True, 0)
 
     def open(self, index, browse):
@@ -73,9 +76,11 @@ class Pane(Gtk.Box):
 class FilesWindow(Gtk.ApplicationWindow):
     def __init__(self, owner, profile, config, vault):
         super().__init__(application=owner.get_application(), transient_for=owner,
-                         title=f"Файлы · {profile.alias} · {profile.address}")
+                         title=f"Файлы — {profile.alias} · {profile.address}")
+        themed(self)
         self.profile, self.config, self.vault = profile, config, vault
-        self.set_default_size(1050, 635)
+        self.set_default_size(1090, 620)
+        self.set_size_request(800, 440)
         self.set_destroy_with_parent(True)
         self.remote = None
         self.operation = None
@@ -83,24 +88,32 @@ class FilesWindow(Gtk.ApplicationWindow):
         self.connect("destroy", self.closed)
         self.connect("delete-event", self.can_close)
 
-        outer = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12, margin=16)
+        outer = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10, margin_start=20, margin_end=20,
+                        margin_top=14, margin_bottom=12)
+        mark(outer, "sshm-page")
         self.add(outer)
-        self.left = Pane("Компьютер", self.browse_local)
-        self.right = Pane(f"{profile.alias} · {profile.address}", self.browse_remote)
+        head = Gtk.Box(spacing=8)
+        heading = Gtk.Label(label=f"Файлы · {profile.alias}", xalign=0)
+        mark(heading, "sshm-title")
+        head.pack_start(heading, True, True, 0)
+        self.reconnect = action_button("Переподключить", self.connect_server, icon="refresh", width=156)
+        head.pack_end(self.reconnect, False, False, 0)
+        outer.pack_start(head, False, False, 0)
+        self.new_folder = action_button("Новая папка", self.mkdir, "quiet", icon="plus", width=122)
+        self.left = Pane("Компьютер", self.browse_local,
+                         action_button("Выбрать папку…", self.choose_local, "quiet", icon="browse", width=142))
+        self.right = Pane(profile.address, self.browse_remote, self.new_folder)
         panels = Gtk.Paned.new(Gtk.Orientation.HORIZONTAL)
         panels.pack1(self.left, True, False)
         panels.pack2(self.right, True, False)
         panels.set_position(500)
         outer.pack_start(panels, True, True, 0)
         actions = Gtk.Box(spacing=7)
-        self.upload = button("На сервер →", self.upload_selected, suggested=True)
-        self.download = button("← На компьютер", self.download_selected)
-        self.cancel = button("Отменить", self.cancel_transfer)
-        self.new_folder = button("Новая папка", self.mkdir)
-        self.reconnect = button("Переподключить", self.connect_server)
-        for widget in (self.upload, self.download, self.cancel, self.new_folder, self.reconnect):
+        self.upload = action_button("На сервер", self.upload_selected, "primary", icon="move", width=140)
+        self.download = action_button("На компьютер", self.download_selected, icon="move_left", width=151)
+        self.cancel = action_button("Отменить", self.cancel_transfer, width=106)
+        for widget in (self.upload, self.download, self.cancel):
             actions.pack_start(widget, False, False, 0)
-        actions.pack_end(button("Локальная папка…", self.choose_local), False, False, 0)
         outer.pack_start(actions, False, False, 0)
         self.progress = Gtk.ProgressBar(show_text=True, no_show_all=True)
         self.status = Gtk.Label(xalign=0, ellipsize=3)
@@ -375,14 +388,15 @@ class FilesWindow(Gtk.ApplicationWindow):
 
         def show():
             if not cancelled.is_set() and not self.destroyed:
-                dialog = Gtk.MessageDialog(transient_for=self, modal=True, message_type=Gtk.MessageType.QUESTION,
-                                           text="Файл или папка с таким именем уже существует")
+                dialog = themed(Gtk.MessageDialog(transient_for=self, modal=True, message_type=Gtk.MessageType.QUESTION,
+                                                  text="Элемент с таким именем уже есть:"))
+                dialog.set_title("Файл уже существует")
                 dialog.format_secondary_text(path)
-                dialog.add_button("Отмена", 0)
-                dialog.add_button("Пропустить", 1)
-                dialog.add_button("Сохранить оба", 2)
                 if replace:
                     dialog.add_button("Заменить", 3)
+                dialog.add_button("Сохранить оба", 2)
+                dialog.add_button("Пропустить", 1)
+                dialog.add_button("Отмена", 0)
                 dialog.set_default_response(2)
                 answer = dialog.run()
                 dialog.destroy()

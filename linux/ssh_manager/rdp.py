@@ -117,28 +117,38 @@ class DesktopProfile:
             raise ValueError("Некорректные параметры RDP-подключения.")
         return self
 
-    def command(self, password=None):
-        """Return (argv, extra environment). The saved user, domain and password are always passed explicitly."""
+    def command(self, password=None, parent=None, size=None, user=None, domain=None):
+        """Return (argv, extra environment). The user, domain and password are always passed explicitly.
+
+        parent: an X11 window id to draw the desktop into (embedded session); size: its (width, height).
+        user/domain override the profile's account (sign-in dialog)."""
         x11 = ("xfreerdp3", "xfreerdp")
         wayland = ("sdl-freerdp3", "sdl-freerdp", "wlfreerdp3", "wlfreerdp")
-        names = x11 + wayland if os.environ.get("DISPLAY") else wayland + x11
+        names = x11 if parent else x11 + wayland if os.environ.get("DISPLAY") else wayland + x11
         client = next((path for name in names if (path := shutil.which(name))), None)
         if not client:
             raise ValueError("Установите клиент FreeRDP из репозитория вашего дистрибутива.")
+        user = self.user if user is None else user
+        domain = self.domain if domain is None else domain
         args = ["/v:" + self.address, "/t:" + self.name, "+clipboard" if self.clipboard else "-clipboard", "+auto-reconnect"]
-        if self.user:
-            args.append("/u:" + self.user)
-        if self.domain:
-            args.append("/d:" + self.domain)
+        if user:
+            args.append("/u:" + user)
+        if domain:
+            args.append("/d:" + domain)
         if password:
             if any(char in password for char in "\0\r\n"):
                 raise ValueError("Пароль RDP должен быть одной строкой.")
             args.append("/p:" + password)
+        if parent:
+            # Embedded: no terminal for prompts, so trust the server certificate on first use.
+            args += [f"/parent-window:{parent}", "/cert:tofu"]
         if self.width:
             args.append(f"/size:{self.width}x{self.height}")
+        elif size:
+            args += [f"/size:{max(640, size[0])}x{max(480, size[1])}", "/dynamic-resolution"]
         else:
             args += ["/size:80%", "/dynamic-resolution"]
-        if self.fullscreen:
+        if self.fullscreen and not parent:
             args.append("/f")
         if password and freerdp_major(client) >= 3:
             return [client, "/args-from:env:" + ARGS_VARIABLE], {ARGS_VARIABLE: "\n".join(args)}
