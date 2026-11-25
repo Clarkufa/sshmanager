@@ -156,6 +156,22 @@ namespace SshManager
             return added;
         }
 
+        public int AddDesktopPasswords()
+        {
+            Groups groups;
+            using (var xml = new MemoryStream(Files[TabsEntry], false)) groups = GroupFile.Parse(xml);
+            int added = 0;
+            foreach (var profile in groups.Desktops)
+            {
+                var password = RdpPasswords.ReadBytes(profile.Id);
+                if (password == null) continue;
+                try { Add(RdpPasswords.BackupPrefix + profile.Id, password); }
+                catch { SshPasswords.Clear(password); throw; }
+                added++;
+            }
+            return added;
+        }
+
         public static void ClearPasswords(IDictionary<string, byte[]> entries)
         {
             foreach (var entry in entries.Where(item => SshPasswords.IsBackupEntry(item.Key)).ToArray())

@@ -24,7 +24,8 @@ namespace SshManager
             if (!entries.TryGetValue(BackupSnapshot.ConfigEntry, out config) || !entries.TryGetValue(BackupSnapshot.TabsEntry, out tabs))
                 throw new InvalidDataException("В архиве отсутствует конфиг или файл настроек приложения.");
             ConfigFile.Decode(config);
-            using (var xml = new MemoryStream(tabs, false)) GroupFile.Parse(xml);
+            Groups archived;
+            using (var xml = new MemoryStream(tabs, false)) archived = GroupFile.Parse(xml);
 
             var destinations = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             foreach (var entry in entries)
@@ -50,13 +51,22 @@ namespace SshManager
             if (secrets.Length == 0) return;
             var validTargets = SshPasswords.BackupTargets(config).ToDictionary(target => SshPasswords.BackupPrefix + target.Id,
                 StringComparer.OrdinalIgnoreCase);
+            var validDesktops = archived.Desktops.ToDictionary(profile => RdpPasswords.BackupPrefix + profile.Id,
+                StringComparer.OrdinalIgnoreCase);
             try
             {
                 foreach (var secret in secrets)
                 {
-                    if (!validTargets.TryGetValue(secret.Key, out var target) || !SshPasswords.IsValid(secret.Value))
-                        throw new InvalidDataException("Пароль в архиве не соответствует ни одному подключению или повреждён.");
-                    passwords.Add(target, secret.Value);
+                    if (!SshPasswords.IsValid(secret.Value))
+                        throw new InvalidDataException("Пароль в архиве повреждён.");
+                    if (RdpPasswords.IsBackupEntry(secret.Key))
+                    {
+                        if (!validDesktops.TryGetValue(secret.Key, out var desktop))
+                            throw new InvalidDataException("RDP-пароль в архиве не соответствует ни одному RDP-подключению.");
+                        passwords.Add(desktop, secret.Value);
+                    }
+                    else if (validTargets.TryGetValue(secret.Key, out var target)) passwords.Add(target, secret.Value);
+                    else throw new InvalidDataException("Пароль в архиве не соответствует ни одному подключению или повреждён.");
                 }
             }
             catch { passwords.Dispose(); throw; }
@@ -66,6 +76,8 @@ namespace SshManager
         public int ReplaceCount { get { return changes.Count(item => item.Before != null); } }
         public int PasswordCount => passwords.Count;
         public int PasswordReplaceCount => passwords.ReplaceCount;
+        public int DesktopPasswordCount => passwords.DesktopCount;
+        public int DesktopPasswordReplaceCount => passwords.DesktopReplaceCount;
         public IEnumerable<string> Replacements { get { return changes.Where(item => item.Before != null).Select(item => item.Path); } }
         public void Dispose() { passwords.Dispose(); }
 

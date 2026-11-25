@@ -14,6 +14,7 @@ from gi.repository import GLib, Gtk
 
 from .auth import account_for
 from .config import Document, parse_settings, read, write
+from .rdp import DesktopProfile
 from .widgets import chooser, confirm, menu_at, message, prompt
 
 
@@ -24,6 +25,7 @@ STORE = "app/settings.json"
 CONFIG = "ssh/config"
 KEY_PREFIX = "ssh/keys/"
 PASS_PREFIX = "app/passwords/"
+RDP_PREFIX = "rdp-"  # RDP passwords: app/passwords/rdp-<profile id>, the same naming as the Windows and macOS archives
 MAX_TOTAL = 64 * 1024 * 1024
 MAX_ENTRY = 8 * 1024 * 1024
 
@@ -38,15 +40,20 @@ def entry_name(name):
     return name
 
 
-def accounts(document):
-    return {account.key: account for profile in document.profiles if (account := account_for(profile))}
+def accounts(document, settings=None):
+    """Secret Service accounts by backup name: SSH profiles from the config, RDP profiles from the settings."""
+    result = {account.key: account for profile in document.profiles if (account := account_for(profile))}
+    for entry in (settings or {}).get("desktops", []):
+        profile = DesktopProfile(**entry)
+        result[RDP_PREFIX + profile.id] = profile.secret
+    return result
 
 
 def export(config, vault, destination, password=None):
     with config.locked():
         document = config.load()
         settings = read(config.settings_path) or b"{}"
-        parse_settings(settings)
+        parsed = parse_settings(settings)
         entries = {MARKER: FORMAT, CONFIG: document.raw, STORE: settings}
         for key in config.keys():
             path = Path(key)
@@ -55,7 +62,7 @@ def export(config, vault, destination, password=None):
             if public.is_file() and not public.is_symlink():
                 entries[KEY_PREFIX + entry_name(public.name)] = read(public)
         if password:
-            for identifier, account in accounts(document).items():
+            for identifier, account in accounts(document, parsed).items():
                 saved = vault.lookup(account)
                 if saved:
                     entries[PASS_PREFIX + identifier] = saved.encode()
@@ -106,8 +113,7 @@ def decode(path, password):
     if contents.pop(MARKER, None) != FORMAT or CONFIG not in contents or STORE not in contents:
         raise ValueError("Этот файл не является резервной копией Linux-версии SSH Manager.")
     document = Document(contents[CONFIG])
-    parse_settings(contents[STORE])
-    valid = accounts(document)
+    valid = accounts(document, parse_settings(contents[STORE]))
     for name, value in contents.items():
         if name.startswith(KEY_PREFIX):
             entry_name(name[len(KEY_PREFIX):])
@@ -209,7 +215,7 @@ def choose_export(owner, encrypted):
             message(owner, "Пароли не совпадают.", Gtk.MessageType.ERROR)
             return
     background(owner, lambda: export(owner.config, owner.vault, path, password),
-               lambda count: message(owner, f"Копия сохранена. Паролей в архиве: {count}."))
+               lambda count: message(owner, f"Копия сохранена. Паролей SSH и RDP в архиве: {count}."))
 
 
 def choose_import(owner):
@@ -227,7 +233,10 @@ def choose_import(owner):
 
     def preview(result):
         contents, valid = result
-        if not confirm(owner, f"Восстановить настройки SSH и файлы из архива ({len(contents)})?"):
+        secrets = [name for name in contents if name.startswith(PASS_PREFIX)]
+        desktop = sum(name.startswith(PASS_PREFIX + RDP_PREFIX) for name in secrets)
+        details = f"Файлов: {len(contents) - len(secrets)}, паролей SSH: {len(secrets) - desktop}, RDP: {desktop}"
+        if not confirm(owner, f"Восстановить настройки SSH, RDP и файлы из архива?\n{details}"):
             return
 
         def done(recovery):

@@ -155,7 +155,7 @@ namespace SshManager
             if (password != null) Array.Clear(password, 0, password.Length);
         }
 
-        private static string Name(PasswordTarget target) => "SSH Manager/" + target.Id;
+        internal static string Name(PasswordTarget target) => "SSH Manager/" + target.Id;
 
         private static IOException VaultError(string action, int error)
         {
@@ -187,7 +187,12 @@ namespace SshManager
 
     internal static class RdpPasswords
     {
-        private static string Name(string profileId) => "SSH Manager/RDP/" + profileId;
+        /// <summary>Backup entry prefix: RDP passwords live next to SSH ones, so only protected archives carry them.</summary>
+        public const string BackupPrefix = SshPasswords.BackupPrefix + "rdp-";
+
+        internal static string Name(string profileId) => "SSH Manager/RDP/" + profileId;
+
+        public static bool IsBackupEntry(string path) => path.StartsWith(BackupPrefix, StringComparison.OrdinalIgnoreCase);
 
         public static bool Exists(RdpProfile profile)
         {
@@ -222,13 +227,24 @@ namespace SshManager
         private readonly List<Change> changes = new List<Change>();
         public int Count => changes.Count;
         public int ReplaceCount => changes.Count(change => change.Before != null);
+        public int DesktopCount => changes.Count(change => change.Desktop);
+        public int DesktopReplaceCount => changes.Count(change => change.Desktop && change.Before != null);
 
         public void Add(PasswordTarget target, byte[] value)
         {
-            if (target == null) return;
-            var before = SshPasswords.Read(target);
+            if (target != null) Add(SshPasswords.Name(target), target.User, value, false);
+        }
+
+        public void Add(RdpProfile profile, byte[] value)
+        {
+            if (profile != null) Add(RdpPasswords.Name(profile.Id), profile.Account, value, true);
+        }
+
+        private void Add(string name, string user, byte[] value, bool desktop)
+        {
+            var before = SshPasswords.Read(name);
             if (Equal(before, value)) { SshPasswords.Clear(before); return; }
-            changes.Add(new Change(target, before, value == null ? null : (byte[])value.Clone()));
+            changes.Add(new Change(name, user, desktop, before, value == null ? null : (byte[])value.Clone()));
         }
 
         public void Apply(Action commit)
@@ -238,12 +254,12 @@ namespace SshManager
             {
                 foreach (var change in changes)
                 {
-                    var current = SshPasswords.Read(change.Target);
+                    var current = SshPasswords.Read(change.Name);
                     try
                     {
                         if (!Equal(current, change.Before))
                             throw new IOException("Сохранённый пароль изменился после проверки. Повторите операцию.");
-                        SshPasswords.Set(change.Target, change.After);
+                        SshPasswords.Set(change.Name, change.User, change.After);
                         applied++;
                     }
                     finally { SshPasswords.Clear(current); }
@@ -256,7 +272,7 @@ namespace SshManager
                 for (int i = applied - 1; i >= 0; i--)
                 {
                     var change = changes[i];
-                    try { SshPasswords.Set(change.Target, change.Before); }
+                    try { SshPasswords.Set(change.Name, change.User, change.Before); }
                     catch (IOException) { rolledBack = false; }
                 }
                 if (!rolledBack) throw new IOException("Операция остановлена. Часть сохранённых паролей не удалось вернуть автоматически.", error);
@@ -278,9 +294,14 @@ namespace SshManager
 
         private sealed class Change
         {
-            public readonly PasswordTarget Target;
+            public readonly string Name, User;
+            public readonly bool Desktop;
             public readonly byte[] Before, After;
-            public Change(PasswordTarget target, byte[] before, byte[] after) { Target = target; Before = before; After = after; }
+
+            public Change(string name, string user, bool desktop, byte[] before, byte[] after)
+            {
+                Name = name; User = user; Desktop = desktop; Before = before; After = after;
+            }
         }
     }
 }

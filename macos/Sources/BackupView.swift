@@ -68,7 +68,7 @@ struct BackupView: View {
 
     private func preview(_ plan: BackupRestore) -> some View {
         VStack(alignment: .leading, spacing: 12) {
-            Text("Файлов для восстановления: \(plan.fileCount). Паролей: \(plan.passwordCount).")
+            Text("Файлов для восстановления: \(plan.fileCount). Паролей SSH: \(plan.passwordCount - plan.desktopPasswordCount), RDP: \(plan.desktopPasswordCount).")
             if !plan.replaced.isEmpty {
                 Text("Эти файлы будут заменены. Предыдущие версии будут сохранены в папке восстановления.").foregroundStyle(.secondary)
                 ScrollView {
