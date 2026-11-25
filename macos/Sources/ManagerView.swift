@@ -2,16 +2,17 @@ import AppKit
 import SwiftUI
 
 struct SSHManagerApp: App {
+    @NSApplicationDelegateAdaptor(AppDelegate.self) private var delegate
     @StateObject private var manager = Manager()
     @StateObject private var updates = MacUpdates()
     var body: some Scene {
         Window("SSH Manager", id: "main") {
             ManagerView(manager: manager, updates: updates)
-                .frame(minWidth: 760, minHeight: 500)
+                .frame(minWidth: 800, minHeight: 480)
                 .preferredColorScheme(manager.settings.appearance.scheme)
                 .onAppear { updates.check(manual: false) }
         }
-        .defaultSize(width: 1040, height: 680)
+        .defaultSize(width: 980, height: 570)
         .commands {
             CommandGroup(replacing: .newItem) {
                 Button("Новый сеанс…") { manager.choosingServer = true }
@@ -24,15 +25,18 @@ struct SSHManagerApp: App {
             CommandMenu("Подключения") {
                 Button("К серверам") { manager.showServers() }
                     .keyboardShortcut(.escape, modifiers: .shift)
-                    .disabled(!manager.showingSession)
-                Button("Два последних сеанса") { manager.switchSession() }
+                    .disabled(!manager.showingSessions)
+                Button("Сеансы") { manager.showSessionsPage() }
+                Button("Предыдущий сеанс") { manager.switchSession() }
                     .keyboardShortcut(.tab, modifiers: .control)
-                    .disabled(manager.sessions.isEmpty)
-                Button("Обновить OpenSSH config") { manager.reload() }
+                    .disabled(manager.entries.isEmpty)
+                Button("Поиск сеанса") { manager.showSessionsPage(); NotificationCenter.default.post(name: .focusSessionSearch, object: nil) }
+                    .keyboardShortcut("p", modifiers: [.command, .shift])
+                Button("Обновить") { manager.reloadAll() }
                     .keyboardShortcut("r", modifiers: .command)
                 Button("Открыть OpenSSH config") { manager.openConfig() }
                 Button("Резервные копии…") { manager.managingBackups = true }
-                Button("Проверить обновления…") { updates.check(manual: true) }
+                Button("Обновления…") { updates.check(manual: true) }
                 Divider()
                 Menu("Оформление") {
                     ForEach(Appearance.allCases) { style in
@@ -49,47 +53,53 @@ struct SSHManagerApp: App {
     }
 }
 
+extension Notification.Name {
+    static let focusSessionSearch = Notification.Name("SSHManagerFocusSessionSearch")
+}
+
+// MARK: - Root
+
 private struct ManagerView: View {
     @ObservedObject var manager: Manager
     @ObservedObject var updates: MacUpdates
-    @State private var query = ""
-    @FocusState private var focusSearch: Bool
+    @Environment(\.colorScheme) private var scheme
+    @Environment(\.openWindow) private var openWindow
 
     var body: some View {
-        NavigationSplitView {
-            sidebar
-                .navigationSplitViewColumnWidth(min: 195, ideal: 222, max: 310)
-        } detail: {
-            ZStack {
-                if case .session(let id) = manager.destination, let session = manager.sessions.first(where: { $0.id == id }) {
-                    sessionDetail(session)
-                } else {
-                    catalog
-                }
-            }.frame(maxWidth: .infinity, maxHeight: .infinity)
+        let palette = Palette.of(scheme)
+        VStack(spacing: 0) {
+            if manager.showingSessions {
+                SessionsPage(manager: manager)
+            } else {
+                CatalogPage(manager: manager)
+            }
+            Footer(manager: manager, updates: updates)
         }
-        .navigationSplitViewStyle(.balanced)
+        .background(palette.canvas)
+        .foregroundStyle(palette.ink)
+        .onAppear { AppDelegate.reopen = { openWindow(id: "main") } }
         .sheet(item: $manager.editor) { state in
-            ProfileEditor(state: state) { try manager.save($0, original: state.original, password: $1, removePassword: $2) }
+            ProfileEditor(state: state, hasPassword: state.original.map(manager.hasPassword) ?? false) {
+                try manager.save($0, original: state.original, password: $1, removePassword: $2)
+            }
         }
-        .sheet(item: $manager.groupEditor) { state in
+        .sheet(item: $manager.groupEditor, onDismiss: { manager.cancelGroupEditor() }) { state in
             GroupEditor(state: state) { try manager.saveGroup($0, original: state.original) }
         }
         .sheet(item: $manager.desktopEditor) { state in
-            DesktopEditor(state: state, hasPassword: state.original.map(manager.hasDesktopPassword) ?? false) {
+            DesktopEditor(state: state, hasPassword: state.original.map(manager.hasDesktopPassword) ?? false,
+                          importFile: { manager.transferDesktop(nil, group: state.group) }) {
                 try manager.saveDesktop($0, editing: state.original != nil, password: $1, removePassword: $2)
             }
         }
-        .sheet(isPresented: $manager.choosingServer) {
-            ServerPicker(profiles: manager.profiles, desktops: manager.settings.desktops, kind: manager.catalogProtocol) { choice in
-                switch choice {
-                case .ssh(let profile): manager.connect(profile, new: true)
-                case .rdp(let profile): manager.connectDesktop(profile)
-                }
-            }
-        }
+        .sheet(item: $manager.logonRequest) { request in LogonSheet(request: request) }
+        .sheet(isPresented: $manager.choosingServer) { ServerPicker(manager: manager) }
         .sheet(isPresented: $manager.managingBackups) { BackupView(manager: manager) }
         .sheet(isPresented: $updates.presented) { MacUpdateView(updates: updates) }
+        .sheet(item: Binding(get: { manager.renaming.flatMap { id in manager.entries.first { $0.id == id } }.map(RenameRequest.init) },
+                             set: { if $0 == nil { manager.renaming = nil } })) { request in
+            RenameSheet(entry: request.entry) { try manager.rename(request.entry, to: $0) }
+        }
         .alert(manager.notice?.title ?? "",
                isPresented: Binding(get: { manager.notice != nil }, set: { if !$0 { manager.notice = nil } }),
                presenting: manager.notice) { notice in
@@ -102,467 +112,927 @@ private struct ManagerView: View {
         } message: { notice in
             Text(notice.text)
         }
-        .confirmationDialog("Удалить сервер?",
-                            isPresented: Binding(get: { manager.deleteProfile != nil }, set: { if !$0 { manager.deleteProfile = nil } }),
-                            titleVisibility: .visible, presenting: manager.deleteProfile) { profile in
-            Button("Удалить «\(profile.alias)»", role: .destructive) { manager.remove(profile); manager.deleteProfile = nil }
-        } message: { _ in Text("Секция подключения будет удалена из OpenSSH config.") }
-        .confirmationDialog("Удалить вкладку?",
-                            isPresented: Binding(get: { manager.deleteGroup != nil }, set: { if !$0 { manager.deleteGroup = nil } }),
-                            titleVisibility: .visible, presenting: manager.deleteGroup) { group in
-            Button("Удалить «\(group.name)»", role: .destructive) { manager.removeGroup(group); manager.deleteGroup = nil }
-        } message: { _ in Text("Серверы останутся в разделе «Все серверы».") }
-        .onChange(of: manager.destination) { _, destination in
-            if case .session(let id) = destination { manager.recordSession(id) }
-        }
     }
+}
 
-    private var sidebar: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            List(selection: Binding<Destination?>(get: { manager.destination }, set: { value in if let value { manager.destination = value } })) {
-                Section("Каталог") {
-                    Label("Все серверы", systemImage: "server.rack")
-                        .tag(Destination.all)
-                        .contextMenu { Button("Открывать при запуске") { manager.updateSettings { $0.startup = nil } } }
-                    ForEach(manager.settings.groups) { group in
-                        Label {
-                            Text(group.name).lineLimit(1)
-                        } icon: {
-                            Image(systemName: "folder")
-                                .foregroundStyle(group.marker?.color ?? .secondary)
-                        }
-                        .tag(Destination.group(group.id))
-                        .contextMenu { groupMenu(group) }
-                    }
-                }
-                Section("Сеансы") {
-                    if manager.sessions.isEmpty {
-                        Text("Нет открытых сеансов").foregroundStyle(.secondary).font(.callout)
-                    }
-                    ForEach(manager.sessions, id: \.id) { session in
-                        SessionRow(session: session)
-                            .tag(Destination.session(session.id))
-                            .contextMenu {
-                                Button("Новый сеанс") { manager.connect(session.profile, new: true) }
-                                Button("Новый сеанс без проброса портов") { manager.connect(session.profile, new: true, noForwarding: true) }
-                                Button("Файлы") { manager.openFiles(session.profile) }
-                                Divider()
-                                Button("Закрыть сеанс", role: .destructive) { manager.closeSession(session) }
-                            }
-                    }
-                }
-            }
-            .listStyle(.sidebar)
+private struct RenameRequest: Identifiable {
+    let entry: SessionEntry
+    var id: UUID { entry.id }
+}
 
-            Divider().padding(.horizontal, 12)
-            HStack {
-                Button {
-                    manager.groupEditor = GroupEditorState()
-                } label: { Label("Новая вкладка", systemImage: "plus") }
-                .buttonStyle(.borderless)
+/// Logo, page title and the buttons on the right (docs/ui-spec.md §2.1, §3.1).
+private struct PageHeader<Buttons: View>: View {
+    let title: String
+    @ViewBuilder let buttons: Buttons
+
+    var body: some View {
+        HStack(spacing: 8) {
+            AppMark()
+            Text(title).font(.system(size: 26, weight: .semibold)).lineLimit(1)
+            Spacer(minLength: 12)
+            buttons
+        }
+        .frame(height: 55)
+        .padding(.bottom, 7)
+    }
+}
+
+private struct ThemeButton: View {
+    @ObservedObject var manager: Manager
+    @Environment(\.colorScheme) private var scheme
+
+    var body: some View {
+        let dark = scheme == .dark
+        Button {
+            manager.updateSettings { $0.appearance = dark ? .light : .dark }
+        } label: { GlyphLabel(title: dark ? "Светлая тема" : "Тёмная тема", glyph: dark ? .sun : .moon) }
+            .winButton(.outline)
+            .frame(minWidth: 130)
+    }
+}
+
+private struct SearchField: View {
+    let placeholder: String
+    @Binding var text: String
+    var focus: FocusState<Bool>.Binding
+    var submit: () -> Void = {}
+    @Environment(\.colorScheme) private var scheme
+
+    var body: some View {
+        let palette = Palette.of(scheme)
+        HStack(spacing: 8) {
+            GlyphView(glyph: .browse, color: palette.muted)
+            TextField(placeholder, text: $text)
+                .textFieldStyle(.plain)
+                .focused(focus)
+                .onSubmit(submit)
+                .accessibilityLabel(placeholder)
+        }
+        .padding(.horizontal, 10)
+        .frame(height: 34)
+        .background(RoundedRectangle(cornerRadius: 7).fill(palette.surface))
+        .overlay(RoundedRectangle(cornerRadius: 7).strokeBorder(focus.wrappedValue ? palette.teal : palette.line, lineWidth: 1))
+    }
+}
+
+private struct Footer: View {
+    @ObservedObject var manager: Manager
+    @ObservedObject var updates: MacUpdates
+    @Environment(\.colorScheme) private var scheme
+
+    var body: some View {
+        let palette = Palette.of(scheme)
+        HStack(spacing: 12) {
+            if !manager.showingSessions {
+                Text(manager.catalogProtocol == .ssh ? manager.configPath : "~/Library/Application Support/SSH Manager/tabs.xml")
+                    .foregroundStyle(palette.muted).lineLimit(1).truncationMode(.middle)
                 Spacer()
-                if updates.available != nil {
-                    Button { updates.presented = true } label: { Image(systemName: "arrow.down.circle.fill") }
-                        .buttonStyle(.borderless).foregroundStyle(Color.accentColor)
-                        .help("Доступно обновление").accessibilityLabel("Доступно обновление")
-                }
-                Menu {
-                    Button("Проверить обновления…") { updates.check(manual: true) }
-                    Button("Открыть OpenSSH config") { manager.openConfig() }
-                    Button("Обновить список серверов") { manager.reload() }
-                    Button("Резервные копии…") { manager.managingBackups = true }
-                    Divider()
-                    ForEach(Appearance.allCases) { style in
-                        Button(style.title) { manager.updateSettings { $0.appearance = style } }
-                    }
-                } label: { Image(systemName: "gearshape") }
-                    .menuStyle(.borderlessButton).fixedSize()
-                    .help("Настройки").accessibilityLabel("Настройки")
-            }.padding(.horizontal, 16).frame(height: 42)
+                Text(CatalogModel(manager: manager).statusText).foregroundStyle(palette.muted)
+            } else {
+                Spacer()
+            }
+            Button {
+                if updates.available != nil { updates.presented = true } else { updates.check(manual: true) }
+            } label: {
+                GlyphLabel(title: updates.checking ? "Проверка…" :
+                            updates.available.map { "Обновить до \($0.version)" } ?? "Обновления", glyph: .refresh)
+            }
+            .winButton(.outline)
+            .frame(width: 170)
+            .disabled(updates.checking || updates.installing)
         }
+        .font(.system(size: 12))
+        .padding(.horizontal, 24)
+        .frame(height: 47)
     }
+}
 
-    private var currentGroup: ServerGroup? {
-        guard case .group(let id) = manager.destination else { return nil }
-        return manager.settings.groups.first { $0.id == id }
-    }
+// MARK: - Catalog
 
-    private var groupProfiles: [Profile] {
-        guard let group = currentGroup else { return manager.profiles }
+/// Rows of the current tab after search and sorting.
+private struct CatalogModel {
+    let manager: Manager
+    var query = ""
+
+    var groupProfiles: [Profile] {
+        guard let group = manager.currentGroup else { return manager.profiles }
         return manager.profiles.filter { group.aliases.contains($0.id) }
     }
 
-    private var visibleProfiles: [Profile] {
-        let search = query.trimmingCharacters(in: .whitespacesAndNewlines)
-        let filtered = groupProfiles.filter { profile in
-            search.isEmpty || profile.alias.localizedCaseInsensitiveContains(search) || profile.address.localizedCaseInsensitiveContains(search)
-        }
-        return currentSort.apply(filtered, name: \.alias, host: { $0.host.isEmpty ? $0.alias : $0.host })
-    }
-
-    private var groupDesktops: [DesktopProfile] {
-        guard let group = currentGroup else { return manager.settings.desktops }
+    var groupDesktops: [DesktopProfile] {
+        guard let group = manager.currentGroup else { return manager.settings.desktops }
         return manager.settings.desktops.filter { $0.group == group.id }
     }
 
-    private var visibleDesktops: [DesktopProfile] {
+    var profiles: [Profile] {
+        let search = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        let filtered = groupProfiles.filter { profile in
+            search.isEmpty || [profile.alias, profile.host, profile.user, manager.group(of: profile)?.name ?? ""]
+                .contains { $0.localizedCaseInsensitiveContains(search) }
+        }
+        return manager.currentSort.apply(filtered, name: \.alias, host: { $0.host.isEmpty ? $0.alias : $0.host })
+    }
+
+    var desktops: [DesktopProfile] {
         let search = query.trimmingCharacters(in: .whitespacesAndNewlines)
         let filtered = groupDesktops.filter { profile in
-            search.isEmpty || profile.name.localizedCaseInsensitiveContains(search) ||
-                profile.address.localizedCaseInsensitiveContains(search) || profile.account.localizedCaseInsensitiveContains(search)
+            search.isEmpty || [profile.name, profile.address, profile.account, manager.group(of: profile)?.name ?? ""]
+                .contains { $0.localizedCaseInsensitiveContains(search) }
         }
-        return currentSort.apply(filtered, name: \.name, host: \.host)
+        return manager.currentSort.apply(filtered, name: \.name, host: \.host)
     }
 
-    private var currentSort: ServerSort {
-        if manager.catalogProtocol == .rdp { return currentGroup?.rdpSort ?? manager.settings.rdpSort }
-        return currentGroup?.sshSort ?? manager.settings.sshSort
+    var statusText: String {
+        let total = manager.catalogProtocol == .ssh ? groupProfiles.count : groupDesktops.count
+        return "Подключений: \(total)"
     }
+}
 
-    private var catalog: some View {
+private struct CatalogPage: View {
+    @ObservedObject var manager: Manager
+    @State private var query = ""
+    @State private var selection: String?
+    @FocusState private var searchFocused: Bool
+    @Environment(\.colorScheme) private var scheme
+
+    var body: some View {
         let rdp = manager.catalogProtocol == .rdp
-        return VStack(alignment: .leading, spacing: 0) {
-            HStack {
-                VStack(alignment: .leading, spacing: 3) {
-                    Text(currentGroup?.name ?? "Все серверы").font(.largeTitle.weight(.semibold)).lineLimit(1)
-                    Text("Серверов: \(rdp ? groupDesktops.count : groupProfiles.count)").font(.callout).foregroundStyle(.secondary)
+        let model = CatalogModel(manager: manager, query: query)
+        VStack(alignment: .leading, spacing: 0) {
+            PageHeader(title: rdp ? "RDP-подключения" : "SSH-подключения") {
+                ThemeButton(manager: manager)
+                Button { manager.showSessionsPage() } label: {
+                    GlyphLabel(title: manager.liveCount > 0 ? "Сеансы · \(manager.liveCount)" : "Сеансы", glyph: .terminal)
+                }.winButton(.outline).frame(minWidth: 116)
+                Button { manager.addCatalogEntry() } label: { GlyphLabel(title: "Добавить сервер", glyph: .plus, kind: .primary) }
+                    .winButton(.primary).frame(minWidth: 158)
+            }
+            HStack(spacing: 4) {
+                ForEach(ConnectionProtocol.allCases) { kind in
+                    Button {
+                        manager.catalogProtocol = kind
+                        query = ""
+                        selection = nil
+                    } label: { GlyphLabel(title: kind.rawValue, glyph: kind == .ssh ? .terminal : .server) }
+                        .winButton(manager.catalogProtocol == kind ? .selectedTab : .tab)
+                        .frame(minWidth: 86)
                 }
-                Spacer()
-                Button {
-                    manager.choosingServer = true
-                } label: { Label("Новый сеанс", systemImage: "terminal") }
-                    .disabled(manager.profiles.isEmpty && manager.settings.desktops.isEmpty)
-                Button {
-                    manager.addCatalogEntry()
-                } label: { Label("Добавить сервер", systemImage: "plus") }
-                    .buttonStyle(.borderedProminent)
-            }
-            .padding(.horizontal, 24).padding(.top, 24).padding(.bottom, 14)
-            HStack {
-                Picker("Протокол", selection: $manager.catalogProtocol) {
-                    ForEach(ConnectionProtocol.allCases) { kind in Text(kind.rawValue).tag(kind) }
-                }.pickerStyle(.segmented).labelsHidden().frame(width: 164)
-                Spacer()
-                if rdp { Button("Импорт .rdp…") { manager.transferDesktop(nil, group: currentGroup?.id) } }
-                Picker("Сортировка", selection: Binding(get: { currentSort }, set: {
-                    manager.sortCatalog($0, kind: manager.catalogProtocol, group: currentGroup?.id)
-                })) {
-                    ForEach(ServerSort.allCases) { order in Text(order.title).tag(order) }
-                }.labelsHidden().fixedSize()
-            }
-            .padding(.horizontal, 24).padding(.bottom, 12)
-            HStack(spacing: 8) {
-                Image(systemName: "magnifyingglass").foregroundStyle(.secondary).accessibilityHidden(true)
-                TextField("Поиск по имени или адресу", text: $query)
-                    .textFieldStyle(.plain).focused($focusSearch)
-                    .accessibilityLabel("Поиск по имени или адресу")
-                if !query.isEmpty {
-                    Button { query = "" } label: { Image(systemName: "xmark.circle.fill") }
-                        .buttonStyle(.plain).foregroundStyle(.secondary).accessibilityLabel("Очистить поиск")
-                }
-            }
-            .padding(.horizontal, 10).frame(height: 32)
-            .background(.quaternary.opacity(0.45), in: RoundedRectangle(cornerRadius: 7))
-            .padding(.horizontal, 24).padding(.bottom, 16)
+            }.padding(.bottom, 6)
+            TabStrip(manager: manager)
+            tools(rdp: rdp, model: model)
+            ServerTable(manager: manager, model: model, selection: $selection, query: query)
+        }
+        .padding(.horizontal, 24)
+        .padding(.top, 15)
+    }
 
-            if rdp ? visibleDesktops.isEmpty : visibleProfiles.isEmpty {
-                Spacer()
-                VStack(spacing: 9) {
-                    Image(systemName: query.isEmpty ? "server.rack" : "magnifyingglass")
-                        .font(.system(size: 31, weight: .light))
-                        .foregroundStyle(.secondary).accessibilityHidden(true)
-                    Text(query.isEmpty ? "Здесь пока нет серверов" : "Серверы не найдены")
-                        .font(.title3.weight(.semibold))
-                    Text(query.isEmpty ? (rdp ? "Добавьте сервер или импортируйте профиль .rdp." : "Добавьте сервер для подключения по SSH или SFTP.") :
-                            "Попробуйте другое название или адрес.")
-                        .font(.callout).foregroundStyle(.secondary)
-                }
-                .frame(maxWidth: .infinity).padding(.bottom, 48)
-                Spacer()
-            } else {
-                ScrollView {
-                    LazyVStack(spacing: 0) {
-                        if rdp {
-                            let desktops = visibleDesktops
-                            ForEach(desktops) { profile in
-                                desktopRow(profile)
-                                if profile.id != desktops.last?.id { Divider().padding(.leading, 50) }
-                            }
-                        } else {
-                            let profiles = visibleProfiles
-                            ForEach(profiles) { profile in
-                                profileRow(profile)
-                                if profile.id != profiles.last?.id { Divider().padding(.leading, 50) }
-                            }
+    private func tools(rdp: Bool, model: CatalogModel) -> some View {
+        HStack(spacing: 4) {
+            SearchField(placeholder: "Найти сервер", text: $query, focus: $searchFocused).frame(width: 265)
+            Spacer()
+            Menu {
+                Button("Экспорт архива…") { manager.managingBackups = true }
+                Button("Импорт архива…") { manager.managingBackups = true }
+            } label: { GlyphLabel(title: "Резервные копии", glyph: .folder) }
+                .menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize()
+                .padding(.horizontal, 10)
+            Button { manager.reloadAll() } label: { GlyphLabel(title: "Обновить", glyph: .refresh) }.winButton(.quiet)
+            Button { editSelected(model) } label: { GlyphLabel(title: "Изменить", glyph: .edit) }
+                .winButton(.quiet).disabled(selection == nil)
+            Button { deleteSelected(model) } label: { GlyphLabel(title: "Удалить", glyph: .delete, danger: true) }
+                .winButton(.quiet, danger: true).disabled(selection == nil)
+        }
+        .padding(.bottom, 8)
+    }
+
+    private func editSelected(_ model: CatalogModel) {
+        if manager.catalogProtocol == .rdp, let profile = model.desktops.first(where: { $0.id == selection }) {
+            manager.desktopEditor = DesktopEditorState(original: profile, group: profile.group)
+        } else if let profile = model.profiles.first(where: { $0.id == selection }) {
+            manager.editor = ProfileEditorState(original: profile)
+        }
+    }
+
+    private func deleteSelected(_ model: CatalogModel) {
+        if manager.catalogProtocol == .rdp, let profile = model.desktops.first(where: { $0.id == selection }) {
+            manager.removeDesktop(profile)
+        } else if let profile = model.profiles.first(where: { $0.id == selection }) {
+            manager.remove(profile)
+        }
+    }
+}
+
+private struct TabStrip: View {
+    @ObservedObject var manager: Manager
+    @Environment(\.colorScheme) private var scheme
+
+    var body: some View {
+        HStack(spacing: 6) {
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 5) {
+                    tab(name: "Все серверы", marker: nil, selected: manager.destination == .all) { manager.destination = .all }
+                        .contextMenu { startupItem(nil) }
+                    ForEach(manager.settings.groups) { group in
+                        tab(name: group.name, marker: group.marker, selected: manager.destination == .group(group.id)) {
+                            manager.destination = .group(group.id)
+                        }
+                        .contextMenu { groupMenu(group) }
+                        .draggable(group.id)
+                        .dropDestination(for: String.self) { items, _ in
+                            guard let moved = items.first else { return false }
+                            manager.placeGroup(moved, before: group.id)
+                            return true
                         }
                     }
-                    .padding(.horizontal, 12)
-                    .background(.background, in: RoundedRectangle(cornerRadius: 10))
-                    .overlay { RoundedRectangle(cornerRadius: 10).strokeBorder(.quaternary, lineWidth: 1).allowsHitTesting(false) }
-                    .padding(.horizontal, 24).padding(.bottom, 20)
                 }
             }
-            Divider()
-            HStack(spacing: 14) {
-                Label(rdp ? "RDP-профили" : "~/.ssh/config", systemImage: "doc.text").font(.system(.caption, design: .monospaced))
-                Spacer()
-                Button("Обновить") { if rdp { manager.reloadSettings() } else { manager.reload() } }.buttonStyle(.borderless)
-                Button("Поиск") { focusSearch = true }.keyboardShortcut("f").buttonStyle(.borderless)
-            }.foregroundStyle(.secondary).padding(.horizontal, 24).frame(height: 36)
+            Button { manager.groupEditor = GroupEditorState() } label: { GlyphLabel(title: "Новая вкладка", glyph: .plus) }
+                .winButton(.quiet).frame(minWidth: 140)
         }
-        .background(Color(nsColor: .controlBackgroundColor))
-        .onChange(of: manager.catalogProtocol) { _, _ in query = "" }
+        .frame(height: 41)
+        .padding(.bottom, 8)
     }
 
-    private func desktopRow(_ profile: DesktopProfile) -> some View {
-        HStack(spacing: 12) {
-            Image(systemName: "display")
-                .font(.system(size: 16, weight: .medium))
-                .foregroundStyle(Color.accentColor)
-                .frame(width: 36, height: 36)
-                .background(Color.accentColor.opacity(0.10), in: RoundedRectangle(cornerRadius: 8))
-                .accessibilityHidden(true)
-            VStack(alignment: .leading, spacing: 3) {
-                Text(profile.name).font(.headline).lineLimit(1)
-                Text(profile.address).font(.system(.callout, design: .monospaced)).foregroundStyle(.secondary).lineLimit(1)
+    private func tab(name: String, marker: GroupMarker?, selected: Bool, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            HStack(spacing: 8) {
+                if let marker { Circle().fill(marker.color).frame(width: 11, height: 11) }
+                Text(name).lineLimit(1).frame(maxWidth: 230)
             }
-            Spacer()
-            Button("Подключиться") { manager.connectDesktop(profile) }
-            Menu { desktopMenu(profile) } label: { Image(systemName: "ellipsis.circle") }
-                .menuStyle(.borderlessButton).fixedSize()
-                .help("Действия с RDP-подключением").accessibilityLabel("Действия с сервером \(profile.name)")
         }
-        .frame(minHeight: 64)
-        .padding(.horizontal, 6)
-        .contextMenu { desktopMenu(profile) }
+        .winButton(selected ? .selectedTab : .tab)
     }
 
     @ViewBuilder
-    private func desktopMenu(_ profile: DesktopProfile) -> some View {
-        Button("Подключиться") { manager.connectDesktop(profile) }
-        Button("Изменить…") { manager.desktopEditor = DesktopEditorState(original: profile, group: profile.group) }
-        Menu("Переместить во вкладку") {
-            Button("Без вкладки") { manager.moveDesktop(profile, to: nil) }
-            ForEach(manager.settings.groups) { group in
-                Button(group.name) { manager.moveDesktop(profile, to: group.id) }
-            }
+    private func startupItem(_ id: String?) -> some View {
+        Button {
+            manager.updateSettings { $0.startup = id }
+        } label: {
+            if manager.settings.startup == id { Label("Открывать при запуске", systemImage: "checkmark") }
+            else { Text("Открывать при запуске") }
         }
-        Button("Экспорт .rdp…") { manager.transferDesktop(profile) }
-        Divider()
-        Button("Удалить…", role: .destructive) { manager.removeDesktop(profile) }
-    }
-
-    private func profileRow(_ profile: Profile) -> some View {
-        HStack(spacing: 12) {
-            Image(systemName: "terminal")
-                .font(.system(size: 16, weight: .medium))
-                .foregroundStyle(Color.accentColor)
-                .frame(width: 36, height: 36)
-                .background(Color.accentColor.opacity(0.10), in: RoundedRectangle(cornerRadius: 8))
-                .accessibilityHidden(true)
-            VStack(alignment: .leading, spacing: 3) {
-                Text(profile.alias).font(.headline).lineLimit(1)
-                Text(profile.address).font(.system(.callout, design: .monospaced)).foregroundStyle(.secondary).lineLimit(1)
-            }
-            Spacer()
-            let open = manager.sessions.filter { $0.profile.id == profile.id }
-            Button { manager.connect(profile) } label: { SessionButton(sessions: open) }
-                .help("Открыть терминал")
-            Button { manager.openFiles(profile) } label: { Label("Файлы", systemImage: "folder") }
-            Menu { profileMenu(profile) } label: { Image(systemName: "ellipsis.circle") }
-                .menuStyle(.borderlessButton).fixedSize()
-                .help("Действия с сервером").accessibilityLabel("Действия с сервером \(profile.alias)")
-        }
-        .frame(minHeight: 64)
-        .padding(.horizontal, 6)
-        .contextMenu { profileMenu(profile) }
-    }
-
-    @ViewBuilder
-    private func profileMenu(_ profile: Profile) -> some View {
-        Button("Подключиться") { manager.connect(profile) }
-        Button("Новый сеанс") { manager.connect(profile, new: true) }
-        Button("Новый сеанс без проброса портов") { manager.connect(profile, new: true, noForwarding: true) }
-        Button("Файлы") { manager.openFiles(profile) }
-        Divider()
-        Button("Изменить…") { manager.editor = ProfileEditorState(original: profile) }
-        Menu("Переместить во вкладку") {
-            Button("Без вкладки") { manager.updateSettings { $0.move(profile.id, to: nil) } }
-            ForEach(manager.settings.groups) { group in
-                Button(group.name) { manager.updateSettings { $0.move(profile.id, to: group.id) } }
-            }
-        }
-        Button("Удалить…", role: .destructive) { manager.deleteProfile = profile }
     }
 
     @ViewBuilder
     private func groupMenu(_ group: ServerGroup) -> some View {
-        Button("Переименовать…") { manager.groupEditor = GroupEditorState(original: group) }
-        Menu("Цветовая метка") {
-            Button("Без метки") { setMarker(nil, group: group) }
+        let groups = manager.settings.groups
+        let index = groups.firstIndex { $0.id == group.id } ?? 0
+        Button { manager.groupEditor = GroupEditorState(original: group) } label: { Label("Переименовать вкладку", systemImage: "pencil") }
+        Menu {
+            Button { manager.mark(group, nil) } label: {
+                if group.marker == nil { Label("Без метки", systemImage: "checkmark") } else { Text("Без метки") }
+            }
             ForEach(GroupMarker.allCases) { marker in
-                Button(marker.title) { setMarker(marker, group: group) }
+                Button { manager.mark(group, marker) } label: {
+                    if group.marker == marker { Label(marker.title, systemImage: "checkmark") } else { Text(marker.title) }
+                }
             }
-        }
-        Button("Открывать при запуске") { manager.updateSettings { $0.startup = group.id } }
-        Button("Переместить выше") { manager.shiftGroup(group, by: -1) }
-        Button("Переместить ниже") { manager.shiftGroup(group, by: 1) }
+        } label: { Label("Цветовая метка", systemImage: "circle.fill") }
+        Button { manager.shiftGroup(group, by: -1) } label: { Label("Переместить влево", systemImage: "arrow.left") }
+            .disabled(index == 0)
+        Button { manager.shiftGroup(group, by: 1) } label: { Label("Переместить вправо", systemImage: "arrow.right") }
+            .disabled(index == groups.count - 1)
+        startupItem(group.id)
         Divider()
-        Button("Удалить…", role: .destructive) { manager.deleteGroup = group }
-    }
-
-    private func setMarker(_ marker: GroupMarker?, group: ServerGroup) {
-        manager.updateSettings {
-            if let index = $0.groups.firstIndex(where: { $0.id == group.id }) { $0.groups[index].marker = marker }
-        }
-    }
-
-    private func sessionDetail(_ session: TerminalSession) -> some View {
-        SessionDetail(session: session, files: { manager.openFiles(session.profile) },
-                      newSession: { manager.connect(session.profile, new: true, noForwarding: session.noForwarding) },
-                      newSessionWithoutForwarding: { manager.connect(session.profile, new: true, noForwarding: true) },
-                      close: { manager.closeSession(session) })
-            .id(session.id)
+        Button(role: .destructive) { manager.removeGroup(group) } label: { Label("Удалить вкладку", systemImage: "trash") }
     }
 }
 
-private struct SessionButton: View {
-    let sessions: [TerminalSession]
+/// The Windows server grid: header with three-state sorting, 45 pt rows, Files/Connect pills.
+private struct ServerTable: View {
+    @ObservedObject var manager: Manager
+    let model: CatalogModel
+    @Binding var selection: String?
+    let query: String
+    @Environment(\.colorScheme) private var scheme
 
-    var body: some View {
-        if let first = sessions.last { SessionButtonStatus(session: first) }
-        else { Label("Подключиться", systemImage: "arrow.up.right") }
+    private struct Row: Identifiable {
+        let id: String
+        let name, address, user, port, tab: String
+        let sessions: Int
+        let ssh: Profile?
+        let rdp: DesktopProfile?
     }
-}
 
-private struct SessionButtonStatus: View {
-    @ObservedObject var session: TerminalSession
-    var body: some View {
-        session.exitCode == nil ? Label("К сеансу", systemImage: "terminal") : Label("Подключиться", systemImage: "arrow.up.right")
-    }
-}
-
-private struct SessionRow: View {
-    @ObservedObject var session: TerminalSession
-    var body: some View {
-        Label(session.label, systemImage: session.exitCode == nil ? "terminal" : "xmark.rectangle")
-            .lineLimit(1)
-            .help(session.profile.address)
-    }
-}
-
-private struct SessionDetail: View {
-    @ObservedObject var session: TerminalSession
-    let files: () -> Void
-    let newSession: () -> Void
-    let newSessionWithoutForwarding: () -> Void
-    let close: () -> Void
-    @State private var rename = false
-    @State private var label = ""
-
-    var body: some View {
-        VStack(spacing: 0) {
-            HStack(spacing: 10) {
-                Image(systemName: "terminal").font(.title2).foregroundStyle(Color.accentColor).accessibilityHidden(true)
-                VStack(alignment: .leading, spacing: 3) {
-                    Text(session.label).font(.headline).lineLimit(1)
-                    Text(session.profile.address).font(.system(.caption, design: .monospaced)).foregroundStyle(.secondary).lineLimit(1)
-                }
-                Spacer()
-                Button(action: files) { Label("Файлы", systemImage: "folder") }
-                Button(action: newSession) { Label("Новый сеанс", systemImage: "plus") }
-                Menu {
-                    if !session.noForwarding {
-                        Button("Новый сеанс без проброса портов", action: newSessionWithoutForwarding)
-                    }
-                    Button("Переименовать сеанс…") { label = session.label; rename = true }
-                    Button("Закрыть сеанс", role: .destructive, action: close)
-                } label: { Image(systemName: "ellipsis.circle") }
-                    .menuStyle(.borderlessButton).fixedSize().accessibilityLabel("Действия с сеансом")
-            }.padding(.horizontal, 16).frame(height: 58)
-            TerminalView(session: session)
-            HStack(spacing: 8) {
-                if let exit = session.exitCode {
-                    Label("Сеанс завершён (\(exit))", systemImage: "xmark.circle")
-                } else {
-                    Label("Сеанс SSH", systemImage: "terminal")
-                }
-                if session.noForwarding { Text("Без проброса портов") }
-                Spacer()
-                Button("Закрыть сеанс", action: close).buttonStyle(.borderless)
-            }.font(.callout).foregroundStyle(.secondary).padding(.horizontal, 16).frame(height: 36)
-        }
-        .alert("Название сеанса", isPresented: $rename) {
-            TextField("Название", text: $label)
-            Button("Отмена", role: .cancel) {}
-            Button("Сохранить") {
-                let trimmed = label.trimmingCharacters(in: .whitespacesAndNewlines)
-                session.label = trimmed.isEmpty ? session.profile.alias : String(trimmed.prefix(80))
+    private var rows: [Row] {
+        if manager.catalogProtocol == .rdp {
+            return model.desktops.map { desktop in
+                Row(id: desktop.id, name: desktop.name, address: desktop.host, user: desktop.account.isEmpty ? "—" : desktop.account,
+                    port: String(desktop.port), tab: manager.group(of: desktop)?.name ?? "—",
+                    sessions: manager.liveCount(for: desktop), ssh: nil, rdp: desktop)
             }
         }
+        return model.profiles.map { profile in
+            Row(id: profile.id, name: profile.alias, address: profile.host.isEmpty ? "—" : profile.host,
+                user: profile.user.isEmpty ? "—" : profile.user, port: profile.port.isEmpty ? "—" : profile.port,
+                tab: manager.group(of: profile)?.name ?? "—", sessions: manager.liveCount(for: profile), ssh: profile, rdp: nil)
+        }
+    }
+
+    var body: some View {
+        let palette = Palette.of(scheme)
+        let ssh = manager.catalogProtocol == .ssh
+        GeometryReader { geometry in
+            let widths = columnWidths(total: geometry.size.width, ssh: ssh)
+            VStack(spacing: 0) {
+                header(widths: widths, ssh: ssh, palette: palette)
+                ScrollView {
+                    LazyVStack(spacing: 0) {
+                        ForEach(rows) { row in rowView(row, widths: widths, ssh: ssh, palette: palette) }
+                    }
+                }
+                .overlay {
+                    if rows.isEmpty {
+                        Text(emptyText).foregroundStyle(palette.muted).multilineTextAlignment(.center).padding(16)
+                    }
+                }
+            }
+            .background(palette.surface)
+            .overlay(Rectangle().strokeBorder(palette.line, lineWidth: 1).allowsHitTesting(false))
+        }
+    }
+
+    private var emptyText: String {
+        if !query.trimmingCharacters(in: .whitespaces).isEmpty { return "По вашему запросу ничего не найдено." }
+        if manager.catalogProtocol == .rdp { return "Добавьте RDP-подключение или импортируйте профиль .rdp." }
+        if manager.currentGroup != nil { return "Добавьте сервер или перенесите сюда подключение из «Все серверы»." }
+        return "Добавьте сервер, чтобы создать первое подключение."
+    }
+
+    private func columnWidths(total: CGFloat, ssh: Bool) -> [CGFloat] {
+        let fixed: CGFloat = 64 + (ssh ? 100 : 0) + 159
+        let flexible = max(0, total - fixed)
+        let weights: [CGFloat] = [30, 34, 23, 22]
+        let sum = weights.reduce(0, +)
+        let flex = weights.map { flexible * $0 / sum }
+        return [flex[0], flex[1], flex[2], 64, flex[3], ssh ? 100 : 0, 159]
+    }
+
+    private func header(widths: [CGFloat], ssh: Bool, palette: Palette) -> some View {
+        let order = manager.currentSort
+        return HStack(spacing: 0) {
+            sortableHeader(ssh ? "Псевдоним" : "Название", width: widths[0], address: false, order: order)
+            sortableHeader("Адрес", width: widths[1], address: true, order: order)
+            headerCell("Пользователь", width: widths[2])
+            headerCell("Порт", width: widths[3])
+            headerCell("Вкладка", width: widths[4])
+            if ssh { headerCell("SFTP", width: widths[5]) }
+            headerCell(ssh ? "Терминал" : "Рабочий стол", width: widths[6])
+        }
+        .frame(height: 37)
+        .background(palette.canvas)
+        .overlay(alignment: .bottom) { Rectangle().fill(palette.line).frame(height: 1) }
+        .foregroundStyle(palette.muted)
+        .font(.system(size: 12, weight: .semibold))
+    }
+
+    private func headerCell(_ title: String, width: CGFloat) -> some View {
+        Text(title).lineLimit(1).padding(.leading, 8).frame(width: width, alignment: .leading)
+    }
+
+    private func sortableHeader(_ title: String, width: CGFloat, address: Bool, order: ServerSort) -> some View {
+        let ascending = order == (address ? .address : .name)
+        let descending = order == (address ? .addressDescending : .nameDescending)
+        return Button { manager.sortBy(address: address) } label: {
+            HStack(spacing: 4) {
+                Text(title).lineLimit(1)
+                if ascending || descending { Image(systemName: ascending ? "chevron.up" : "chevron.down").font(.system(size: 9, weight: .bold)) }
+                Spacer(minLength: 0)
+            }
+            .padding(.leading, 8)
+            .frame(width: width, height: 37, alignment: .leading)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .help("Нажмите для сортировки")
+    }
+
+    private func rowView(_ row: Row, widths: [CGFloat], ssh: Bool, palette: Palette) -> some View {
+        let selected = selection == row.id
+        return HStack(spacing: 0) {
+            HStack(spacing: 8) {
+                GlyphView(glyph: .server, color: palette.teal)
+                Text(row.name).font(.system(size: 13, weight: .semibold)).lineLimit(1)
+            }
+            .padding(.leading, 9).frame(width: widths[0], alignment: .leading)
+            cell(row.address, width: widths[1])
+            cell(row.user, width: widths[2])
+            cell(row.port, width: widths[3])
+            cell(row.tab, width: widths[4])
+            if ssh, let profile = row.ssh {
+                pill("Файлы", glyph: .folder, palette: palette) { manager.openFiles(profile) }.frame(width: widths[5])
+            }
+            pill(row.sessions > 0 ? "К сеансу · \(row.sessions)" : "Подключиться", glyph: .terminal, palette: palette) {
+                if let profile = row.ssh { manager.connect(profile) }
+                if let desktop = row.rdp { manager.connectDesktop(desktop) }
+            }.frame(width: widths[6])
+        }
+        .frame(height: 45)
+        .background(selected ? palette.selection : palette.surface)
+        .overlay(alignment: .bottom) { Rectangle().fill(palette.line).frame(height: 1) }
+        .contentShape(Rectangle())
+        .onTapGesture(count: 2) { edit(row) }
+        .onTapGesture { selection = row.id }
+        .contextMenu {
+            if let profile = row.ssh { sshMenu(profile) }
+            if let desktop = row.rdp { rdpMenu(desktop) }
+        }
+    }
+
+    private func cell(_ text: String, width: CGFloat) -> some View {
+        Text(text).font(.system(size: 13)).lineLimit(1).padding(.leading, 8).frame(width: width, alignment: .leading)
+    }
+
+    private func pill(_ title: String, glyph: Glyph, palette: Palette, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            HStack(spacing: 6) {
+                GlyphView(glyph: glyph, color: palette.teal)
+                Text(title).font(.system(size: 13, weight: .semibold)).foregroundStyle(palette.teal).lineLimit(1)
+                Spacer(minLength: 0)
+            }
+            .padding(.leading, 7)
+            .frame(maxWidth: .infinity, minHeight: 30, maxHeight: 30)
+            .background(RoundedRectangle(cornerRadius: 7).fill(palette.mint))
+            .contentShape(RoundedRectangle(cornerRadius: 7))
+        }
+        .buttonStyle(.plain)
+        .padding(.horizontal, 5)
+    }
+
+    private func edit(_ row: Row) {
+        selection = row.id
+        if let profile = row.ssh { manager.editor = ProfileEditorState(original: profile) }
+        if let desktop = row.rdp { manager.desktopEditor = DesktopEditorState(original: desktop, group: desktop.group) }
+    }
+
+    @ViewBuilder
+    private func sshMenu(_ profile: Profile) -> some View {
+        let current = manager.group(of: profile)?.id
+        Button { manager.connect(profile) } label: { Label("Подключиться", systemImage: "terminal") }
+        Button { manager.connect(profile, new: true) } label: { Label("Новый сеанс", systemImage: "plus") }
+        Button { manager.openFiles(profile) } label: { Label("Файлы (SFTP)", systemImage: "folder") }
+        Button { manager.openInTerminal(profile) } label: { Label("Открыть в Терминале", systemImage: "apple.terminal") }
+        Button { manager.editor = ProfileEditorState(original: profile) } label: { Label("Изменить", systemImage: "pencil") }
+        Menu {
+            Button { manager.move(profile, to: nil) } label: {
+                if current == nil { Label("Без вкладки", systemImage: "checkmark") } else { Text("Без вкладки") }
+            }
+            ForEach(manager.settings.groups) { group in
+                Button { manager.move(profile, to: group.id) } label: {
+                    if current == group.id { Label(group.name, systemImage: "checkmark") } else { Text(group.name) }
+                }
+            }
+            Divider()
+            Button { manager.moveToNewGroup(profile) } label: { Label("Новая вкладка…", systemImage: "plus") }
+        } label: { Label("Переместить во вкладку", systemImage: "arrow.right") }
+        Button { manager.copyCommand(profile) } label: { Label("Копировать команду SSH", systemImage: "doc.on.doc") }
+        Divider()
+        Button(role: .destructive) { manager.remove(profile) } label: { Label("Удалить", systemImage: "trash") }
+    }
+
+    @ViewBuilder
+    private func rdpMenu(_ desktop: DesktopProfile) -> some View {
+        Button { manager.connectDesktop(desktop) } label: { Label("Подключиться", systemImage: "server.rack") }
+        Button { manager.connectDesktop(desktop, new: true) } label: { Label("Новый сеанс", systemImage: "plus") }
+        Button { manager.desktopEditor = DesktopEditorState(original: desktop, group: desktop.group) } label: {
+            Label("Изменить", systemImage: "pencil")
+        }
+        Menu {
+            Button { manager.moveDesktop(desktop, to: nil) } label: {
+                if desktop.group == nil { Label("Без вкладки", systemImage: "checkmark") } else { Text("Без вкладки") }
+            }
+            ForEach(manager.settings.groups) { group in
+                Button { manager.moveDesktop(desktop, to: group.id) } label: {
+                    if desktop.group == group.id { Label(group.name, systemImage: "checkmark") } else { Text(group.name) }
+                }
+            }
+        } label: { Label("Переместить во вкладку", systemImage: "arrow.right") }
+        Button { manager.transferDesktop(desktop) } label: { Label("Экспорт .rdp…", systemImage: "doc.on.doc") }
+        Divider()
+        Button(role: .destructive) { manager.removeDesktop(desktop) } label: { Label("Удалить", systemImage: "trash") }
+    }
+}
+
+// MARK: - Sessions
+
+private struct SessionsPage: View {
+    @ObservedObject var manager: Manager
+    @State private var query = ""
+    @FocusState private var searchFocused: Bool
+    @Environment(\.colorScheme) private var scheme
+
+    var body: some View {
+        let palette = Palette.of(scheme)
+        let entries = manager.entries.filter { entry in
+            let search = query.trimmingCharacters(in: .whitespaces)
+            return search.isEmpty || [entry.title, entry.address, groupName(entry), entry.protocolName]
+                .contains { $0.localizedCaseInsensitiveContains(search) }
+        }
+        VStack(alignment: .leading, spacing: 0) {
+            PageHeader(title: "Сеансы") {
+                ThemeButton(manager: manager)
+                Button { manager.showServers() } label: { GlyphLabel(title: "К серверам", glyph: .moveLeft) }
+                    .winButton(.outline).frame(minWidth: 126)
+                Button { manager.choosingServer = true } label: { GlyphLabel(title: "Новый сеанс", glyph: .plus, kind: .primary) }
+                    .winButton(.primary).frame(minWidth: 132)
+            }
+            HStack(alignment: .top, spacing: 12) {
+                VStack(alignment: .leading, spacing: 6) {
+                    SearchField(placeholder: "Найти сеанс", text: $query, focus: $searchFocused) {
+                        if let first = entries.first { manager.activate(first.id) }
+                    }
+                    Text("Открыто: \(manager.liveCount)").font(.system(size: 12)).foregroundStyle(palette.muted).padding(.leading, 2)
+                    ScrollView {
+                        LazyVStack(spacing: 0) {
+                            ForEach(entries) { entry in
+                                SessionListRow(entry: entry, color: dotColor(entry, palette: palette),
+                                               selected: entry.id == manager.activeSession, palette: palette)
+                                    .contentShape(Rectangle())
+                                    .onTapGesture { manager.activate(entry.id) }
+                                    .contextMenu { SessionMenu(manager: manager, entry: entry) }
+                            }
+                        }
+                    }
+                    .background(palette.surface)
+                    .overlay(Rectangle().strokeBorder(palette.line, lineWidth: 1).allowsHitTesting(false))
+                }
+                .frame(width: 234)
+                VStack(alignment: .leading, spacing: 7) {
+                    SessionInfo(manager: manager, entry: manager.activeEntry, groupName: manager.activeEntry.map(groupName) ?? "")
+                    SessionContent(manager: manager, entry: manager.activeEntry)
+                }
+            }
+        }
+        .padding(.horizontal, 24)
+        .padding(.top, 15)
+        .padding(.bottom, 8)
+        .onReceive(NotificationCenter.default.publisher(for: .focusSessionSearch)) { _ in searchFocused = true }
+    }
+
+    private func groupName(_ entry: SessionEntry) -> String {
+        switch entry {
+        case .ssh(let session): manager.group(of: session.profile)?.name ?? ""
+        case .rdp(let session): manager.group(of: session.profile)?.name ?? ""
+        }
+    }
+
+    private func dotColor(_ entry: SessionEntry, palette: Palette) -> Color {
+        let marker: GroupMarker?
+        switch entry {
+        case .ssh(let session): marker = manager.group(of: session.profile)?.marker
+        case .rdp(let session): marker = manager.group(of: session.profile)?.marker
+        }
+        return marker?.color ?? palette.teal
+    }
+}
+
+/// Sidebar row: group dot, title, «SSH · user@host:port» or «… · Сеанс завершён».
+private struct SessionListRow: View {
+    let entry: SessionEntry
+    let color: Color
+    let selected: Bool
+    let palette: Palette
+
+    var body: some View {
+        switch entry {
+        case .ssh(let session): SSHRow(session: session, color: color, selected: selected, palette: palette)
+        case .rdp(let session): RDPRow(session: session, color: color, selected: selected, palette: palette)
+        }
+    }
+}
+
+private struct SSHRow: View {
+    @ObservedObject var session: TerminalSession
+    let color: Color
+    let selected: Bool
+    let palette: Palette
+    var body: some View {
+        RowLayout(title: session.title, subtitle: "SSH · " + (session.live ? session.address : "Сеанс завершён"),
+                  color: session.live ? color : palette.line, selected: selected, palette: palette)
+    }
+}
+
+private struct RDPRow: View {
+    @ObservedObject var session: DesktopSession
+    let color: Color
+    let selected: Bool
+    let palette: Palette
+    var body: some View {
+        RowLayout(title: session.title, subtitle: "RDP · " + (session.live ? session.profile.address : "Сеанс завершён"),
+                  color: session.live ? color : palette.line, selected: selected, palette: palette)
+    }
+}
+
+private struct RowLayout: View {
+    let title, subtitle: String
+    let color: Color
+    let selected: Bool
+    let palette: Palette
+    var body: some View {
+        HStack(alignment: .top, spacing: 8) {
+            Circle().fill(color).frame(width: 7, height: 7).padding(.top, 6)
+            VStack(alignment: .leading, spacing: 1) {
+                Text(title).font(.system(size: 13, weight: .semibold)).lineLimit(1)
+                Text(subtitle).font(.system(size: 12)).foregroundStyle(palette.muted).lineLimit(1)
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 9)
+        .frame(height: 46)
+        .background(selected ? palette.selection : Color.clear)
+    }
+}
+
+private struct SessionMenu: View {
+    @ObservedObject var manager: Manager
+    let entry: SessionEntry
+
+    var body: some View {
+        Button { manager.renaming = entry.id } label: { Label("Переименовать сеанс", systemImage: "pencil") }
+        Button { manager.duplicate(entry) } label: { Label("Новый сеанс этого сервера", systemImage: "plus") }
+        switch entry {
+        case .ssh(let session):
+            Button { manager.openFiles(session.profile) } label: { Label("Файлы (SFTP)", systemImage: "folder") }
+            if session.forwardingFailed {
+                Button { manager.duplicate(entry, noForwarding: true) } label: {
+                    Label("Новый сеанс без проброса портов", systemImage: "terminal")
+                }
+            }
+        case .rdp(let session):
+            if session.live && session.usesFreeRDP {
+                Button { manager.fullScreen(session) } label: { Label("Полноэкранный режим RDP", systemImage: "rectangle.inset.filled") }
+            }
+            Button { manager.reconnect(entry) } label: { Label("Переподключить", systemImage: "arrow.clockwise") }
+        }
+        Divider()
+        Button(role: .destructive) { manager.closeSession(entry) } label: { Label("Закрыть сеанс", systemImage: "trash") }
+    }
+}
+
+/// Title, buttons and the detail line «протокол  ·  адрес  ·  вкладка  ·  статус» (docs/ui-spec.md §3.3).
+private struct SessionInfo: View {
+    @ObservedObject var manager: Manager
+    let entry: SessionEntry?
+    let groupName: String
+
+    var body: some View {
+        switch entry {
+        case .ssh(let session): SSHInfo(manager: manager, session: session, entry: entry!, groupName: groupName)
+        case .rdp(let session): RDPInfo(manager: manager, session: session, entry: entry!, groupName: groupName)
+        case nil: InfoLayout(title: "Сеансы SSH и RDP", detail: "") { EmptyView() }
+        }
+    }
+}
+
+private struct InfoLayout<Buttons: View>: View {
+    let title: String
+    let detail: String
+    @ViewBuilder let buttons: Buttons
+    @Environment(\.colorScheme) private var scheme
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            HStack(spacing: 6) {
+                Text(title).font(.system(size: 13, weight: .semibold)).lineLimit(1).layoutPriority(-1)
+                Spacer(minLength: 8)
+                buttons
+            }
+            Text(detail).font(.system(size: 12)).foregroundStyle(Palette.of(scheme).muted).lineLimit(1)
+        }
+        .frame(height: 58)
+    }
+}
+
+private func detailLine(_ parts: [String]) -> String { parts.filter { !$0.isEmpty }.joined(separator: "  ·  ") }
+
+private struct SSHInfo: View {
+    @ObservedObject var manager: Manager
+    @ObservedObject var session: TerminalSession
+    let entry: SessionEntry
+    let groupName: String
+
+    var body: some View {
+        let forwarding = session.forwardingFailed ? "ошибка проброса порта" : session.noForwarding ? "без проброса" : ""
+        InfoLayout(title: session.title,
+                   detail: detailLine(["SSH", session.address, groupName, forwarding, session.live ? "" : "завершён"])) {
+            Button { manager.openFiles(session.profile) } label: { GlyphLabel(title: "Файлы", glyph: .folder) }.winButton(.outline)
+            Button { manager.duplicate(entry) } label: { GlyphLabel(title: "Новый сеанс этого сервера", glyph: .plus) }.winButton(.quiet)
+            Button { manager.closeSession(entry) } label: { GlyphLabel(title: "Закрыть", glyph: nil, danger: true) }
+                .winButton(.quiet, danger: true)
+        }
+    }
+}
+
+private struct RDPInfo: View {
+    @ObservedObject var manager: Manager
+    @ObservedObject var session: DesktopSession
+    let entry: SessionEntry
+    let groupName: String
+
+    var body: some View {
+        InfoLayout(title: session.title, detail: detailLine(["RDP", session.profile.address, groupName, session.status])) {
+            Button { manager.reconnect(entry) } label: { GlyphLabel(title: "Переподключить", glyph: .refresh) }.winButton(.outline)
+            Button { manager.fullScreen(session) } label: { GlyphLabel(title: "Весь экран", glyph: .server) }
+                .winButton(.outline).disabled(!session.live || !session.usesFreeRDP)
+            Button { manager.duplicate(entry) } label: { GlyphLabel(title: "Новый сеанс этого сервера", glyph: .plus) }.winButton(.quiet)
+            Button { manager.closeSession(entry) } label: { GlyphLabel(title: "Закрыть", glyph: nil, danger: true) }
+                .winButton(.quiet, danger: true)
+        }
+    }
+}
+
+private struct SessionContent: View {
+    @ObservedObject var manager: Manager
+    let entry: SessionEntry?
+
+    var body: some View {
+        ZStack {
+            Palette.terminalBackground
+            switch entry {
+            case .ssh(let session): SSHContent(manager: manager, session: session, entry: entry!).id(session.id)
+            case .rdp(let session): RDPContent(manager: manager, session: session, entry: entry!)
+            case nil:
+                Text("Выберите сервер в каталоге, чтобы начать сеанс.").foregroundStyle(Palette.terminalText)
+            }
+        }
+    }
+}
+
+private struct SSHContent: View {
+    @ObservedObject var manager: Manager
+    @ObservedObject var session: TerminalSession
+    let entry: SessionEntry
+
+    var body: some View {
+        TerminalView(session: session)
+    }
+}
+
+/// The dark area of an RDP session: where the desktop opened, or why it ended with «Переподключить» / «Закрыть сеанс».
+private struct RDPContent: View {
+    @ObservedObject var manager: Manager
+    @ObservedObject var session: DesktopSession
+    let entry: SessionEntry
+
+    var body: some View {
+        VStack(spacing: 8) {
+            if session.live {
+                Text(session.external).foregroundStyle(Palette.terminalText).multilineTextAlignment(.center)
+                Text(session.status).font(.system(size: 12)).foregroundStyle(.gray)
+            } else {
+                Text(session.endedTitle).font(.system(size: 26, weight: .semibold)).foregroundStyle(Palette.terminalText)
+                Text(session.endedDetail).foregroundStyle(.gray).multilineTextAlignment(.center).textSelection(.enabled)
+                HStack(spacing: 8) {
+                    Button { manager.reconnect(entry) } label: { GlyphLabel(title: "Переподключить", glyph: .refresh, kind: .primary) }
+                        .winButton(.primary)
+                    Button { manager.closeSession(entry) } label: { GlyphLabel(title: "Закрыть сеанс", glyph: nil) }
+                        .winButton(.outline)
+                }.padding(.top, 12)
+            }
+        }
+        .padding(24)
+    }
+}
+
+// MARK: - Dialogs
+
+private struct DialogButtons: View {
+    let commit: String
+    var enabled = true
+    let cancel: () -> Void
+    let submit: () -> Void
+
+    var body: some View {
+        HStack {
+            Spacer()
+            Button("Отмена", action: cancel).keyboardShortcut(.cancelAction).winButton(.outline)
+            Button(commit, action: submit).keyboardShortcut(.defaultAction).winButton(.primary).disabled(!enabled)
+        }
+    }
+}
+
+private func privateKeys() -> [String] {
+    let folder = ConfigStore.standard.url.deletingLastPathComponent()
+    guard let names = try? FileManager.default.contentsOfDirectory(atPath: folder.path) else { return [] }
+    return names.sorted().compactMap { name in
+        let url = folder.appendingPathComponent(name)
+        guard let handle = try? FileHandle(forReadingFrom: url) else { return nil }
+        defer { try? handle.close() }
+        let head = String(decoding: (try? handle.read(upToCount: 80)) ?? Data(), as: UTF8.self)
+        return head.hasPrefix("-----BEGIN") && head.contains("PRIVATE KEY-----") ? "~/.ssh/" + name : nil
     }
 }
 
 private struct ProfileEditor: View {
     @Environment(\.dismiss) private var dismiss
-    @FocusState private var aliasFocused: Bool
+    @Environment(\.colorScheme) private var scheme
     @State private var profile: Profile
     @State private var password = ""
     @State private var removePassword = false
     @State private var failure: String?
+    @State private var keys: [String]
+    @State private var chosenKey: String?
+    @State private var available: [String] = privateKeys()
     private let state: ProfileEditorState
+    private let hasPassword: Bool
     private let save: (Profile, String, Bool) throws -> Void
 
-    init(state: ProfileEditorState, save: @escaping (Profile, String, Bool) throws -> Void) {
+    init(state: ProfileEditorState, hasPassword: Bool, save: @escaping (Profile, String, Bool) throws -> Void) {
         self.state = state
+        self.hasPassword = hasPassword
         self.save = save
-        _profile = State(initialValue: state.original ?? Profile())
+        let start = state.original ?? Profile()
+        _profile = State(initialValue: start)
+        _keys = State(initialValue: start.identities.components(separatedBy: .newlines).filter { !$0.isEmpty })
+    }
+
+    private var sameDestination: Bool {
+        guard let original = state.original else { return false }
+        return original.host == profile.host && original.user == profile.user && original.port == profile.port
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            Text(state.original == nil ? "Добавить сервер" : "Изменить сервер").font(.title2.weight(.semibold))
-            Form {
-                TextField("Псевдоним", text: $profile.alias, prompt: Text("например, staging")).focused($aliasFocused)
-                TextField("Адрес", text: $profile.host, prompt: Text("имя хоста или IP"))
-                TextField("Пользователь", text: $profile.user, prompt: Text("из OpenSSH config"))
-                TextField("Порт", text: $profile.port, prompt: Text("22"))
-                SecureField("Пароль", text: $password, prompt: Text("Связка ключей")).disabled(removePassword)
-                if state.original != nil { Toggle("Удалить сохранённый пароль", isOn: $removePassword) }
-            }.textFieldStyle(.roundedBorder)
-            VStack(alignment: .leading, spacing: 6) {
-                HStack {
-                    Text("Файлы ключей").font(.headline)
-                    Spacer()
-                    Button("Выбрать…", action: chooseKeys)
+        let palette = Palette.of(scheme)
+        VStack(alignment: .leading, spacing: 10) {
+            Text(state.original == nil ? "Новое подключение" : "Изменить подключение").font(.title2.weight(.semibold))
+            Grid(alignment: .leading, horizontalSpacing: 12, verticalSpacing: 8) {
+                GridRow { Text("Псевдоним"); TextField("", text: $profile.alias) }
+                GridRow { Text("Хост"); TextField("", text: $profile.host) }
+                GridRow { Text("Пользователь"); TextField("", text: $profile.user) }
+                GridRow { Text("Порт"); TextField("", text: $profile.port) }
+                GridRow { Text("Пароль"); SecureField("", text: $password).disabled(removePassword) }
+                GridRow {
+                    Color.clear.frame(width: 1, height: 1)
+                    HStack {
+                        Text(!hasPassword ? "Пароль необязателен. Хранится в Связке ключей." :
+                                sameDestination ? "Пароль сохранён. Пустое поле оставит прежний." :
+                                "Для нового адреса, порта или пользователя введите пароль заново.")
+                            .foregroundStyle(palette.muted)
+                        if hasPassword && sameDestination { Toggle("Удалить пароль", isOn: $removePassword) }
+                    }.font(.callout)
                 }
-                TextEditor(text: $profile.identities)
-                    .font(.system(.callout, design: .monospaced)).frame(height: 58)
-                    .overlay { RoundedRectangle(cornerRadius: 4).strokeBorder(.quaternary).allowsHitTesting(false) }
-                    .accessibilityLabel("Файлы ключей, по одному на строку")
-                Text("Один путь на строку. Пустые поля используют настройки OpenSSH.").foregroundStyle(.secondary).font(.caption)
+                GridRow {
+                    Color.clear.frame(width: 1, height: 1)
+                    Text("Пустые поля используют настройки OpenSSH.").foregroundStyle(palette.muted).font(.callout)
+                }
+                GridRow {
+                    Text("Доступные ключи")
+                    HStack {
+                        Picker("", selection: $chosenKey) {
+                            ForEach(available, id: \.self) { key in Text(key).tag(Optional(key)) }
+                        }.labelsHidden()
+                        Button { browse() } label: { GlyphLabel(title: "Обзор…", glyph: .browse) }.winButton(.outline)
+                    }
+                }
+                GridRow {
+                    Color.clear.frame(width: 1, height: 1)
+                    Text(available.isEmpty ? "В папке .ssh ключи не найдены. Можно указать файл через «Обзор»." : "Ключи найдены в папке .ssh.")
+                        .foregroundStyle(palette.muted).font(.callout)
+                }
+                GridRow(alignment: .top) {
+                    Text("Выбранные ключи")
+                    List(keys, id: \.self, selection: Binding(get: { selectedKey }, set: { selectedKey = $0 })) { key in
+                        Text(key).lineLimit(1).truncationMode(.middle)
+                    }.frame(height: 86).listStyle(.bordered)
+                }
+                GridRow {
+                    Color.clear.frame(width: 1, height: 1)
+                    HStack(spacing: 6) {
+                        Button { addKey() } label: { GlyphLabel(title: "Добавить ключ", glyph: .key) }.winButton(.outline)
+                        Button { replaceKey() } label: { GlyphLabel(title: "Заменить", glyph: .edit) }.winButton(.outline)
+                        Button { keys.removeAll { $0 == selectedKey } } label: { GlyphLabel(title: "Убрать", glyph: .delete) }.winButton(.outline)
+                    }
+                }
             }
-            if let failure { Text(failure).foregroundStyle(.red).font(.callout) }
-            HStack {
-                Spacer()
-                Button("Отмена") { dismiss() }.keyboardShortcut(.cancelAction)
-                Button("Сохранить", action: submit).keyboardShortcut(.defaultAction)
-                    .disabled(profile.alias.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-            }
+            .textFieldStyle(.roundedBorder)
+            if let failure { Text(failure).foregroundStyle(palette.danger).font(.callout) }
+            DialogButtons(commit: "Сохранить", enabled: !profile.alias.trimmingCharacters(in: .whitespaces).isEmpty,
+                          cancel: { dismiss() }, submit: submit)
         }
-        .padding(22).frame(width: 490)
-        .onAppear { aliasFocused = true }
+        .padding(22).frame(width: 640)
+        .onAppear { if chosenKey == nil { chosenKey = available.first } }
     }
 
-    private func chooseKeys() {
+    @State private var selectedKey: String?
+
+    private func addKey() {
+        if let key = chosenKey, !keys.contains(key) { keys.append(key) }
+    }
+
+    private func replaceKey() {
+        guard let key = chosenKey, let selectedKey, let index = keys.firstIndex(of: selectedKey), !keys.contains(key) else { return }
+        keys[index] = key
+    }
+
+    private func browse() {
         let panel = NSOpenPanel()
-        panel.allowsMultipleSelection = true
+        panel.allowsMultipleSelection = false
         panel.showsHiddenFiles = true
         panel.directoryURL = ConfigStore.standard.url.deletingLastPathComponent()
-        if panel.runModal() == .OK {
-            var paths = profile.identities.components(separatedBy: .newlines).filter { !$0.isEmpty }
-            for url in panel.urls where !paths.contains(url.path) { paths.append(url.path) }
-            profile.identities = paths.joined(separator: "\n")
+        if panel.runModal() == .OK, let url = panel.url {
+            let path = url.path.replacingOccurrences(of: NSHomeDirectory(), with: "~")
+            if !available.contains(path) { available.insert(path, at: 0) }
+            chosenKey = path
         }
     }
 
@@ -571,6 +1041,7 @@ private struct ProfileEditor: View {
         profile.host = profile.host.trimmingCharacters(in: .whitespacesAndNewlines)
         profile.user = profile.user.trimmingCharacters(in: .whitespacesAndNewlines)
         profile.port = profile.port.trimmingCharacters(in: .whitespacesAndNewlines)
+        profile.identities = keys.joined(separator: "\n")
         do { try save(profile, removePassword ? "" : password, removePassword); dismiss() }
         catch { failure = error.localizedDescription }
     }
@@ -590,23 +1061,22 @@ private struct GroupEditor: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            Text(state.original == nil ? "Новая вкладка" : "Переименовать вкладку").font(.title2.weight(.semibold))
-            TextField("Название", text: $name).textFieldStyle(.roundedBorder)
-            if let failure { Text(failure).foregroundStyle(.red) }
-            HStack {
-                Spacer()
-                Button("Отмена") { dismiss() }.keyboardShortcut(.cancelAction)
-                Button("Сохранить") {
-                    do { try save(name); dismiss() } catch { failure = error.localizedDescription }
-                }.keyboardShortcut(.defaultAction).disabled(name.isEmpty)
+        VStack(alignment: .leading, spacing: 10) {
+            Text(state.original == nil ? "Новая вкладка" : "Переименовать вкладку").font(.title3.weight(.semibold))
+            Text("Название вкладки").font(.headline)
+            TextField("", text: $name).textFieldStyle(.roundedBorder)
+                .onChange(of: name) { _, value in if value.count > 32 { name = String(value.prefix(32)) } }
+            if let failure { Text(failure).foregroundStyle(.red).font(.callout) }
+            DialogButtons(commit: state.original == nil ? "Создать" : "Сохранить", enabled: !name.isEmpty, cancel: { dismiss() }) {
+                do { try save(name); dismiss() } catch { failure = error.localizedDescription }
             }
-        }.padding(22).frame(width: 360)
+        }.padding(20).frame(width: 410)
     }
 }
 
 private struct DesktopEditor: View {
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.colorScheme) private var scheme
     @State private var profile: DesktopProfile
     @State private var port: String
     @State private var width: String
@@ -614,11 +1084,16 @@ private struct DesktopEditor: View {
     @State private var error = ""
     @State private var password = ""
     @State private var removePassword = false
+    let creating: Bool
     let hasPassword: Bool
+    let importFile: () -> Void
     let save: (DesktopProfile, String, Bool) throws -> Void
 
-    init(state: DesktopEditorState, hasPassword: Bool, save: @escaping (DesktopProfile, String, Bool) throws -> Void) {
+    init(state: DesktopEditorState, hasPassword: Bool, importFile: @escaping () -> Void,
+         save: @escaping (DesktopProfile, String, Bool) throws -> Void) {
         self.hasPassword = hasPassword
+        self.importFile = importFile
+        creating = state.original == nil
         let start = state.original ?? DesktopProfile(group: state.group)
         _profile = State(initialValue: start)
         _port = State(initialValue: String(start.port))
@@ -628,29 +1103,42 @@ private struct DesktopEditor: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            Text("RDP-подключение").font(.title2.weight(.semibold))
-            Form {
-                TextField("Название", text: $profile.name)
-                TextField("Адрес", text: $profile.host)
-                TextField("Порт", text: $port)
-                TextField("Пользователь", text: $profile.user)
-                TextField("Домен", text: $profile.domain)
-                SecureField("Пароль", text: $password, prompt: Text(hasPassword ? "Сохранён в Связке ключей" : "Необязательно"))
-                    .disabled(removePassword)
-                if hasPassword { Toggle("Удалить сохранённый пароль", isOn: $removePassword) }
-                TextField("Ширина экрана", text: $width, prompt: Text("Автоматически"))
-                TextField("Высота экрана", text: $height, prompt: Text("Автоматически"))
-                Toggle("Общий буфер обмена", isOn: $profile.clipboard)
-                Toggle("Полноэкранный режим", isOn: $profile.fullScreen)
-            }.textFieldStyle(.roundedBorder)
-            if !error.isEmpty { Text(error).foregroundStyle(.red).font(.callout) }
-            HStack {
-                Spacer()
-                Button("Отмена") { dismiss() }.keyboardShortcut(.cancelAction)
-                Button("Сохранить", action: submit).keyboardShortcut(.defaultAction)
+        let palette = Palette.of(scheme)
+        VStack(alignment: .leading, spacing: 10) {
+            Text(creating ? "Новое RDP-подключение" : "Изменить RDP-подключение").font(.title2.weight(.semibold))
+            Grid(alignment: .leading, horizontalSpacing: 12, verticalSpacing: 8) {
+                GridRow { Text("Название"); TextField("", text: $profile.name) }
+                GridRow { Text("Адрес"); TextField("", text: $profile.host) }
+                GridRow { Text("Порт"); TextField("", text: $port) }
+                GridRow { Text("Пользователь"); TextField("", text: $profile.user) }
+                GridRow {
+                    Text("Домен")
+                    TextField("", text: $profile.domain)
+                        .help("Пусто — учётная запись на самом сервере. Для доменной учётной записи укажите имя домена, например CORP.")
+                }
+                GridRow { Text("Пароль"); SecureField("", text: $password).disabled(removePassword) }
+                GridRow {
+                    Color.clear.frame(width: 1, height: 1)
+                    HStack {
+                        Text(hasPassword ? "Сохранён. Пустое поле — не менять." : "Необязательно. Хранится в Связке ключей.")
+                            .foregroundStyle(palette.muted)
+                        if hasPassword { Toggle("Удалить пароль", isOn: $removePassword) }
+                    }.font(.callout)
+                }
+                GridRow { Text("Ширина экрана"); TextField("По размеру окна", text: $width) }
+                GridRow { Text("Высота экрана"); TextField("По размеру окна", text: $height) }
+                GridRow { Color.clear.frame(width: 1, height: 1); Toggle("Общий буфер обмена", isOn: $profile.clipboard) }
+                GridRow { Color.clear.frame(width: 1, height: 1); Toggle("Открывать на весь экран", isOn: $profile.fullScreen) }
             }
-        }.padding(22).frame(width: 480)
+            .textFieldStyle(.roundedBorder)
+            if !error.isEmpty { Text(error).foregroundStyle(palette.danger).font(.callout) }
+            HStack {
+                if creating {
+                    Button { dismiss(); importFile() } label: { GlyphLabel(title: "Импорт .rdp…", glyph: .folder) }.winButton(.outline)
+                }
+                DialogButtons(commit: "Сохранить", cancel: { dismiss() }, submit: submit)
+            }
+        }.padding(22).frame(width: 545)
     }
 
     private func submit() {
@@ -660,87 +1148,161 @@ private struct DesktopEditor: View {
         value.host = trim(value.host).trimmingCharacters(in: CharacterSet(charactersIn: "[]"))
         value.domain = trim(value.domain)
         value.user = trim(value.user)
-        value.port = trim(port).isEmpty ? 3389 : Int(trim(port)) ?? -1
-        value.width = trim(width).isEmpty ? 0 : Int(trim(width)) ?? -1
-        value.height = trim(height).isEmpty ? 0 : Int(trim(height)) ?? -1
+        guard let parsedPort = trim(port).isEmpty ? 3389 : Int(trim(port)),
+              let parsedWidth = trim(width).isEmpty ? 0 : Int(trim(width)),
+              let parsedHeight = trim(height).isEmpty ? 0 : Int(trim(height)) else {
+            error = "Укажите числовой порт и размеры экрана."
+            return
+        }
+        value.port = parsedPort
+        value.width = parsedWidth
+        value.height = parsedHeight
         do { try save(value, removePassword ? "" : password, removePassword); dismiss() }
         catch { self.error = error.localizedDescription }
     }
 }
 
-private enum ServerChoice: Identifiable {
-    case ssh(Profile), rdp(DesktopProfile)
-
-    var id: String {
-        switch self {
-        case .ssh(let profile): "ssh:" + profile.id
-        case .rdp(let profile): "rdp:" + profile.id
-        }
-    }
-
-    var name: String {
-        switch self {
-        case .ssh(let profile): profile.alias
-        case .rdp(let profile): profile.name
-        }
-    }
-
-    var address: String {
-        switch self {
-        case .ssh(let profile): profile.address
-        case .rdp(let profile): profile.address
-        }
-    }
-}
-
-private struct ServerPicker: View {
+/// «Вход: имя» before an RDP connection without a saved password (docs/ui-spec.md §4.3).
+private struct LogonSheet: View {
     @Environment(\.dismiss) private var dismiss
-    @State private var query = ""
-    @State private var selection: String?
-    @State private var kind: ConnectionProtocol
-    @FocusState private var focused: Bool
-    let profiles: [Profile]
-    let desktops: [DesktopProfile]
-    let connect: (ServerChoice) -> Void
+    @Environment(\.colorScheme) private var scheme
+    let request: DesktopLogonRequest
+    @State private var account: String
+    @State private var password = ""
+    @State private var remember = false
 
-    init(profiles: [Profile], desktops: [DesktopProfile], kind: ConnectionProtocol, connect: @escaping (ServerChoice) -> Void) {
-        self.profiles = profiles
-        self.desktops = desktops
-        _kind = State(initialValue: kind)
-        self.connect = connect
+    init(request: DesktopLogonRequest) {
+        self.request = request
+        _account = State(initialValue: request.profile.account)
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            Text("Новый сеанс").font(.title2.weight(.semibold))
-            Picker("Протокол", selection: $kind) {
-                ForEach(ConnectionProtocol.allCases) { value in Text(value.rawValue).tag(value) }
-            }.pickerStyle(.segmented).labelsHidden().frame(width: 164)
-            TextField("Поиск по имени или адресу", text: $query).focused($focused)
-            List(visible, selection: $selection) { profile in
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(profile.name).font(.headline)
-                    Text(profile.address).foregroundStyle(.secondary).font(.system(.caption, design: .monospaced))
+        VStack(alignment: .leading, spacing: 10) {
+            Text("Вход: " + request.profile.name).font(.title3.weight(.semibold))
+            Text(request.profile.address).foregroundStyle(Palette.of(scheme).muted)
+            Grid(alignment: .leading, horizontalSpacing: 12, verticalSpacing: 8) {
+                GridRow { Text("Пользователь"); TextField("", text: $account) }
+                GridRow { Text("Пароль"); SecureField("", text: $password) }
+                GridRow { Color.clear.frame(width: 1, height: 1); Toggle("Сохранить пароль в Связке ключей", isOn: $remember) }
+            }.textFieldStyle(.roundedBorder)
+            DialogButtons(commit: "Подключиться", cancel: { dismiss() }) {
+                var user = account.trimmingCharacters(in: .whitespaces)
+                var domain = request.profile.domain
+                if let slash = user.firstIndex(of: "\\") {
+                    domain = String(user[..<slash])
+                    user = String(user[user.index(after: slash)...])
                 }
-                .tag(profile.id)
-                .contentShape(Rectangle())
-                .onTapGesture(count: 2) { choose(profile) }
-            }.frame(height: 210).listStyle(.bordered)
-            HStack {
-                Spacer()
-                Button("Отмена") { dismiss() }.keyboardShortcut(.cancelAction)
-                Button("Подключиться") { if let profile = chosen { choose(profile) } }
-                    .keyboardShortcut(.defaultAction).disabled(chosen == nil)
+                let completion = request.completion
+                let entered = password
+                let keep = remember
+                dismiss()
+                DispatchQueue.main.async { completion(user, domain, entered, keep) }
             }
-        }.padding(22).frame(width: 440)
-            .onAppear { focused = true }
+        }.padding(20).frame(width: 460)
+    }
+}
+
+private struct RenameSheet: View {
+    @Environment(\.dismiss) private var dismiss
+    let entry: SessionEntry
+    let save: (String) throws -> Void
+    @State private var label: String
+    @State private var failure: String?
+
+    init(entry: SessionEntry, save: @escaping (String) throws -> Void) {
+        self.entry = entry
+        self.save = save
+        _label = State(initialValue: entry.name)
     }
 
-    private var visible: [ServerChoice] {
-        let choices = kind == .ssh ? profiles.map(ServerChoice.ssh) : desktops.map(ServerChoice.rdp)
-        let filtered = choices.filter { query.isEmpty || $0.name.localizedCaseInsensitiveContains(query) || $0.address.localizedCaseInsensitiveContains(query) }
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("Переименовать сеанс").font(.title3.weight(.semibold))
+            Text("Метка сеанса").font(.headline)
+            TextField("", text: $label).textFieldStyle(.roundedBorder)
+            if let failure { Text(failure).foregroundStyle(.red).font(.callout) }
+            DialogButtons(commit: "Сохранить", cancel: { dismiss() }) {
+                do { try save(label); dismiss() } catch { failure = error.localizedDescription }
+            }
+        }.padding(20).frame(width: 410)
+    }
+}
+
+/// «Новый сеанс»: protocol switch, search, list with group dots and a status line (docs/ui-spec.md §4.5).
+private struct ServerPicker: View {
+    @Environment(\.dismiss) private var dismiss
+    @Environment(\.colorScheme) private var scheme
+    @ObservedObject var manager: Manager
+    @State private var query = ""
+    @State private var selection: String?
+    @State private var kind: ConnectionProtocol = .ssh
+    @FocusState private var focused: Bool
+
+    private struct Choice: Identifiable {
+        let id, name, address, group: String
+        let color: Color?
+        let ssh: Profile?
+        let rdp: DesktopProfile?
+    }
+
+    private var everything: [Choice] {
+        if kind == .ssh {
+            return manager.profiles.map { profile in
+                let group = manager.group(of: profile)
+                return Choice(id: "ssh:" + profile.id, name: profile.alias, address: profile.address, group: group?.name ?? "",
+                              color: group?.marker?.color, ssh: profile, rdp: nil)
+            }
+        }
+        return manager.settings.desktops.map { desktop in
+            let group = manager.group(of: desktop)
+            return Choice(id: "rdp:" + desktop.id, name: desktop.name, address: desktop.address, group: group?.name ?? "",
+                          color: group?.marker?.color, ssh: nil, rdp: desktop)
+        }
+    }
+
+    private var visible: [Choice] {
+        let search = query.trimmingCharacters(in: .whitespaces)
+        let filtered = everything.filter { search.isEmpty || [$0.name, $0.address, $0.group].contains { $0.localizedCaseInsensitiveContains(search) } }
         return ServerSort.name.apply(filtered, name: \.name, host: \.address)
     }
-    private var chosen: ServerChoice? { visible.first(where: { $0.id == selection }) ?? visible.first }
-    private func choose(_ profile: ServerChoice) { dismiss(); connect(profile) }
+
+    private var chosen: Choice? { visible.first { $0.id == selection } ?? visible.first }
+
+    var body: some View {
+        let palette = Palette.of(scheme)
+        VStack(alignment: .leading, spacing: 10) {
+            Text("Новый сеанс").font(.title3.weight(.semibold))
+            HStack(spacing: 4) {
+                ForEach(ConnectionProtocol.allCases) { value in
+                    Button { kind = value; selection = nil } label: { GlyphLabel(title: value.rawValue, glyph: value == .ssh ? .terminal : .server) }
+                        .winButton(kind == value ? .selectedTab : .tab)
+                }
+            }
+            SearchField(placeholder: "Найти сервер", text: $query, focus: $focused) { if let chosen { choose(chosen) } }
+            List(visible, selection: $selection) { choice in
+                HStack(alignment: .top, spacing: 9) {
+                    Circle().fill(choice.color ?? palette.teal).frame(width: 7, height: 7).padding(.top, 5)
+                    VStack(alignment: .leading, spacing: 1) {
+                        Text(choice.name).font(.system(size: 13, weight: .semibold))
+                        Text(choice.address + (choice.group.isEmpty ? "" : "  ·  " + choice.group))
+                            .font(.system(size: 12)).foregroundStyle(palette.muted)
+                    }
+                }
+                .tag(choice.id)
+                .contentShape(Rectangle())
+                .onTapGesture(count: 2) { choose(choice) }
+            }.frame(height: 210).listStyle(.bordered)
+            Text(!visible.isEmpty ? "Серверов: \(visible.count)" : everything.isEmpty ? "Сохранённых серверов пока нет." : "Серверы не найдены.")
+                .font(.system(size: 12)).foregroundStyle(palette.muted)
+            DialogButtons(commit: "Подключиться", enabled: chosen != nil, cancel: { dismiss() }) { if let chosen { choose(chosen) } }
+        }
+        .padding(20).frame(width: 495)
+        .onAppear { kind = manager.catalogProtocol; focused = true }
+    }
+
+    private func choose(_ choice: Choice) {
+        dismiss()
+        if let profile = choice.ssh { manager.connect(profile, new: true) }
+        if let desktop = choice.rdp { manager.connectDesktop(desktop, new: true) }
+    }
 }

@@ -3,7 +3,7 @@ import SwiftUI
 import UniformTypeIdentifiers
 
 enum Destination: Hashable {
-    case all, group(String), session(UUID)
+    case all, group(String)
 }
 
 enum ConnectionProtocol: String, CaseIterable, Identifiable {
@@ -18,32 +18,70 @@ struct Notice: Identifiable {
     var confirm: (() -> Void)? = nil
 }
 
-final class Manager: ObservableObject {
-    @Published var destination: Destination = .all {
-        didSet {
-            switch destination {
-            case .all, .group: lastCatalog = destination
-            case .session: break
-            }
+/// One row of the sessions list: an SSH terminal or an RDP desktop.
+enum SessionEntry: Identifiable {
+    case ssh(TerminalSession), rdp(DesktopSession)
+
+    var id: UUID {
+        switch self {
+        case .ssh(let session): session.id
+        case .rdp(let session): session.id
         }
     }
+    var title: String {
+        switch self {
+        case .ssh(let session): session.title
+        case .rdp(let session): session.title
+        }
+    }
+    var live: Bool {
+        switch self {
+        case .ssh(let session): session.live
+        case .rdp(let session): session.live
+        }
+    }
+    var protocolName: String {
+        if case .rdp = self { return "RDP" }
+        return "SSH"
+    }
+    var address: String {
+        switch self {
+        case .ssh(let session): session.address
+        case .rdp(let session): session.profile.address
+        }
+    }
+    var name: String {
+        switch self {
+        case .ssh(let session): session.name
+        case .rdp(let session): session.name
+        }
+    }
+}
+
+final class Manager: ObservableObject {
+    /// The catalog tab: «Все серверы» or a group.
+    @Published var destination: Destination = .all
+    @Published var showingSessions = false
+    @Published private(set) var activeSession: UUID?
     @Published private(set) var profiles: [Profile] = []
     @Published private(set) var settings = ManagerSettings()
     @Published private(set) var sessions: [TerminalSession] = []
+    @Published private(set) var desktopSessions: [DesktopSession] = []
     @Published var notice: Notice?
     @Published var editor: ProfileEditorState?
     @Published var groupEditor: GroupEditorState?
-    @Published var deleteProfile: Profile?
-    @Published var deleteGroup: ServerGroup?
     @Published var catalogProtocol: ConnectionProtocol = .ssh
     @Published var desktopEditor: DesktopEditorState?
     @Published var choosingServer = false
     @Published var managingBackups = false
+    @Published var logonRequest: DesktopLogonRequest?
+    @Published var renaming: SessionEntry.ID?
     private let config = ConfigStore.standard
     private let catalogQueue = DispatchQueue(label: "sshmanager.catalog", qos: .userInitiated)
-    private var lastCatalog: Destination = .all
+    private var order: [UUID] = []
     private var lastSessions: [UUID] = []
     private var fileWindows: [String: FilesWindow] = [:]
+    private var pendingMove: Profile?
 
     init() {
         catalogQueue.async { [weak self] in
@@ -61,12 +99,12 @@ final class Manager: ObservableObject {
         reload()
     }
 
+    // MARK: catalog data
+
     func reload() {
         let store = config
         catalogQueue.async { [weak self] in
-            let result = Result {
-                try store.read().profiles
-            }
+            let result = Result { try store.read().profiles }
             DispatchQueue.main.async { [weak self] in
                 switch result {
                 case .success(let profiles): self?.profiles = profiles
@@ -83,6 +121,11 @@ final class Manager: ObservableObject {
         } catch { show(error) }
     }
 
+    func reloadAll() {
+        reload()
+        reloadSettings()
+    }
+
     func updateSettings(_ change: (inout ManagerSettings) throws -> Void) {
         do {
             var latest = try ManagerSettings.load()
@@ -92,12 +135,50 @@ final class Manager: ObservableObject {
         } catch { show(error) }
     }
 
+    var currentGroup: ServerGroup? {
+        guard case .group(let id) = destination else { return nil }
+        return settings.groups.first { $0.id == id }
+    }
+
+    func group(of profile: Profile) -> ServerGroup? { settings.groups.first { $0.aliases.contains(profile.id) } }
+    func group(of desktop: DesktopProfile) -> ServerGroup? { settings.groups.first { $0.id == desktop.group } }
+
+    var currentSort: ServerSort {
+        if catalogProtocol == .rdp { return currentGroup?.rdpSort ?? settings.rdpSort }
+        return currentGroup?.sshSort ?? settings.sshSort
+    }
+
+    /// Header click: ascending → descending → original order (src/ConnectionsWindow.cs:301-308).
+    func sortBy(address: Bool) {
+        let ascending: ServerSort = address ? .address : .name
+        let descending: ServerSort = address ? .addressDescending : .nameDescending
+        let current = currentSort
+        let next: ServerSort = current == ascending ? descending : current == descending ? .original : ascending
+        sortCatalog(next, kind: catalogProtocol, group: currentGroup?.id)
+    }
+
+    func sortCatalog(_ order: ServerSort, kind: ConnectionProtocol, group: String?) {
+        updateSettings { latest in
+            if let group {
+                guard let index = latest.groups.firstIndex(where: { $0.id == group }) else { return }
+                if kind == .ssh { latest.groups[index].sshSort = order }
+                else { latest.groups[index].rdpSort = order }
+            } else if kind == .ssh {
+                latest.sshSort = order
+            } else {
+                latest.rdpSort = order
+            }
+        }
+    }
+
+    // MARK: SSH profiles
+
     func save(_ profile: Profile, original: Profile?, password: String, removePassword: Bool) throws {
         try profile.validate(replacing: original)
         guard password.utf8.count <= 1022, !password.contains(where: \.isNewline), !password.contains("\0")
         else { throw ManagerError("Пароль слишком длинный или содержит недопустимые символы.") }
         if !password.isEmpty, profile.passwordHost == nil {
-            throw ManagerError("Для сохранения пароля укажите пользователя и адрес сервера без шаблонов.")
+            throw ManagerError("Для входа по сохранённому паролю укажите SSH-пользователя и обычный DNS-адрес или IP без подстановок.")
         }
         let changed = original?.account != profile.account
         let sameServer = original?.destinationKey == profile.destinationKey
@@ -134,13 +215,53 @@ final class Manager: ObservableObject {
         reload()
     }
 
+    func hasPassword(_ profile: Profile) -> Bool { (try? Passwords.read(profile.account)) != nil }
+
     func remove(_ profile: Profile) {
-        do { try config.update(nil, replacing: profile) }
-        catch { show(error); return }
-        do { try Passwords.set(nil, for: profile.account) } catch { show(error) }
-        updateSettings { $0.move(profile.id, to: nil) }
-        reload()
+        notice = Notice(title: "SSH Manager", text: "Удалить подключение «\(profile.alias)» из SSH config?") { [weak self] in
+            guard let self else { return }
+            do { try self.config.update(nil, replacing: profile) }
+            catch { self.show(error); return }
+            do { try Passwords.set(nil, for: profile.account) } catch { self.show(error) }
+            self.updateSettings { $0.move(profile.id, to: nil) }
+            self.reload()
+        }
     }
+
+    func move(_ profile: Profile, to group: String?) {
+        updateSettings { $0.move(profile.id, to: group) }
+    }
+
+    func moveToNewGroup(_ profile: Profile) {
+        pendingMove = profile
+        groupEditor = GroupEditorState()
+    }
+
+    func copyCommand(_ profile: Profile) {
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString("ssh " + profile.alias, forType: .string)
+    }
+
+    /// Runs `ssh <alias>` in Terminal.app through a private .command file.
+    func openInTerminal(_ profile: Profile) {
+        let files = FileManager.default
+        let directory = files.temporaryDirectory.appendingPathComponent("SSHManager-\(UUID().uuidString)", isDirectory: true)
+        let script = directory.appendingPathComponent("\(profile.alias).command")
+        do {
+            try files.createDirectory(at: directory, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
+            let quoted = "'" + profile.alias.replacingOccurrences(of: "'", with: "'\\''") + "'"
+            try Data("#!/bin/sh\nrm -f \"$0\"\nexec /usr/bin/ssh \(quoted)\n".utf8).write(to: script)
+            try files.setAttributes([.posixPermissions: 0o700], ofItemAtPath: script.path)
+            let terminal = NSWorkspace.shared.urlForApplication(withBundleIdentifier: "com.apple.Terminal")
+            if let terminal {
+                NSWorkspace.shared.open([script], withApplicationAt: terminal, configuration: NSWorkspace.OpenConfiguration())
+            } else {
+                NSWorkspace.shared.open(script)
+            }
+        } catch { show(error) }
+    }
+
+    // MARK: groups
 
     func saveGroup(_ name: String, original: ServerGroup?) throws {
         let cleaned = name.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -152,20 +273,33 @@ final class Manager: ObservableObject {
         } else {
             current.groups.append(ServerGroup(name: cleaned))
         }
+        if original == nil, let profile = pendingMove, let group = current.groups.last {
+            current.move(profile.id, to: group.id)
+            pendingMove = nil
+            try current.save()
+            settings = current
+            return
+        }
         try current.save()
         settings = current
         if original == nil, let group = current.groups.last { destination = .group(group.id) }
     }
 
+    func cancelGroupEditor() { pendingMove = nil }
+
     func removeGroup(_ group: ServerGroup) {
-        updateSettings {
-            $0.groups.removeAll { $0.id == group.id }
-            for index in $0.desktops.indices where $0.desktops[index].group == group.id {
-                $0.desktops[index].group = nil
+        notice = Notice(title: "SSH Manager",
+                        text: "Удалить вкладку «\(group.name)»? Её подключения будут доступны во вкладке «Все серверы».") { [weak self] in
+            guard let self else { return }
+            self.updateSettings {
+                $0.groups.removeAll { $0.id == group.id }
+                for index in $0.desktops.indices where $0.desktops[index].group == group.id {
+                    $0.desktops[index].group = nil
+                }
+                if $0.startup == group.id { $0.startup = nil }
             }
-            if $0.startup == group.id { $0.startup = nil }
+            if self.destination == .group(group.id) { self.destination = .all }
         }
-        if !settings.groups.contains(where: { $0.id == group.id }), destination == .group(group.id) { destination = .all }
     }
 
     func shiftGroup(_ group: ServerGroup, by offset: Int) {
@@ -176,17 +310,19 @@ final class Manager: ObservableObject {
         }
     }
 
-    func sortCatalog(_ order: ServerSort, kind: ConnectionProtocol, group: String?) {
-        updateSettings { latest in
-            if let group {
-                guard let index = latest.groups.firstIndex(where: { $0.id == group }) else { return }
-                if kind == .ssh { latest.groups[index].sshSort = order }
-                else { latest.groups[index].rdpSort = order }
-            } else if kind == .ssh {
-                latest.sshSort = order
-            } else {
-                latest.rdpSort = order
-            }
+    func placeGroup(_ id: String, before target: String) {
+        guard id != target else { return }
+        updateSettings {
+            guard let from = $0.groups.firstIndex(where: { $0.id == id }) else { return }
+            let moved = $0.groups.remove(at: from)
+            let to = $0.groups.firstIndex(where: { $0.id == target }) ?? $0.groups.count
+            $0.groups.insert(moved, at: to)
+        }
+    }
+
+    func mark(_ group: ServerGroup, _ marker: GroupMarker?) {
+        updateSettings {
+            if let index = $0.groups.firstIndex(where: { $0.id == group.id }) { $0.groups[index].marker = marker }
         }
     }
 
@@ -194,11 +330,11 @@ final class Manager: ObservableObject {
         if catalogProtocol == .ssh {
             editor = ProfileEditorState()
         } else {
-            let group: String?
-            if case .group(let id) = lastCatalog { group = id } else { group = nil }
-            desktopEditor = DesktopEditorState(original: nil, group: group)
+            desktopEditor = DesktopEditorState(original: nil, group: currentGroup?.id)
         }
     }
+
+    // MARK: RDP profiles
 
     func saveDesktop(_ profile: DesktopProfile, editing: Bool, password: String = "", removePassword: Bool = false) throws {
         try profile.validate()
@@ -241,7 +377,7 @@ final class Manager: ObservableObject {
     }
 
     func removeDesktop(_ profile: DesktopProfile) {
-        notice = Notice(title: "Удалить RDP-подключение?", text: "Удалить «\(profile.name)» из каталога?") { [weak self] in
+        notice = Notice(title: "SSH Manager", text: "Удалить RDP-подключение «\(profile.name)»?") { [weak self] in
             self?.updateSettings { $0.desktops.removeAll { $0.id == profile.id } }
             do { try Passwords.set(nil, for: profile.keychainAccount) } catch { self?.show(error) }
         }
@@ -269,183 +405,163 @@ final class Manager: ObservableObject {
             let panel = NSOpenPanel()
             panel.allowedContentTypes = [type]
             guard panel.runModal() == .OK, let url = panel.url else { return }
-            do { try storeDesktop(DesktopProfile(file: url, group: group), editing: false) }
+            do { try storeDesktop(DesktopProfile(file: url, group: group ?? currentGroup?.id), editing: false) }
             catch { show(error) }
         }
     }
 
-    func connectDesktop(_ profile: DesktopProfile) {
-        var password: String?
-        do { password = try Passwords.read(profile.keychainAccount) } catch { show(error) }
-        if let client = DesktopProfile.freeRDPClient() {
-            if profile.user.isEmpty {
-                show(ManagerError("Укажите пользователя в RDP-профиле, чтобы подключиться через FreeRDP."))
-                return
-            }
-            if password == nil {
-                guard let answer = askDesktopPassword(profile) else { return }
-                password = answer.password
-                if answer.remember, !answer.password.isEmpty {
-                    do { try Passwords.set(answer.password, for: profile.keychainAccount) } catch { show(error) }
-                }
-            }
-            launchFreeRDP(client, profile: profile, password: password)
-            return
-        }
-        openInWindowsApp(profile, password: password)
-    }
+    // MARK: sessions
 
-    private func askDesktopPassword(_ profile: DesktopProfile) -> (password: String, remember: Bool)? {
-        let alert = NSAlert()
-        alert.messageText = "Вход: " + profile.name
-        alert.informativeText = profile.account + " · " + profile.address
-        let field = NSSecureTextField(frame: NSRect(x: 0, y: 28, width: 280, height: 24))
-        field.placeholderString = "Пароль"
-        let remember = NSButton(checkboxWithTitle: "Сохранить в Связке ключей", target: nil, action: nil)
-        remember.frame = NSRect(x: 0, y: 0, width: 280, height: 20)
-        let container = NSView(frame: NSRect(x: 0, y: 0, width: 280, height: 54))
-        container.addSubview(field)
-        container.addSubview(remember)
-        alert.accessoryView = container
-        alert.addButton(withTitle: "Подключиться")
-        alert.addButton(withTitle: "Отмена")
-        alert.window.initialFirstResponder = field
-        guard alert.runModal() == .alertFirstButtonReturn else { return nil }
-        return (field.stringValue, remember.state == .on)
-    }
-
-    private func launchFreeRDP(_ client: URL, profile: DesktopProfile, password: String?) {
-        do {
-            let args = try profile.freeRDPArguments(password: password)
-            let process = Process()
-            process.executableURL = client
-            var environment = ProcessInfo.processInfo.environment
-            if password != nil, DesktopProfile.freeRDPMajor(client) >= 3 {
-                // FreeRDP 3 reads every argument from the environment, so the password never appears in argv.
-                environment[DesktopProfile.argumentsVariable] = args.joined(separator: "\n")
-                process.arguments = ["/args-from:env:" + DesktopProfile.argumentsVariable]
-            } else {
-                // FreeRDP 2 overwrites /p: in its argv right after parsing.
-                process.arguments = args
-            }
-            process.environment = environment
-            process.standardInput = FileHandle.nullDevice
-            let output = Pipe()
-            process.standardOutput = output
-            process.standardError = output
-            let log = OutputTail()
-            output.fileHandleForReading.readabilityHandler = { handle in log.append(handle.availableData) }
-            process.terminationHandler = { [weak self] finished in
-                output.fileHandleForReading.readabilityHandler = nil
-                let status = finished.terminationStatus
-                // 0 is a normal close; FreeRDP uses 1-3 and 12 for user or server initiated disconnects.
-                guard ![0, 1, 2, 3, 12].contains(status) else { return }
-                let lines = log.text.split(separator: "\n").suffix(6).joined(separator: "\n")
-                DispatchQueue.main.async {
-                    self?.notice = Notice(title: "FreeRDP: подключение к «\(profile.name)» прервано",
-                                          text: "Код \(status).\n" + lines)
-                }
-            }
-            try process.run()
-        } catch { show(error) }
-    }
-
-    private func openInWindowsApp(_ profile: DesktopProfile, password: String?) {
-        let files = FileManager.default
-        let directory = files.temporaryDirectory.appendingPathComponent("SSHManager-\(UUID().uuidString)", isDirectory: true)
-        let url = directory.appendingPathComponent("connection.rdp")
-        do {
-            try files.createDirectory(at: directory, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
-            try writePrivate(profile.data, to: url)
-            let workspace = NSWorkspace.shared
-            let client = workspace.urlForApplication(withBundleIdentifier: "com.microsoft.rdc.macos") ??
-                workspace.urlForApplication(toOpen: url)
-            guard let client else { throw ManagerError("Установите Microsoft Windows App для подключения по RDP.") }
-            workspace.open([url], withApplicationAt: client, configuration: NSWorkspace.OpenConfiguration()) { [weak self] _, error in
-                DispatchQueue.main.async {
-                    if let error { self?.show(error); return }
-                    guard let password, !password.isEmpty else { return }
-                    // Windows App ignores passwords in .rdp files: offer the saved one through the clipboard for a minute.
-                    let board = NSPasteboard.general
-                    board.clearContents()
-                    board.setString(password, forType: .string)
-                    let change = board.changeCount
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 60) {
-                        if board.changeCount == change { board.clearContents() }
-                    }
-                    self?.notice = Notice(title: "Пароль скопирован",
-                                          text: "Windows App не принимает пароль из файла. Вставьте его (⌘V) при запросе входа для \(profile.account). Буфер обмена очистится через минуту. Чтобы пароль передавался автоматически, установите FreeRDP: brew install freerdp")
-                }
-                DispatchQueue.global().asyncAfter(deadline: .now() + 120) {
-                    try? files.removeItem(at: url)
-                    try? files.removeItem(at: directory)
-                }
-            }
-        } catch {
-            try? files.removeItem(at: url)
-            try? files.removeItem(at: directory)
-            show(error)
+    var entries: [SessionEntry] {
+        order.compactMap { id in
+            if let session = sessions.first(where: { $0.id == id }) { return .ssh(session) }
+            if let session = desktopSessions.first(where: { $0.id == id }) { return .rdp(session) }
+            return nil
         }
     }
+
+    var activeEntry: SessionEntry? { entries.first { $0.id == activeSession } }
+
+    var liveCount: Int { sessions.filter(\.live).count + desktopSessions.filter(\.live).count }
+
+    func liveCount(for profile: Profile) -> Int { sessions.filter { $0.profile.id == profile.id && $0.live }.count }
+    func liveCount(for desktop: DesktopProfile) -> Int { desktopSessions.filter { $0.profile.id == desktop.id && $0.live }.count }
 
     func connect(_ profile: Profile, new: Bool = false, noForwarding: Bool = false) {
-        if !new, let latest = lastSessions.compactMap({ id in sessions.first { $0.id == id && $0.profile.id == profile.id && $0.exitCode == nil } }).first {
-            activate(latest)
+        let related = sessions.filter { $0.profile.id == profile.id }
+        if !new, let latest = lastSessions.compactMap({ id in related.first { $0.id == id && $0.live } }).first {
+            activate(latest.id)
             return
         }
-        let session = TerminalSession(profile: profile, noForwarding: noForwarding) { [weak self] id in
-            self?.showServers(from: id)
+        let number = (related.map(\.number).max() ?? 0) + 1
+        let session = TerminalSession(profile: profile, noForwarding: noForwarding, number: number) { [weak self] _ in
+            self?.showServers()
         }
         sessions.append(session)
-        activate(session)
+        order.append(session.id)
+        activate(session.id)
     }
 
-    func activate(_ session: TerminalSession) {
-        recordSession(session.id)
-        destination = .session(session.id)
-        DispatchQueue.main.async { session.focus() }
+    /// Opens an RDP session, asking for the password first when none is saved and FreeRDP will connect.
+    func connectDesktop(_ profile: DesktopProfile, new: Bool = false) {
+        let related = desktopSessions.filter { $0.profile.id == profile.id }
+        if !new, let latest = lastSessions.compactMap({ id in related.first { $0.id == id && $0.live } }).first {
+            activate(latest.id)
+            return
+        }
+        var password: String?
+        do { password = try Passwords.read(profile.keychainAccount) } catch { show(error) }
+        if DesktopProfile.freeRDPClient() != nil, password == nil || profile.user.isEmpty {
+            logonRequest = DesktopLogonRequest(profile: profile) { [weak self] user, domain, entered, remember in
+                guard let self else { return }
+                if remember, !entered.isEmpty {
+                    if user == profile.user && domain == profile.domain {
+                        do { try Passwords.set(entered, for: profile.keychainAccount) } catch { self.show(error) }
+                    } else {
+                        self.show(ManagerError("Пароль сохраняется только для пользователя из настроек подключения. " +
+                                               "Измените пользователя в профиле, чтобы запомнить пароль для другой учётной записи."))
+                    }
+                }
+                self.openDesktop(profile, user: user, domain: domain, password: entered.isEmpty ? nil : entered)
+            }
+            return
+        }
+        openDesktop(profile, user: profile.user, domain: profile.domain, password: password)
     }
 
-    func recordSession(_ id: UUID) {
+    private func openDesktop(_ profile: DesktopProfile, user: String, domain: String, password: String?) {
+        let number = (desktopSessions.filter { $0.profile.id == profile.id }.map(\.number).max() ?? 0) + 1
+        let session = DesktopSession(profile: profile, number: number, user: user, domain: domain, password: password)
+        desktopSessions.append(session)
+        order.append(session.id)
+        activate(session.id)
+        session.start()
+    }
+
+    func duplicate(_ entry: SessionEntry, noForwarding: Bool? = nil) {
+        switch entry {
+        case .ssh(let session): connect(session.profile, new: true, noForwarding: noForwarding ?? session.noForwarding)
+        case .rdp(let session): openDesktop(session.profile, user: session.user, domain: session.domain, password: session.password)
+        }
+    }
+
+    /// SSH: starts the same server again in place of the ended session.
+    func reconnect(_ entry: SessionEntry) {
+        switch entry {
+        case .rdp(let session): session.start()
+        case .ssh(let old):
+            let session = TerminalSession(profile: old.profile, noForwarding: old.noForwarding, number: old.number) { [weak self] _ in
+                self?.showServers()
+            }
+            session.name = old.name
+            old.close()
+            if let index = sessions.firstIndex(where: { $0.id == old.id }) { sessions[index] = session }
+            if let index = order.firstIndex(of: old.id) { order[index] = session.id }
+            lastSessions.removeAll { $0 == old.id }
+            activate(session.id)
+        }
+    }
+
+    func fullScreen(_ session: DesktopSession) { session.start(fullScreen: true) }
+
+    func activate(_ id: UUID) {
         lastSessions.removeAll { $0 == id }
         lastSessions.insert(id, at: 0)
+        activeSession = id
+        showingSessions = true
+        if let session = sessions.first(where: { $0.id == id }) { DispatchQueue.main.async { session.focus() } }
     }
 
     func switchSession() {
-        guard let id = lastSessions.first(where: { .session($0) != destination }),
-              let session = sessions.first(where: { $0.id == id }) else { return }
-        activate(session)
+        guard let id = lastSessions.first(where: { id in id != activeSession && entries.contains { $0.id == id && $0.live } })
+        else { return }
+        activate(id)
     }
 
-    var showingSession: Bool {
-        if case .session = destination { return true }
-        return false
+    func showServers() { showingSessions = false }
+    func showSessionsPage() {
+        showingSessions = true
+        if activeSession == nil { activeSession = lastSessions.first ?? order.first }
     }
 
-    func showServers(from id: UUID? = nil) {
-        guard case .session(let current) = destination, id == nil || id == current else { return }
-        if case .group(let group) = lastCatalog, !settings.groups.contains(where: { $0.id == group }) {
-            destination = .all
-        } else {
-            destination = lastCatalog
+    func closeSession(_ entry: SessionEntry) {
+        guard entries.contains(where: { $0.id == entry.id }) else { return }
+        guard entry.live else { removeSession(entry); return }
+        notice = Notice(title: "Вы уверены?", text: "Закрыть \(entry.protocolName)-сеанс «\(entry.title)»?") { [weak self] in
+            self?.removeSession(entry)
         }
     }
 
-    func closeSession(_ session: TerminalSession) {
-        guard sessions.contains(where: { $0.id == session.id }) else { return }
-        notice = Notice(title: "Вы уверены?", text: "Закрыть SSH-сеанс «\(session.label)»?") { [weak self, weak session] in
-            guard let self, let session else { return }
-            self.removeSession(session)
+    private func removeSession(_ entry: SessionEntry) {
+        switch entry {
+        case .ssh(let session):
+            session.close()
+            sessions.removeAll { $0.id == session.id }
+        case .rdp(let session):
+            session.stop()
+            desktopSessions.removeAll { $0.id == session.id }
         }
+        order.removeAll { $0 == entry.id }
+        lastSessions.removeAll { $0 == entry.id }
+        if activeSession == entry.id { activeSession = lastSessions.first ?? order.last }
     }
 
-    private func removeSession(_ session: TerminalSession) {
-        session.close()
-        sessions.removeAll { $0.id == session.id }
-        lastSessions.removeAll { $0 == session.id }
-        if destination == .session(session.id) {
-            destination = lastSessions.first.map(Destination.session) ?? .all
+    func rename(_ entry: SessionEntry, to label: String) throws {
+        let name = String(label.trimmingCharacters(in: .whitespacesAndNewlines).prefix(80))
+        let siblings: [String]
+        switch entry {
+        case .ssh(let session): siblings = sessions.filter { $0.profile.id == session.profile.id && $0.id != session.id }.map(\.name)
+        case .rdp(let session): siblings = desktopSessions.filter { $0.profile.id == session.profile.id && $0.id != session.id }.map(\.name)
         }
+        if name.unicodeScalars.contains(where: CharacterSet.controlCharacters.contains) ||
+            (!name.isEmpty && siblings.contains { $0.caseInsensitiveCompare(name) == .orderedSame }) {
+            throw ManagerError("Укажите уникальную метку для сеанса этого сервера.")
+        }
+        switch entry {
+        case .ssh(let session): session.name = name
+        case .rdp(let session): session.name = name
+        }
+        objectWillChange.send()
     }
 
     func openFiles(_ profile: Profile) {
@@ -463,6 +579,8 @@ final class Manager: ObservableObject {
             show(ManagerError("Файл ~/.ssh/config появится после добавления первого сервера."))
         }
     }
+
+    var configPath: String { config.url.path.replacingOccurrences(of: NSHomeDirectory(), with: "~") }
 
     func show(_ error: Error) { notice = Notice(title: "SSH Manager", text: error.localizedDescription) }
 }

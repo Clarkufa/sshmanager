@@ -5,7 +5,7 @@ const element = document.getElementById("terminal");
 const terminal = new Terminal({
     fontFamily: "ui-monospace, Menlo, monospace", fontSize: 13, cursorBlink: false,
     scrollback: 10000, minimumContrastRatio: 4.5,
-    theme: { background: "#121823", foreground: "#E2E8F3", cursor: "#72E0B5", selectionBackground: "#36596C" }
+    theme: { background: "#111A27", foreground: "#E1E8F1", cursor: "#90E1C7", selectionBackground: "#2B4F62" }
 });
 const fit = new FitAddon.FitAddon();
 terminal.loadAddon(fit);

@@ -160,8 +160,12 @@ final class TerminalSession: NSObject, ObservableObject, WKScriptMessageHandler,
     let id = UUID()
     let profile: Profile
     let noForwarding: Bool
-    @Published var label: String
+    let number: Int
+    @Published var name = ""
     @Published private(set) var exitCode: Int32?
+    @Published private(set) var forwardingFailed = false
+    private var inspected = 0
+    private var recentOutput = ""
     private var channel: TerminalChannel?
     private(set) var view: WKWebView!
     private var bridge: TerminalMessageBridge!
@@ -173,11 +177,11 @@ final class TerminalSession: NSObject, ObservableObject, WKScriptMessageHandler,
     private let source: URL
     private let showServers: (UUID) -> Void
 
-    init(profile: Profile, noForwarding: Bool = false, showServers: @escaping (UUID) -> Void) {
+    init(profile: Profile, noForwarding: Bool = false, number: Int = 1, showServers: @escaping (UUID) -> Void) {
         self.profile = profile
         self.noForwarding = noForwarding
+        self.number = number
         self.showServers = showServers
-        label = profile.alias
         source = Bundle.main.resourceURL!.appendingPathComponent("Terminal/index.html").absoluteURL.standardizedFileURL
         super.init()
         let configuration = WKWebViewConfiguration()
@@ -188,12 +192,27 @@ final class TerminalSession: NSObject, ObservableObject, WKScriptMessageHandler,
         let terminalView = TerminalWebView(frame: .zero, configuration: configuration)
         terminalView.editCommand = { [weak self] key in self?.edit(key) ?? false }
         view = terminalView
-        view.underPageBackgroundColor = NSColor(red: 18.0 / 255, green: 24.0 / 255, blue: 35.0 / 255, alpha: 1)
+        view.underPageBackgroundColor = NSColor(red: 17.0 / 255, green: 26.0 / 255, blue: 39.0 / 255, alpha: 1)
         view.navigationDelegate = self
         view.loadFileURL(source, allowingReadAccessTo: source.deletingLastPathComponent())
     }
 
     deinit { channel?.close() }
+
+    /// alias, alias · N for later sessions of the same server, alias · label once renamed (docs/ui-spec.md §3.2).
+    var title: String {
+        if !name.isEmpty { return "\(profile.alias) · \(name)" }
+        return number <= 1 ? profile.alias : "\(profile.alias) · \(number)"
+    }
+
+    var live: Bool { exitCode == nil }
+
+    /// user@host:port with IPv6 hosts in brackets.
+    var address: String {
+        var host = profile.host.isEmpty ? profile.alias : profile.host
+        if !profile.port.isEmpty, host.contains(":") { host = "[\(host)]" }
+        return (profile.user.isEmpty ? "" : profile.user + "@") + host + (profile.port.isEmpty ? "" : ":" + profile.port)
+    }
 
     func close() {
         closed = true
@@ -281,7 +300,7 @@ final class TerminalSession: NSObject, ObservableObject, WKScriptMessageHandler,
                                           exited: { [weak self] code in
                 guard let self, !self.closed else { return }
                 self.exitCode = code
-                self.render(Data("\r\n[Сеанс завершён, код \(code)]\r\n".utf8))
+                self.render(Data("\r\n\u{1b}[0mSSH завершился (код \(code)).\r\n".utf8))
             })
         } catch {
             exitCode = 1
@@ -291,8 +310,22 @@ final class TerminalSession: NSObject, ObservableObject, WKScriptMessageHandler,
 
     private func render(_ data: Data) {
         guard !closed else { return }
+        inspect(data)
         pending.append(data)
         if rendering == nil { renderNext() }
+    }
+
+    /// Notices OpenSSH's port forwarding errors in the first output, like the Windows app.
+    private func inspect(_ data: Data) {
+        guard !forwardingFailed, !noForwarding, inspected < 65_536 else { return }
+        inspected += data.count
+        let text = recentOutput + String(decoding: data, as: UTF8.self)
+        let plain = text.replacingOccurrences(of: #"\x1b\[[0-?]*[ -/]*[@-~]"#, with: "", options: .regularExpression)
+        if plain.range(of: #"cannot\s*listen\s*to\s*port\s*:|could\s*not\s*request\s*local\s*forwarding"#,
+                       options: [.regularExpression, .caseInsensitive]) != nil {
+            forwardingFailed = true
+        }
+        recentOutput = String(text.suffix(160))
     }
 
     private func renderNext() {

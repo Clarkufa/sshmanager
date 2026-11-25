@@ -17,7 +17,8 @@ struct ServerGroup: Identifiable {
 }
 
 enum GroupMarker: String, CaseIterable, Identifiable {
-    case blue, teal, green, amber, red, purple, gray
+    // The Windows order and colours (src/TabColor.cs).
+    case blue, green, teal, amber, red, purple, gray
     var id: Self { self }
     var title: String {
         switch self {
@@ -32,13 +33,13 @@ enum GroupMarker: String, CaseIterable, Identifiable {
     }
     var color: Color {
         switch self {
-        case .blue: .blue
-        case .teal: .teal
-        case .green: .green
-        case .amber: .orange
-        case .red: .red
-        case .purple: .purple
-        case .gray: .gray
+        case .blue: Color(hex: 0x2563EB)
+        case .green: Color(hex: 0x20804E)
+        case .teal: Color(hex: 0x0E7B82)
+        case .amber: Color(hex: 0xB36306)
+        case .red: Color(hex: 0xC52E49)
+        case .purple: Color(hex: 0x7E4CC8)
+        case .gray: Color(hex: 0x64748B)
         }
     }
 }
