@@ -85,7 +85,10 @@ namespace SshManager
                     if (disconnected != null) ComEventsHelper.Remove(client, EventInterface, 4, disconnected);
                     if (IsOpen) Call(client, "Disconnect");
                 }
-                catch (Exception error) when (error is COMException || error is TargetInvocationException) { }
+                catch (Exception error) when (error is COMException || error is TargetInvocationException || error is InvalidComObjectException)
+                {
+                    // AxHost can release its COM wrapper when destroying the parent window's handle.
+                }
                 client = null;
             }
             base.Dispose(disposing);
