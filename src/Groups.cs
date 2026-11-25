@@ -228,7 +228,7 @@ namespace SshManager
                         document.Save(stream);
                         stream.Flush(true);
                     }
-                    if (File.Exists(path)) File.Replace(temp, path, null);
+                    if (File.Exists(path)) ReplaceSettings(temp);
                     else File.Move(temp, path);
                     return latest;
                 }
@@ -236,6 +236,20 @@ namespace SshManager
                 {
                     try { if (File.Exists(temp)) File.Delete(temp); }
                     finally { mutex.ReleaseMutex(); }
+                }
+            }
+        }
+
+        private void ReplaceSettings(string temporary)
+        {
+            const int sharingViolation = 32, lockViolation = 33, unableToRemoveReplaced = 1175;
+            for (int attempt = 0; ; attempt++)
+            {
+                try { File.Replace(temporary, path, null); return; }
+                catch (IOException error) when (attempt < 5 &&
+                    ((error.HResult & 0xffff) is sharingViolation or lockViolation or unableToRemoveReplaced))
+                {
+                    Thread.Sleep(60);
                 }
             }
         }
