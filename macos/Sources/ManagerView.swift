@@ -16,8 +16,8 @@ struct SSHManagerApp: App {
             CommandGroup(replacing: .newItem) {
                 Button("Новый сеанс…") { manager.choosingServer = true }
                     .keyboardShortcut("n", modifiers: .command)
-                    .disabled(manager.profiles.isEmpty)
-                Button("Добавить сервер…") { manager.editor = ProfileEditorState() }
+                    .disabled(manager.profiles.isEmpty && manager.settings.desktops.isEmpty)
+                Button("Добавить сервер…") { manager.addCatalogEntry() }
                     .keyboardShortcut("n", modifiers: [.command, .shift])
                 Button("Новая вкладка…") { manager.groupEditor = GroupEditorState() }
             }
@@ -75,8 +75,16 @@ private struct ManagerView: View {
         .sheet(item: $manager.groupEditor) { state in
             GroupEditor(state: state) { try manager.saveGroup($0, original: state.original) }
         }
+        .sheet(item: $manager.desktopEditor) { state in
+            DesktopEditor(state: state) { try manager.saveDesktop($0, editing: state.original != nil) }
+        }
         .sheet(isPresented: $manager.choosingServer) {
-            ServerPicker(profiles: manager.profiles) { manager.connect($0, new: true) }
+            ServerPicker(profiles: manager.profiles, desktops: manager.settings.desktops, kind: manager.catalogProtocol) { choice in
+                switch choice {
+                case .ssh(let profile): manager.connect(profile, new: true)
+                case .rdp(let profile): manager.connectDesktop(profile)
+                }
+            }
         }
         .sheet(isPresented: $manager.managingBackups) { BackupView(manager: manager) }
         .sheet(isPresented: $updates.presented) { MacUpdateView(updates: updates) }
@@ -184,30 +192,63 @@ private struct ManagerView: View {
 
     private var visibleProfiles: [Profile] {
         let search = query.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !search.isEmpty else { return groupProfiles }
-        return groupProfiles.filter { profile in
-            profile.alias.localizedCaseInsensitiveContains(search) || profile.address.localizedCaseInsensitiveContains(search)
+        let filtered = groupProfiles.filter { profile in
+            search.isEmpty || profile.alias.localizedCaseInsensitiveContains(search) || profile.address.localizedCaseInsensitiveContains(search)
         }
+        return currentSort.apply(filtered, name: \.alias, host: { $0.host.isEmpty ? $0.alias : $0.host })
+    }
+
+    private var groupDesktops: [DesktopProfile] {
+        guard let group = currentGroup else { return manager.settings.desktops }
+        return manager.settings.desktops.filter { $0.group == group.id }
+    }
+
+    private var visibleDesktops: [DesktopProfile] {
+        let search = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        let filtered = groupDesktops.filter { profile in
+            search.isEmpty || profile.name.localizedCaseInsensitiveContains(search) ||
+                profile.address.localizedCaseInsensitiveContains(search) || profile.account.localizedCaseInsensitiveContains(search)
+        }
+        return currentSort.apply(filtered, name: \.name, host: \.host)
+    }
+
+    private var currentSort: ServerSort {
+        if manager.catalogProtocol == .rdp { return currentGroup?.rdpSort ?? manager.settings.rdpSort }
+        return currentGroup?.sshSort ?? manager.settings.sshSort
     }
 
     private var catalog: some View {
-        VStack(alignment: .leading, spacing: 0) {
+        let rdp = manager.catalogProtocol == .rdp
+        return VStack(alignment: .leading, spacing: 0) {
             HStack {
                 VStack(alignment: .leading, spacing: 3) {
                     Text(currentGroup?.name ?? "Все серверы").font(.largeTitle.weight(.semibold)).lineLimit(1)
-                    Text("Серверов: \(groupProfiles.count)").font(.callout).foregroundStyle(.secondary)
+                    Text("Серверов: \(rdp ? groupDesktops.count : groupProfiles.count)").font(.callout).foregroundStyle(.secondary)
                 }
                 Spacer()
                 Button {
                     manager.choosingServer = true
                 } label: { Label("Новый сеанс", systemImage: "terminal") }
-                    .disabled(manager.profiles.isEmpty)
+                    .disabled(manager.profiles.isEmpty && manager.settings.desktops.isEmpty)
                 Button {
-                    manager.editor = ProfileEditorState()
+                    manager.addCatalogEntry()
                 } label: { Label("Добавить сервер", systemImage: "plus") }
                     .buttonStyle(.borderedProminent)
             }
-            .padding(.horizontal, 24).padding(.top, 24).padding(.bottom, 20)
+            .padding(.horizontal, 24).padding(.top, 24).padding(.bottom, 14)
+            HStack {
+                Picker("Протокол", selection: $manager.catalogProtocol) {
+                    ForEach(ConnectionProtocol.allCases) { kind in Text(kind.rawValue).tag(kind) }
+                }.pickerStyle(.segmented).labelsHidden().frame(width: 164)
+                Spacer()
+                if rdp { Button("Импорт .rdp…") { manager.transferDesktop(nil, group: currentGroup?.id) } }
+                Picker("Сортировка", selection: Binding(get: { currentSort }, set: {
+                    manager.sortCatalog($0, kind: manager.catalogProtocol, group: currentGroup?.id)
+                })) {
+                    ForEach(ServerSort.allCases) { order in Text(order.title).tag(order) }
+                }.labelsHidden().fixedSize()
+            }
+            .padding(.horizontal, 24).padding(.bottom, 12)
             HStack(spacing: 8) {
                 Image(systemName: "magnifyingglass").foregroundStyle(.secondary).accessibilityHidden(true)
                 TextField("Поиск по имени или адресу", text: $query)
@@ -222,7 +263,7 @@ private struct ManagerView: View {
             .background(.quaternary.opacity(0.45), in: RoundedRectangle(cornerRadius: 7))
             .padding(.horizontal, 24).padding(.bottom, 16)
 
-            if visibleProfiles.isEmpty {
+            if rdp ? visibleDesktops.isEmpty : visibleProfiles.isEmpty {
                 Spacer()
                 VStack(spacing: 9) {
                     Image(systemName: query.isEmpty ? "server.rack" : "magnifyingglass")
@@ -230,7 +271,8 @@ private struct ManagerView: View {
                         .foregroundStyle(.secondary).accessibilityHidden(true)
                     Text(query.isEmpty ? "Здесь пока нет серверов" : "Серверы не найдены")
                         .font(.title3.weight(.semibold))
-                    Text(query.isEmpty ? "Добавьте сервер для подключения по SSH или SFTP." : "Попробуйте другой псевдоним или адрес.")
+                    Text(query.isEmpty ? (rdp ? "Добавьте сервер или импортируйте профиль .rdp." : "Добавьте сервер для подключения по SSH или SFTP.") :
+                            "Попробуйте другое название или адрес.")
                         .font(.callout).foregroundStyle(.secondary)
                 }
                 .frame(maxWidth: .infinity).padding(.bottom, 48)
@@ -238,9 +280,18 @@ private struct ManagerView: View {
             } else {
                 ScrollView {
                     LazyVStack(spacing: 0) {
-                        ForEach(visibleProfiles) { profile in
-                            profileRow(profile)
-                            if profile.id != visibleProfiles.last?.id { Divider().padding(.leading, 50) }
+                        if rdp {
+                            let desktops = visibleDesktops
+                            ForEach(desktops) { profile in
+                                desktopRow(profile)
+                                if profile.id != desktops.last?.id { Divider().padding(.leading, 50) }
+                            }
+                        } else {
+                            let profiles = visibleProfiles
+                            ForEach(profiles) { profile in
+                                profileRow(profile)
+                                if profile.id != profiles.last?.id { Divider().padding(.leading, 50) }
+                            }
                         }
                     }
                     .padding(.horizontal, 12)
@@ -251,13 +302,52 @@ private struct ManagerView: View {
             }
             Divider()
             HStack(spacing: 14) {
-                Label("~/.ssh/config", systemImage: "doc.text").font(.system(.caption, design: .monospaced))
+                Label(rdp ? "RDP-профили" : "~/.ssh/config", systemImage: "doc.text").font(.system(.caption, design: .monospaced))
                 Spacer()
-                Button("Обновить") { manager.reload() }.buttonStyle(.borderless)
+                Button("Обновить") { if rdp { manager.reloadSettings() } else { manager.reload() } }.buttonStyle(.borderless)
                 Button("Поиск") { focusSearch = true }.keyboardShortcut("f").buttonStyle(.borderless)
             }.foregroundStyle(.secondary).padding(.horizontal, 24).frame(height: 36)
         }
         .background(Color(nsColor: .controlBackgroundColor))
+        .onChange(of: manager.catalogProtocol) { _, _ in query = "" }
+    }
+
+    private func desktopRow(_ profile: DesktopProfile) -> some View {
+        HStack(spacing: 12) {
+            Image(systemName: "display")
+                .font(.system(size: 16, weight: .medium))
+                .foregroundStyle(Color.accentColor)
+                .frame(width: 36, height: 36)
+                .background(Color.accentColor.opacity(0.10), in: RoundedRectangle(cornerRadius: 8))
+                .accessibilityHidden(true)
+            VStack(alignment: .leading, spacing: 3) {
+                Text(profile.name).font(.headline).lineLimit(1)
+                Text(profile.address).font(.system(.callout, design: .monospaced)).foregroundStyle(.secondary).lineLimit(1)
+            }
+            Spacer()
+            Button("Подключиться") { manager.connectDesktop(profile) }
+            Menu { desktopMenu(profile) } label: { Image(systemName: "ellipsis.circle") }
+                .menuStyle(.borderlessButton).fixedSize()
+                .help("Действия с RDP-подключением").accessibilityLabel("Действия с сервером \(profile.name)")
+        }
+        .frame(minHeight: 64)
+        .padding(.horizontal, 6)
+        .contextMenu { desktopMenu(profile) }
+    }
+
+    @ViewBuilder
+    private func desktopMenu(_ profile: DesktopProfile) -> some View {
+        Button("Подключиться") { manager.connectDesktop(profile) }
+        Button("Изменить…") { manager.desktopEditor = DesktopEditorState(original: profile, group: profile.group) }
+        Menu("Переместить во вкладку") {
+            Button("Без вкладки") { manager.moveDesktop(profile, to: nil) }
+            ForEach(manager.settings.groups) { group in
+                Button(group.name) { manager.moveDesktop(profile, to: group.id) }
+            }
+        }
+        Button("Экспорт .rdp…") { manager.transferDesktop(profile) }
+        Divider()
+        Button("Удалить…", role: .destructive) { manager.removeDesktop(profile) }
     }
 
     private func profileRow(_ profile: Profile) -> some View {
@@ -513,21 +603,114 @@ private struct GroupEditor: View {
     }
 }
 
+private struct DesktopEditor: View {
+    @Environment(\.dismiss) private var dismiss
+    @State private var profile: DesktopProfile
+    @State private var port: String
+    @State private var width: String
+    @State private var height: String
+    @State private var error = ""
+    let save: (DesktopProfile) throws -> Void
+
+    init(state: DesktopEditorState, save: @escaping (DesktopProfile) throws -> Void) {
+        let start = state.original ?? DesktopProfile(group: state.group)
+        _profile = State(initialValue: start)
+        _port = State(initialValue: String(start.port))
+        _width = State(initialValue: start.width == 0 ? "" : String(start.width))
+        _height = State(initialValue: start.height == 0 ? "" : String(start.height))
+        self.save = save
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Text("RDP-подключение").font(.title2.weight(.semibold))
+            Form {
+                TextField("Название", text: $profile.name)
+                TextField("Адрес", text: $profile.host)
+                TextField("Порт", text: $port)
+                TextField("Пользователь", text: $profile.user)
+                TextField("Домен", text: $profile.domain)
+                TextField("Ширина экрана", text: $width, prompt: Text("Автоматически"))
+                TextField("Высота экрана", text: $height, prompt: Text("Автоматически"))
+                Toggle("Общий буфер обмена", isOn: $profile.clipboard)
+                Toggle("Полноэкранный режим", isOn: $profile.fullScreen)
+            }.textFieldStyle(.roundedBorder)
+            if !error.isEmpty { Text(error).foregroundStyle(.red).font(.callout) }
+            HStack {
+                Spacer()
+                Button("Отмена") { dismiss() }.keyboardShortcut(.cancelAction)
+                Button("Сохранить", action: submit).keyboardShortcut(.defaultAction)
+            }
+        }.padding(22).frame(width: 480)
+    }
+
+    private func submit() {
+        let trim: (String) -> String = { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+        var value = profile
+        value.name = trim(value.name)
+        value.host = trim(value.host).trimmingCharacters(in: CharacterSet(charactersIn: "[]"))
+        value.domain = trim(value.domain)
+        value.user = trim(value.user)
+        value.port = trim(port).isEmpty ? 3389 : Int(trim(port)) ?? -1
+        value.width = trim(width).isEmpty ? 0 : Int(trim(width)) ?? -1
+        value.height = trim(height).isEmpty ? 0 : Int(trim(height)) ?? -1
+        do { try save(value); dismiss() }
+        catch { self.error = error.localizedDescription }
+    }
+}
+
+private enum ServerChoice: Identifiable {
+    case ssh(Profile), rdp(DesktopProfile)
+
+    var id: String {
+        switch self {
+        case .ssh(let profile): "ssh:" + profile.id
+        case .rdp(let profile): "rdp:" + profile.id
+        }
+    }
+
+    var name: String {
+        switch self {
+        case .ssh(let profile): profile.alias
+        case .rdp(let profile): profile.name
+        }
+    }
+
+    var address: String {
+        switch self {
+        case .ssh(let profile): profile.address
+        case .rdp(let profile): profile.address
+        }
+    }
+}
+
 private struct ServerPicker: View {
     @Environment(\.dismiss) private var dismiss
     @State private var query = ""
     @State private var selection: String?
+    @State private var kind: ConnectionProtocol
     @FocusState private var focused: Bool
     let profiles: [Profile]
-    let connect: (Profile) -> Void
+    let desktops: [DesktopProfile]
+    let connect: (ServerChoice) -> Void
+
+    init(profiles: [Profile], desktops: [DesktopProfile], kind: ConnectionProtocol, connect: @escaping (ServerChoice) -> Void) {
+        self.profiles = profiles
+        self.desktops = desktops
+        _kind = State(initialValue: kind)
+        self.connect = connect
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
             Text("Новый сеанс").font(.title2.weight(.semibold))
+            Picker("Протокол", selection: $kind) {
+                ForEach(ConnectionProtocol.allCases) { value in Text(value.rawValue).tag(value) }
+            }.pickerStyle(.segmented).labelsHidden().frame(width: 164)
             TextField("Поиск по имени или адресу", text: $query).focused($focused)
             List(visible, selection: $selection) { profile in
                 VStack(alignment: .leading, spacing: 2) {
-                    Text(profile.alias).font(.headline)
+                    Text(profile.name).font(.headline)
                     Text(profile.address).foregroundStyle(.secondary).font(.system(.caption, design: .monospaced))
                 }
                 .tag(profile.id)
@@ -544,9 +727,11 @@ private struct ServerPicker: View {
             .onAppear { focused = true }
     }
 
-    private var visible: [Profile] {
-        query.isEmpty ? profiles : profiles.filter { $0.alias.localizedCaseInsensitiveContains(query) || $0.address.localizedCaseInsensitiveContains(query) }
+    private var visible: [ServerChoice] {
+        let choices = kind == .ssh ? profiles.map(ServerChoice.ssh) : desktops.map(ServerChoice.rdp)
+        let filtered = choices.filter { query.isEmpty || $0.name.localizedCaseInsensitiveContains(query) || $0.address.localizedCaseInsensitiveContains(query) }
+        return ServerSort.name.apply(filtered, name: \.name, host: \.address)
     }
-    private var chosen: Profile? { visible.first(where: { $0.id == selection }) ?? visible.first }
-    private func choose(_ profile: Profile) { dismiss(); connect(profile) }
+    private var chosen: ServerChoice? { visible.first(where: { $0.id == selection }) ?? visible.first }
+    private func choose(_ profile: ServerChoice) { dismiss(); connect(profile) }
 }
