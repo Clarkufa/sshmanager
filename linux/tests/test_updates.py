@@ -6,15 +6,44 @@ import shutil
 import sys
 import tarfile
 from tempfile import TemporaryDirectory
+from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
 from ssh_manager.updates import (
-    ARCHIVE, MANIFEST, BundleReplacement, TOP_FILES, Update, UpdateError, installed_version, unpack_application,
+    ARCHIVE, DEB, DEB_ROOT, MANIFEST, RPM, RPM_ROOT, BundleReplacement, TOP_FILES, Update, UpdateError,
+    installed_version, unpack_application,
 )
 
 
 class UpdatesTests(unittest.TestCase):
+    def test_download_choice_matches_the_installation_format(self):
+        release = {
+            "tag_name": "v1.8.9", "draft": False, "prerelease": False,
+            "assets": [{"name": name, "state": "uploaded", "size": 3, "digest": "sha256:" + "a" * 64}
+                       for name in (RPM, DEB, ARCHIVE)],
+        }
+        for root, name in ((RPM_ROOT, RPM), (DEB_ROOT, DEB), (Path("/home/user/ssh-manager"), ARCHIVE)):
+            with self.subTest(name=name), patch("ssh_manager.updates.VERSION", "1.8.8"), patch(
+                "ssh_manager.updates.request", return_value=io.BytesIO(json.dumps(release).encode())
+            ):
+                self.assertEqual(Update.check(root).name, name)
+
+    def test_rpm_validates_the_package_before_requesting_admin_access(self):
+        package = Path("/tmp/SSH-Manager-Linux.rpm")
+        update = Update("1.8.9", RPM, 1, "a" * 64)
+        with patch.object(Path, "is_file", return_value=True), patch("ssh_manager.updates.subprocess.run") as run:
+            run.return_value = SimpleNamespace(stdout="ssh-manager-desktop\n1.8.8\nnoarch\n", returncode=0)
+            with self.assertRaises(UpdateError):
+                update.install(package, RPM_ROOT)
+            run.assert_called_once()
+            run.reset_mock()
+            run.return_value.stdout = "ssh-manager-desktop\n1.8.9\nnoarch\n"
+            self.assertIsNone(update.install(package, RPM_ROOT))
+            self.assertEqual(run.call_args_list[0].args[0][:3], ["/usr/bin/rpm", "--query", "--package"])
+            self.assertEqual(run.call_args_list[1].args[0],
+                             ["/usr/bin/pkexec", "--disable-internal-agent", "/usr/bin/dnf", "install", "-y", str(package)])
+
     def test_release_must_be_newer_and_have_one_valid_asset(self):
         release = {
             "tag_name": "v1.8.6",

@@ -4,6 +4,7 @@ param(
     [string] $Python = 'python',
     [string] $MacDmg,
     [string] $LinuxDeb,
+    [string] $LinuxRpm,
     [string] $LinuxArchive
 )
 
@@ -13,8 +14,8 @@ $notes = (Resolve-Path -LiteralPath $NotesFile).Path
 if (-not (Test-Path -LiteralPath $notes -PathType Leaf)) {
     throw 'Provide a file with release notes.'
 }
-if ([bool]$LinuxDeb -ne [bool]$LinuxArchive) {
-    throw 'Provide the new Linux DEB and TAR.GZ together.'
+if (($LinuxDeb -or $LinuxRpm -or $LinuxArchive) -and -not ($LinuxDeb -and $LinuxRpm -and $LinuxArchive)) {
+    throw 'Provide the new Linux DEB, RPM and TAR.GZ together.'
 }
 
 function Assert-ReleaseAsset($Asset, [string] $Path) {
@@ -29,11 +30,13 @@ function Assert-ReleaseAsset($Asset, [string] $Path) {
 $platformSources = [ordered]@{
     'SSH-Manager-macOS.dmg' = $MacDmg
     'SSH-Manager-Linux.deb' = $LinuxDeb
+    'SSH-Manager-Linux.rpm' = $LinuxRpm
     'SSH-Manager-Linux.tar.gz' = $LinuxArchive
 }
 $platformLabels = @{
     'SSH-Manager-macOS.dmg' = 'macOS - DMG for Apple Silicon and Intel'
     'SSH-Manager-Linux.deb' = 'Linux - DEB for Debian and Ubuntu'
+    'SSH-Manager-Linux.rpm' = 'Linux - RPM for Fedora'
     'SSH-Manager-Linux.tar.gz' = 'Linux - TAR.GZ'
 }
 foreach ($name in @($platformSources.Keys)) {
@@ -121,7 +124,7 @@ try {
     if ($LASTEXITCODE -ne 0) { throw "Could not verify release draft $tag." }
     $draft = $draftJson | ConvertFrom-Json
     if (-not $draft.isDraft -or @($draft.assets).Count -ne $assets.Count) {
-        throw "Release draft $tag must contain exactly the five platform builds."
+        throw "Release draft $tag must contain exactly $($assets.Count) platform builds."
     }
     foreach ($name in $assets.Keys) {
         $uploaded = $draft.assets | Where-Object { $_.name -ceq $name }

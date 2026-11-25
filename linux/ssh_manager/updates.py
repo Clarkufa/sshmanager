@@ -21,8 +21,11 @@ LATEST = "https://api.github.com/repos/Clarkufa/sshmanager/releases/latest"
 HOSTS = {"github.com", "api.github.com", "objects.githubusercontent.com",
          "release-assets.githubusercontent.com", "github-releases.githubusercontent.com"}
 DEB_ROOT = Path("/usr/lib/ssh-manager")
+RPM_ROOT = Path("/usr/share/ssh-manager")
 DEB = "SSH-Manager-Linux.deb"
+RPM = "SSH-Manager-Linux.rpm"
 ARCHIVE = "SSH-Manager-Linux.tar.gz"
+PACKAGE_ASSETS = {DEB_ROOT: DEB, RPM_ROOT: RPM}
 MAX_ASSET = 64 * 1024 * 1024
 MAX_TAR = 16 * 1024 * 1024
 MANIFEST = ".ssh-manager-checksums.json"
@@ -103,7 +106,7 @@ class Update:
             data = response.read(limit + 1)
         if len(data) > limit:
             raise UpdateError("Описание выпуска превышает допустимый размер.")
-        return cls.from_release(data, current=VERSION, name=DEB if root == DEB_ROOT else ARCHIVE)
+        return cls.from_release(data, current=VERSION, name=PACKAGE_ASSETS.get(root, ARCHIVE))
 
     def download(self):
         folder = Path(tempfile.mkdtemp(prefix="ssh-manager-update-"))
@@ -130,6 +133,9 @@ class Update:
         if self.name == DEB:
             install_deb(package, self.version)
             return None
+        if self.name == RPM:
+            install_rpm(package, self.version)
+            return None
         return BundleReplacement.install(package, root, self.version)
 
 
@@ -144,8 +150,25 @@ def install_deb(package, version):
     ).stdout.splitlines()
     if fields != ["ssh-manager-desktop", version]:
         raise UpdateError("Загружен пакет другой программы или версии.")
+    install_system_package(apt, package)
+
+
+def install_rpm(package, version):
+    dnf = Path("/usr/bin/dnf")
+    if not (dnf.is_file() and Path("/usr/bin/pkexec").is_file()):
+        raise UpdateError("Для установки из приложения нужны DNF и системный запрос прав администратора.")
+    fields = subprocess.run(
+        ["/usr/bin/rpm", "--query", "--package", "--queryformat", "%{NAME}\n%{VERSION}\n%{ARCH}", str(package)],
+        check=True, text=True, capture_output=True, timeout=10,
+    ).stdout.splitlines()
+    if fields != ["ssh-manager-desktop", version, "noarch"]:
+        raise UpdateError("Загружен пакет другой программы, версии или архитектуры.")
+    install_system_package(dnf, package)
+
+
+def install_system_package(manager, package):
     result = subprocess.run(
-        [str(pkexec), "--disable-internal-agent", str(apt), "install", "-y", str(package)],
+        ["/usr/bin/pkexec", "--disable-internal-agent", str(manager), "install", "-y", str(package)],
         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=300,
     )
     if result.returncode:

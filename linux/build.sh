@@ -58,4 +58,12 @@ Description: Native SSH and SFTP desktop manager
 EOF
     dpkg-deb --root-owner-group --build "$pkg" "$output/ssh-manager-desktop_${version}_all.deb"
 fi
+
+if command -v rpmbuild >/dev/null; then
+    rpm="$stage/rpm"
+    install -d "$rpm/SOURCES"
+    cp "$output/ssh-manager-linux-$version.tar.gz" "$source_dir/ssh-manager.desktop" "$rpm/SOURCES/"
+    rpmbuild -bb --define "_topdir $rpm" --define "ssh_manager_version $version" "$source_dir/ssh-manager.spec"
+    install -m 0644 "$rpm/RPMS/noarch/ssh-manager-desktop-$version-1.noarch.rpm" "$output/"
+fi
 printf '%s\n' "$output/ssh-manager-linux-$version.tar.gz"

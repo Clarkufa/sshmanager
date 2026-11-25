@@ -18,6 +18,7 @@ SSH Manager помогает работать с удалёнными серве
 ### Linux
 
 - **Debian и Ubuntu.** Скачайте пакет DEB и откройте его в менеджере пакетов или установите через `apt`. [Скачать DEB](https://github.com/Clarkufa/sshmanager/releases/latest/download/SSH-Manager-Linux.deb)
+- **Fedora.** Скачайте пакет RPM и установите через `sudo dnf install ./SSH-Manager-Linux.rpm`. [Скачать RPM](https://github.com/Clarkufa/sshmanager/releases/latest/download/SSH-Manager-Linux.rpm)
 - **Другие дистрибутивы.** Распакуйте архив, установите зависимости и запустите `./ssh-manager`. [Скачать TAR.GZ](https://github.com/Clarkufa/sshmanager/releases/latest/download/SSH-Manager-Linux.tar.gz) · [Инструкция и зависимости для Linux](linux/README.md)
 
 ## Первое подключение
