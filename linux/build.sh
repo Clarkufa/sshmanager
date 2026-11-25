@@ -50,11 +50,11 @@ Priority: optional
 Architecture: all
 Maintainer: SSH Manager contributors <3994042+Clarkufa@users.noreply.github.com>
 Depends: python3 (>= 3.10), python3-gi, gir1.2-gtk-3.0, gir1.2-vte-2.91, python3-paramiko, python3-cryptography, openssh-client, libsecret-tools
-Recommends: pkexec
+Recommends: pkexec, freerdp3-x11 | freerdp-x11 | freerdp2-x11
 Homepage: https://github.com/Clarkufa/sshmanager
-Description: Native SSH and SFTP desktop manager
- OpenSSH connection profiles, embedded VTE sessions and graphical SFTP
- using GTK, with desktop password storage through Secret Service.
+Description: Native SSH, SFTP and RDP desktop manager
+ OpenSSH profiles, embedded VTE sessions, graphical SFTP and RDP profiles
+ for FreeRDP, with SSH password storage through Secret Service.
 EOF
     dpkg-deb --root-owner-group --build "$pkg" "$output/ssh-manager-desktop_${version}_all.deb"
 fi

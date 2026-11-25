@@ -1,7 +1,7 @@
 Name:           ssh-manager-desktop
 Version:        %{ssh_manager_version}
 Release:        1
-Summary:        Native SSH and SFTP desktop manager
+Summary:        Native SSH, SFTP and RDP desktop manager
 License:        MIT
 URL:            https://github.com/Clarkufa/sshmanager
 Source0:        ssh-manager-linux-%{version}.tar.gz
@@ -18,10 +18,11 @@ Requires:       vte291
 Requires:       /usr/bin/ssh
 Requires:       /usr/bin/secret-tool
 Recommends:     /usr/bin/pkexec
+Recommends:     freerdp
 
 %description
-Manage OpenSSH profiles, SSH sessions in an embedded VTE terminal, and SFTP
-transfers in a two-pane GTK file manager.
+Manage OpenSSH profiles, SSH sessions in an embedded VTE terminal, SFTP
+transfers in a two-pane GTK file manager, and RDP profiles for FreeRDP.
 
 %prep
 %setup -q -n ssh-manager-%{version}

@@ -79,11 +79,12 @@ class DesktopProfile:
         return self
 
     def command(self):
-        names = ("sdl-freerdp3", "sdl-freerdp", "xfreerdp3", "xfreerdp") if not os.environ.get("DISPLAY") else (
-            "xfreerdp3", "xfreerdp", "sdl-freerdp3", "sdl-freerdp")
+        x11 = ("xfreerdp3", "xfreerdp")
+        wayland = ("sdl-freerdp3", "sdl-freerdp", "wlfreerdp3", "wlfreerdp")
+        names = x11 + wayland if os.environ.get("DISPLAY") else wayland + x11
         client = next((path for name in names if (path := shutil.which(name))), None)
         if not client:
-            raise ValueError("Установите клиент FreeRDP (xfreerdp3, xfreerdp или sdl-freerdp).")
+            raise ValueError("Установите клиент FreeRDP из репозитория вашего дистрибутива.")
         args = [client, "/v:" + self.address, "/t:" + self.name, "+clipboard" if self.clipboard else "-clipboard"]
         if self.user:
             args.append("/u:" + self.user)
