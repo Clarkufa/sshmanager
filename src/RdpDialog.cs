@@ -35,6 +35,10 @@ namespace SshManager
             var port = Field(layout, 2, "Порт", (profile?.Port ?? 3389).ToString(), 5);
             var user = Field(layout, 3, "Пользователь", profile?.User, 128);
             var domain = Field(layout, 4, "Домен", profile?.Domain, 128);
+            var tips = new ToolTip();
+            Disposed += (sender, args) => tips.Dispose();
+            domain.AccessibleDescription = "Пусто — учётная запись на самом сервере. Для доменной учётной записи укажите имя домена, например CORP.";
+            tips.SetToolTip(domain, domain.AccessibleDescription);
             var password = Field(layout, 5, "Па&роль", "", SshPasswords.MaxBytes);
             password.UseSystemPasswordChar = true;
             var passwordOptions = new FlowLayoutPanel { Dock = DockStyle.Fill, WrapContents = false, Margin = Padding.Empty };

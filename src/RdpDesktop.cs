@@ -136,8 +136,9 @@ namespace SshManager
             var settings = Get(client, "AdvancedSettings8");
             var size = InitialSize();
             Set(client, "Server", profile.Host);
-            Set(client, "UserName", credential.User);
-            Set(client, "Domain", credential.Domain);
+            var account = LogonAccount(credential.User, credential.Domain);
+            Set(client, "UserName", account.Key);
+            Set(client, "Domain", account.Value);
             Set(client, "DesktopWidth", size.Width);
             Set(client, "DesktopHeight", size.Height);
             TrySet(client, "ConnectingText", "Подключение к " + profile.Address + "…");
@@ -217,6 +218,24 @@ namespace SshManager
             Status = status;
             IsOpen = open;
             Changed?.Invoke();
+        }
+
+        /// <summary>
+        /// The user and domain sent through CredSSP. With an empty domain Windows qualifies the name with this
+        /// computer's own name (for example PC\Administrator), which a remote domain controller rejects. "." names the
+        /// account database of the remote server itself: local accounts there, domain accounts on a domain controller.
+        /// </summary>
+        internal static KeyValuePair<string, string> LogonAccount(string user, string domain)
+        {
+            user = (user ?? "").Trim();
+            domain = (domain ?? "").Trim();
+            if (domain.Length == 0)
+            {
+                int slash = user.IndexOf('\\');
+                if (slash > 0) return new KeyValuePair<string, string>(user.Substring(slash + 1), user.Substring(0, slash));
+                if (user.Length > 0 && user.IndexOf('@') < 0) domain = ".";
+            }
+            return new KeyValuePair<string, string>(user, domain);
         }
 
         private Size InitialSize()
