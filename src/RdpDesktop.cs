@@ -41,7 +41,10 @@ namespace SshManager
         private RdpCredential credential;
         private Size appliedSize;
         private int appliedDpi, retries;
-        private bool loggedIn;
+        private bool loggedIn, fullScreenMode;
+
+        // Server authentication level: 2 warns about an unverified server. Tests against a throwaway server lower it.
+        internal static uint ServerAuthentication = 2;
 
         public RdpDesktop()
         {
@@ -123,6 +126,7 @@ namespace SshManager
         {
             ReleaseClient();
             loggedIn = false;
+            fullScreenMode = false;
             retries = 0;
             appliedSize = Size.Empty;
             overlay.Visible = false;
@@ -147,7 +151,7 @@ namespace SshManager
             Set(settings, "RDPPort", profile.Port);
             Set(settings, "SmartSizing", true);
             Set(settings, "EnableCredSspSupport", true);
-            Set(settings, "AuthenticationLevel", 2u);
+            Set(settings, "AuthenticationLevel", ServerAuthentication);
             Set(settings, "RedirectClipboard", profile.Clipboard);
             Set(settings, "RedirectDrives", false);
             Set(settings, "RedirectPrinters", false);
@@ -160,8 +164,13 @@ namespace SshManager
             appliedDpi = DeviceDpi;
 
             Listen(1, new Action(() => UpdateStatus("подключение", true)));
+            // Windows servers report OnLoginComplete; xrdp and some appliances only report OnConnected.
+            Listen(2, new Action(OnLogin));
             Listen(3, new Action(OnLogin));
             Listen(4, new Action<int>(OnDisconnected));
+            // The client shows full screen in a window of its own, so the session follows that window, not ours.
+            Listen(5, new Action(() => { fullScreenMode = true; ScheduleSync(); }));
+            Listen(6, new Action(() => { fullScreenMode = false; ScheduleSync(); }));
             Listen(10, new Action<int>(code => ShowEnded("Ошибка RDP-клиента", "Код ошибки: " + code)));
             UpdateStatus("подключение", true);
             Call(client, "Connect");
@@ -169,10 +178,11 @@ namespace SshManager
 
         private void OnLogin()
         {
+            bool first = !loggedIn;
             loggedIn = true;
-            appliedSize = host?.ClientSize ?? Size.Empty;
+            if (first && host != null) appliedSize = profile.Width != 0 ? new Size(profile.Width, profile.Height) : Fit(host.ClientSize);
             UpdateStatus("подключён", true);
-            if (profile.FullScreen && Visible)
+            if (first && profile.FullScreen && Visible)
             {
                 try { FullScreen(); }
                 catch (Exception error) when (IsComError(error)) { }
@@ -250,7 +260,7 @@ namespace SshManager
 
         private void ScheduleSync()
         {
-            if (!loggedIn || profile == null || profile.Width != 0) return;
+            if (!loggedIn || profile == null) return;
             resizeTimer.Stop();
             resizeTimer.Interval = ResizeDelay;
             resizeTimer.Start();
@@ -270,10 +280,18 @@ namespace SshManager
 
         private void SyncDisplay()
         {
-            if (!loggedIn || client == null || host == null || !host.Visible || profile.Width != 0) return;
-            var area = host.ClientSize;
-            if (area.Width < 200 || area.Height < 200) return;
-            var size = Fit(area);
+            if (!loggedIn || client == null || host == null || !host.Visible) return;
+            // Full screen uses the whole monitor even for a fixed size: the client's full-screen window does not
+            // stretch the picture, so a smaller desktop would sit in black borders. Leaving it restores the fixed size.
+            Size size;
+            if (fullScreenMode) size = Fit(Screen.FromControl(host).Bounds.Size);
+            else if (profile.Width != 0) size = new Size(profile.Width, profile.Height);
+            else
+            {
+                var area = host.ClientSize;
+                if (area.Width < 200 || area.Height < 200) return;
+                size = Fit(area);
+            }
             int dpi = DeviceDpi;
             if (size == appliedSize && dpi == appliedDpi) return;
             try
