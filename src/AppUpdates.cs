@@ -19,40 +19,61 @@ namespace SshManager
         public readonly string Digest;
         public readonly long Size;
         public readonly bool Installed;
+        public readonly long AssetId;
 
-        public AppUpdate(Version version, string digest, long size, bool installed)
-        { Version = version; Digest = digest; Size = size; Installed = installed; }
+        public AppUpdate(Version version, string digest, long size, bool installed, long assetId = 0)
+        { Version = version; Digest = digest; Size = size; Installed = installed; AssetId = assetId; }
 
         public string Tag => "v" + Version.ToString(3);
         public string Asset => Installed ? AppUpdates.InstallerName : AppUpdates.ExecutableName;
         public string Notes => AppUpdates.Repository + "/releases/tag/" + Tag;
+        public string DownloadUrl => AppUpdates.Repository + "/releases/download/" + Tag + "/" + Asset;
+    }
+
+    internal sealed class GitHubRequestException : IOException
+    {
+        public readonly bool Retryable;
+
+        public GitHubRequestException(string message, bool retryable, Exception cause)
+            : base(message, cause) { Retryable = retryable; }
     }
 
     internal static class AppUpdates
     {
         public const string Repository = "https://github.com/Clarkufa/sshmanager";
+        public const string LatestRelease = Repository + "/releases/latest";
         public const string InstallerName = "SshManagerSetup.msi", ExecutableName = "SshManager.exe";
-        private const string Latest = "https://api.github.com/repos/Clarkufa/sshmanager/releases/latest";
+        private const string ReleasesApi = "https://api.github.com/repos/Clarkufa/sshmanager/releases";
+        private const string UpdateManifest = LatestRelease + "/download/SSH-Manager-Update.json";
         private const long MaximumSize = 64 * 1024 * 1024;
         internal static Version CurrentVersion => Assembly.GetExecutingAssembly().GetName().Version;
 
         public static AppUpdate Check(bool installed, CancellationToken token)
         {
-            var uri = new Uri(Latest);
-            return ReadResponse(uri, token, response =>
+            return WithFallback(
+                () => CheckSource(ReleasesApi + "/latest", CurrentVersion, installed, token),
+                () => CheckSource(UpdateManifest, CurrentVersion, installed, token), token);
+        }
+
+        internal static AppUpdate CheckSource(string url, Version current, bool installed, CancellationToken token)
+        {
+            return WithRetry(() => ReadResponse(new Uri(url), token, response =>
             {
                 using (var stream = response.GetResponseStream())
-                    return ReadRelease(stream, CurrentVersion, installed, token);
-            });
+                    return ReadReleaseBody(stream, current, installed, token, response.ResponseUri);
+            }), token);
         }
 
         internal static AppUpdate ReadRelease(Stream content, Version current, bool installed, CancellationToken token)
+            => ReadReleaseBody(content, current, installed, token, null);
+
+        private static AppUpdate ReadReleaseBody(Stream content, Version current, bool installed, CancellationToken token, Uri uri)
         {
             var buffer = new byte[8192];
             using (var json = new MemoryStream())
             {
                 int count;
-                while ((count = content.Read(buffer, 0, buffer.Length)) > 0)
+                while ((count = ReadChunk(content, buffer, uri, token)) > 0)
                 {
                     token.ThrowIfCancellationRequested();
                     if (json.Length + count > 512 * 1024) throw BadRelease();
@@ -64,11 +85,13 @@ namespace SshManager
                 if (release == null || release.Draft || release.Prerelease || !ParseTag(release.Tag, out var version)) throw BadRelease();
                 if (version.CompareTo(new Version(current.Major, current.Minor, current.Build)) <= 0) return null;
                 string fileName = installed ? InstallerName : ExecutableName;
-                var asset = release.Assets?.FirstOrDefault(item => item?.Name == fileName && item.State == "uploaded");
-                if (asset == null || asset.Size < 1 || asset.Size > MaximumSize ||
+                var matches = release.Assets?.Where(item => item?.Name == fileName).ToArray();
+                if (matches == null || matches.Length != 1) throw BadRelease();
+                var asset = matches[0];
+                if (asset.State != "uploaded" || asset.Size < 1 || asset.Size > MaximumSize ||
                     asset.Digest == null || !asset.Digest.StartsWith("sha256:", StringComparison.Ordinal) ||
                     !IsHash(asset.Digest.Substring(7))) throw BadRelease();
-                return new AppUpdate(version, asset.Digest.Substring(7), asset.Size, installed);
+                return new AppUpdate(version, asset.Digest.Substring(7), asset.Size, installed, asset.Id);
             }
         }
 
@@ -76,30 +99,12 @@ namespace SshManager
         {
             string directory = UpdateWorker.CreateStage();
             string file = Path.Combine(directory, update.Asset);
-            Uri uri = new Uri(Repository + "/releases/download/" + update.Tag + "/" + update.Asset);
             try
             {
-                ReadResponse(uri, token, response =>
-                {
-                    using (var source = response.GetResponseStream())
-                    using (var destination = new FileStream(file, FileMode.CreateNew, FileAccess.Write, FileShare.None))
-                    {
-                        var buffer = new byte[65536];
-                        long received = 0;
-                        int count;
-                        while ((count = source.Read(buffer, 0, buffer.Length)) != 0)
-                        {
-                            token.ThrowIfCancellationRequested();
-                            received += count;
-                            if (received > update.Size) throw BadRelease();
-                            destination.Write(buffer, 0, count);
-                            progress.Report((int)(received * 100 / update.Size));
-                        }
-                        if (received != update.Size) throw BadRelease();
-                        destination.Flush(true);
-                    }
-                    return true;
-                });
+                Func<bool> alternate = null;
+                if (update.AssetId > 0)
+                    alternate = () => DownloadFrom(ReleasesApi + "/assets/" + update.AssetId, file, update.Size, progress, token, binary: true);
+                WithFallback(() => DownloadFrom(update.DownloadUrl, file, update.Size, progress, token), alternate, token);
                 VerifyFile(file, update.Digest);
                 return directory;
             }
@@ -110,9 +115,79 @@ namespace SshManager
             }
         }
 
-        private static T ReadResponse<T>(Uri uri, CancellationToken token, Func<HttpWebResponse, T> read)
+        private static bool DownloadFrom(string url, string file, long size, IProgress<int> progress, CancellationToken token, bool binary = false)
         {
-            ServicePointManager.SecurityProtocol |= SecurityProtocolType.Tls12;
+            return WithRetry(() =>
+            {
+                // A previous transport attempt may have written part of the file.
+                File.Delete(file);
+                progress.Report(0);
+                return ReadResponse(new Uri(url), token, response =>
+                {
+                    using (var source = response.GetResponseStream())
+                    using (var destination = new FileStream(file, FileMode.CreateNew, FileAccess.Write, FileShare.None))
+                    {
+                        var buffer = new byte[65536];
+                        long received = 0;
+                        int count;
+                        while ((count = ReadChunk(source, buffer, response.ResponseUri, token)) > 0)
+                        {
+                            received += count;
+                            if (received > size) throw BadRelease();
+                            destination.Write(buffer, 0, count);
+                            progress.Report((int)(received * 100 / size));
+                        }
+                        if (received != size)
+                            throw new GitHubRequestException(response.ResponseUri.Host + " — загрузка прервалась.", true, null);
+                        destination.Flush(true);
+                    }
+                    return true;
+                }, binary);
+            }, token);
+        }
+
+        internal static T WithFallback<T>(Func<T> primary, Func<T> secondary, CancellationToken token)
+        {
+            try { return primary(); }
+            catch (GitHubRequestException first) when (secondary != null)
+            {
+                token.ThrowIfCancellationRequested();
+                try { return secondary(); }
+                catch (GitHubRequestException second)
+                {
+                    throw new GitHubRequestException(first.Message == second.Message ? first.Message : first.Message + "\n" + second.Message,
+                        false, new AggregateException(first, second));
+                }
+            }
+        }
+
+        private static T WithRetry<T>(Func<T> work, CancellationToken token)
+        {
+            token.ThrowIfCancellationRequested();
+            try { return work(); }
+            catch (GitHubRequestException error) when (error.Retryable)
+            {
+                token.WaitHandle.WaitOne(400);
+                token.ThrowIfCancellationRequested();
+                return work();
+            }
+        }
+
+        private static int ReadChunk(Stream stream, byte[] buffer, Uri uri, CancellationToken token)
+        {
+            token.ThrowIfCancellationRequested();
+            try { return stream.Read(buffer, 0, buffer.Length); }
+            catch (IOException error) when (uri != null)
+            {
+                token.ThrowIfCancellationRequested();
+                throw new GitHubRequestException(uri.Host + " — чтение ответа прервалось.", true, error);
+            }
+        }
+
+        private static T ReadResponse<T>(Uri uri, CancellationToken token, Func<HttpWebResponse, T> read, bool binary = false)
+        {
+            if (ServicePointManager.SecurityProtocol != SecurityProtocolType.SystemDefault)
+                ServicePointManager.SecurityProtocol |= SecurityProtocolType.Tls12;
             for (int redirects = 0; redirects < 5; redirects++)
             {
                 token.ThrowIfCancellationRequested();
@@ -124,7 +199,7 @@ namespace SshManager
                 request.UserAgent = "SSHManager/" + CurrentVersion.ToString(3);
                 if (uri.Host == "api.github.com")
                 {
-                    request.Accept = "application/vnd.github+json";
+                    request.Accept = binary ? "application/octet-stream" : "application/vnd.github+json";
                     request.Headers["X-GitHub-Api-Version"] = "2022-11-28";
                 }
                 using (token.Register(request.Abort))
@@ -133,7 +208,12 @@ namespace SshManager
                     {
                         using (var response = (HttpWebResponse)request.GetResponse())
                         {
-                            if (response.StatusCode == HttpStatusCode.OK) return read(response);
+                            if (response.StatusCode == HttpStatusCode.OK)
+                            {
+                                if ((response.ContentType ?? "").StartsWith("text/html", StringComparison.OrdinalIgnoreCase))
+                                    throw new GitHubRequestException(uri.Host + " — вместо файла получена веб-страница.", false, null);
+                                return read(response);
+                            }
                             int status = (int)response.StatusCode;
                             var location = response.Headers[HttpResponseHeader.Location];
                             if (status < 300 || status >= 400 || String.IsNullOrEmpty(location) ||
@@ -143,12 +223,45 @@ namespace SshManager
                     catch (WebException ex)
                     {
                         token.ThrowIfCancellationRequested();
-                        ex.Response?.Dispose();
-                        throw new IOException("Не удалось получить обновление с GitHub. Проверьте подключение и попробуйте снова.", ex);
+                        throw DescribeFailure(uri, ex);
                     }
                 }
             }
             throw BadRelease();
+        }
+
+        private static GitHubRequestException DescribeFailure(Uri uri, WebException error)
+        {
+            using (var response = error.Response)
+            {
+                var http = response as HttpWebResponse;
+                if (http != null)
+                {
+                    int code = (int)http.StatusCode;
+                    string detail = "HTTP " + code;
+                    if (code == 407) detail += " (прокси требует входа)";
+                    if (code == 429 || (code == 403 && http.Headers["X-RateLimit-Remaining"] == "0"))
+                        detail += " (исчерпан лимит запросов GitHub)";
+                    return new GitHubRequestException(uri.Host + " — " + detail + ".", code == 408 || code >= 500, error);
+                }
+            }
+            string reason;
+            bool retry;
+            switch (error.Status)
+            {
+                case WebExceptionStatus.NameResolutionFailure: reason = "адрес не найден в DNS"; retry = false; break;
+                case WebExceptionStatus.ProxyNameResolutionFailure: reason = "адрес прокси не найден в DNS"; retry = false; break;
+                case WebExceptionStatus.TrustFailure: reason = "Windows не доверяет сертификату сервера"; retry = false; break;
+                case WebExceptionStatus.SecureChannelFailure: reason = "не удалось установить соединение TLS"; retry = false; break;
+                case WebExceptionStatus.Timeout: reason = "истекло время ожидания"; retry = true; break;
+                case WebExceptionStatus.ConnectFailure: reason = "сервер недоступен"; retry = true; break;
+                case WebExceptionStatus.ReceiveFailure:
+                case WebExceptionStatus.SendFailure:
+                case WebExceptionStatus.KeepAliveFailure:
+                case WebExceptionStatus.ConnectionClosed: reason = "соединение прервалось"; retry = true; break;
+                default: reason = "сетевая ошибка " + error.Status; retry = false; break;
+            }
+            return new GitHubRequestException(uri.Host + " — " + reason + ".", retry, error);
         }
 
         private static bool TrustedUri(Uri uri)
@@ -192,6 +305,7 @@ namespace SshManager
         [DataContract]
         private sealed class GitHubAsset
         {
+            [DataMember(Name = "id")] public long Id { get; set; }
             [DataMember(Name = "name")] public string Name { get; set; }
             [DataMember(Name = "state")] public string State { get; set; }
             [DataMember(Name = "digest")] public string Digest { get; set; }

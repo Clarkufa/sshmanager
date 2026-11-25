@@ -113,6 +113,16 @@ try {
     $assets['SshManager.exe'] = $exe
     $assets['SshManagerSetup.msi'] = $msi
     $upload += $msi, $exe
+    $updateManifest = Join-Path $output 'SSH-Manager-Update.json'
+    $windowsAssets = foreach ($path in @($msi, $exe)) {
+        $file = Get-Item -LiteralPath $path
+        $hash = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant()
+        @{ name = $file.Name; size = $file.Length; digest = "sha256:$hash"; state = 'uploaded' }
+    }
+    @{ tag_name = $tag; draft = $false; prerelease = $false; assets = @($windowsAssets) } |
+        ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $updateManifest -Encoding utf8
+    $assets['SSH-Manager-Update.json'] = $updateManifest
+    $upload += "$updateManifest#Windows update metadata"
     foreach ($path in $assets.Values) {
         if ((Get-Item -LiteralPath $path).Length -eq 0) { throw "Release asset '$path' is empty." }
     }
@@ -124,7 +134,7 @@ try {
     if ($LASTEXITCODE -ne 0) { throw "Could not verify release draft $tag." }
     $draft = $draftJson | ConvertFrom-Json
     if (-not $draft.isDraft -or @($draft.assets).Count -ne $assets.Count) {
-        throw "Release draft $tag must contain exactly $($assets.Count) platform builds."
+        throw "Release draft $tag must contain exactly $($assets.Count) release files."
     }
     foreach ($name in $assets.Keys) {
         $uploaded = $draft.assets | Where-Object { $_.name -ceq $name }

@@ -56,7 +56,7 @@ namespace SshManager
         private const int Inset = 10;
         private const int WmContextMenu = 0x007B;
 
-        private readonly TerminalFonts fonts;
+        private readonly Font normalFont, boldFont;
         private readonly StringFormat textFormat;
         private readonly ContextMenuStrip clipboardMenu;
         private float characterWidth;
@@ -74,7 +74,8 @@ namespace SshManager
             TabStop = true;
             Cursor = Cursors.IBeam;
             BackColor = Background;
-            fonts = new TerminalFonts();
+            normalFont = new Font("Consolas", 11);
+            boldFont = new Font(normalFont, FontStyle.Bold);
             textFormat = new StringFormat(StringFormat.GenericTypographic)
             {
                 FormatFlags = StringFormatFlags.NoWrap | StringFormatFlags.NoClip | StringFormatFlags.MeasureTrailingSpaces
@@ -140,8 +141,8 @@ namespace SshManager
         {
             using (var g = CreateGraphics())
             {
-                characterWidth = g.MeasureString("MMMMMMMMMMMMMMMM", fonts.Regular, PointF.Empty, textFormat).Width / 16f;
-                lineHeight = (int)Math.Ceiling(fonts.Regular.GetHeight(g)) + 1;
+                characterWidth = g.MeasureString("MMMMMMMMMMMMMMMM", normalFont, PointF.Empty, textFormat).Width / 16f;
+                lineHeight = (int)Math.Ceiling(normalFont.GetHeight(g)) + 1;
             }
             FitSession();
         }
@@ -222,7 +223,7 @@ namespace SshManager
                     }
                     using (var brush = new SolidBrush(fg))
                     {
-                        var font = attributes.Bright ? fonts.Bold : fonts.Regular;
+                        var font = attributes.Bright ? boldFont : normalFont;
                         if (line.DoubleWidth)
                         {
                             var transform = graphics.Save();
@@ -453,7 +454,8 @@ namespace SshManager
             if (disposing)
             {
                 clipboardMenu.Dispose();
-                fonts.Dispose();
+                normalFont.Dispose();
+                boldFont.Dispose();
                 textFormat.Dispose();
             }
             base.Dispose(disposing);

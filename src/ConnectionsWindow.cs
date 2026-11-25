@@ -263,6 +263,7 @@ namespace SshManager
             if (interactive) updateButton.Text = "Проверка…";
             var token = updateLifetime.Token;
             string staged = null;
+            AppUpdate downloading = null;
             try
             {
                 availableUpdate = await Task.Run(() =>
@@ -281,6 +282,7 @@ namespace SshManager
                 var update = availableUpdate;
                 using (var dialog = new UpdateDialog(update))
                     if (dialog.ShowDialog(this) != DialogResult.OK) return;
+                downloading = update;
                 var progress = new Progress<int>(percent =>
                 {
                     if (!IsDisposed && !updateButton.Enabled) updateButton.Text = "Загрузка · " + percent + "%";
@@ -301,6 +303,17 @@ namespace SshManager
                 Application.Exit();
             }
             catch (OperationCanceledException) { }
+            catch (GitHubRequestException ex)
+            {
+                if (interactive && !IsDisposed)
+                {
+                    string action = downloading == null ? "Не удалось проверить обновления." : "Не удалось скачать обновление.";
+                    string offer = downloading == null ? "Открыть релизы GitHub в браузере?" : "Открыть загрузку в браузере?";
+                    if (MessageBox.Show(this, action + "\n\n" + ex.Message + "\n\n" + offer, "Обновления",
+                        MessageBoxButtons.YesNo, MessageBoxIcon.Warning, MessageBoxDefaultButton.Button2) == DialogResult.Yes)
+                        UpdateDialog.OpenLink(this, downloading?.DownloadUrl ?? AppUpdates.LatestRelease);
+                }
+            }
             catch (Exception ex) when (Theme.IsFileError(ex) || ex is InvalidDataException || ex is System.Runtime.Serialization.SerializationException ||
                 ex is System.Xml.XmlException || ex is System.ComponentModel.Win32Exception)
             {

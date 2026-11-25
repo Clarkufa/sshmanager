@@ -31,11 +31,7 @@ namespace SshManager
                 (update.Installed ? "Пакет обновления Windows Installer" : "Обновление версии без установки"),
                 Dock = DockStyle.Fill, ForeColor = Theme.Muted };
             var notes = new LinkLabel { Text = "Что нового на GitHub", AutoSize = true, LinkColor = Theme.Teal, ActiveLinkColor = Theme.Teal };
-            notes.LinkClicked += (sender, args) =>
-            {
-                try { using (Process.Start(new ProcessStartInfo(update.Notes) { UseShellExecute = true })) { } }
-                catch (Win32Exception ex) { Theme.ShowError(this, ex); }
-            };
+            notes.LinkClicked += (sender, args) => OpenLink(this, update.Notes);
             var buttons = new FlowLayoutPanel { Dock = DockStyle.Fill, FlowDirection = FlowDirection.RightToLeft, WrapContents = false, Margin = Padding.Empty };
             var download = Theme.Button("Скачать обновление", 166, primary: true, glyph: Glyph.Refresh);
             download.DialogResult = DialogResult.OK;
@@ -49,6 +45,12 @@ namespace SshManager
             Controls.Add(layout);
             AcceptButton = download;
             CancelButton = cancel;
+        }
+
+        public static void OpenLink(IWin32Window owner, string url)
+        {
+            try { using (Process.Start(new ProcessStartInfo(url) { UseShellExecute = true })) { } }
+            catch (Win32Exception ex) { Theme.ShowError(owner, ex); }
         }
     }
 }
