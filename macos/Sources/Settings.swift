@@ -6,6 +6,8 @@ struct ServerGroup: Identifiable {
     var name: String
     var marker: GroupMarker?
     var aliases: Set<String> = []
+    var sshSort: ServerSort = .name
+    var rdpSort: ServerSort = .original
 
     init(id: String = UUID().uuidString.lowercased().replacingOccurrences(of: "-", with: ""), name: String, marker: GroupMarker? = nil) {
         self.id = id
@@ -64,6 +66,9 @@ struct ManagerSettings {
     var groups: [ServerGroup] = []
     var startup: String?
     var appearance: Appearance = .system
+    var sshSort: ServerSort = .name
+    var rdpSort: ServerSort = .original
+    var desktops: [DesktopProfile] = []
 
     static let url = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
         .appendingPathComponent("SSH Manager/tabs.xml")
@@ -80,6 +85,8 @@ struct ManagerSettings {
               root.name == "tabs"
         else { throw ManagerError("Не удалось прочитать настройки вкладок.") }
         var settings = ManagerSettings()
+        settings.sshSort = order("sshSort", on: root, fallback: .name)
+        settings.rdpSort = order("rdpSort", on: root, fallback: .original)
         if let theme = root.attribute(forName: "theme")?.stringValue { settings.appearance = Appearance(rawValue: theme) ?? .system }
         var aliases: Set<String> = []
         for element in root.elements(forName: "tab") {
@@ -92,6 +99,8 @@ struct ManagerSettings {
             try settings.validate(name, except: nil)
             let marker = element.attribute(forName: "color")?.stringValue.flatMap(GroupMarker.init(rawValue:))
             var group = ServerGroup(id: id, name: name, marker: marker)
+            group.sshSort = order("sshSort", on: element, fallback: .name)
+            group.rdpSort = order("rdpSort", on: element, fallback: .original)
             for host in element.elements(forName: "host") {
                 guard let alias = host.attribute(forName: "alias")?.stringValue, Profile.validAlias(alias),
                       aliases.insert(alias.lowercased()).inserted
@@ -102,6 +111,13 @@ struct ManagerSettings {
         }
         if let startup = root.attribute(forName: "startupTab")?.stringValue,
            settings.groups.contains(where: { $0.id == startup }) { settings.startup = startup }
+        let groups = settings.groups.map(\.id)
+        var desktops: Set<String> = []
+        for element in root.elements(forName: "rdp") {
+            let profile = try DesktopProfile(element: element, groups: groups)
+            guard desktops.insert(profile.id).inserted else { throw ManagerError("RDP-профиль повторяется в настройках.") }
+            settings.desktops.append(profile)
+        }
         return settings
     }
 
@@ -109,15 +125,26 @@ struct ManagerSettings {
         let root = XMLElement(name: "tabs")
         if let startup { Self.attribute("startupTab", value: startup, on: root) }
         if appearance != .system { Self.attribute("theme", value: appearance.rawValue, on: root) }
+        Self.attribute("sshSort", value: sshSort.rawValue, on: root)
+        Self.attribute("rdpSort", value: rdpSort.rawValue, on: root)
         for group in groups {
             let element = XMLElement(name: "tab")
             Self.attribute("id", value: group.id, on: element)
             Self.attribute("name", value: group.name, on: element)
             if let marker = group.marker { Self.attribute("color", value: marker.rawValue, on: element) }
+            Self.attribute("sshSort", value: group.sshSort.rawValue, on: element)
+            Self.attribute("rdpSort", value: group.rdpSort.rawValue, on: element)
             for alias in group.aliases.sorted() {
                 let host = XMLElement(name: "host")
                 Self.attribute("alias", value: alias, on: host)
                 element.addChild(host)
+            }
+            root.addChild(element)
+        }
+        for profile in desktops {
+            let element = XMLElement(name: "rdp")
+            for (key, value) in profile.fields.sorted(by: { $0.key < $1.key }) {
+                Self.attribute(key, value: value, on: element)
             }
             root.addChild(element)
         }
@@ -147,6 +174,10 @@ struct ManagerSettings {
             if groups[index].id == id { groups[index].aliases.insert(alias) }
             else { groups[index].aliases.remove(alias) }
         }
+    }
+
+    private static func order(_ name: String, on node: XMLElement, fallback: ServerSort) -> ServerSort {
+        node.attribute(forName: name)?.stringValue.flatMap(ServerSort.init(rawValue:)) ?? fallback
     }
 
     private static func attribute(_ name: String, value: String, on node: XMLElement) {

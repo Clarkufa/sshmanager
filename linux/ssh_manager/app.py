@@ -6,6 +6,7 @@ import subprocess
 import sys
 import threading
 import uuid
+from dataclasses import asdict, replace
 from pathlib import Path
 
 import gi
@@ -17,8 +18,9 @@ from gi.repository import Gdk, Gio, GLib, GObject, Gtk, Pango, Vte
 
 from . import VERSION
 from .auth import AskPass, Vault, account_for, ssh_args
-from .config import Config, Profile
+from .config import Config, Profile, parse_settings
 from .files import FilesWindow
+from .rdp import DesktopProfile, ORDERS, ordered
 from .update_ui import UpdateController
 from .widgets import button, chooser, confirm, menu_at, message, prompt
 
@@ -53,7 +55,8 @@ class CatalogRow(Gtk.ListBoxRow):
         self.profile = profile
         self.get_style_context().add_class("host-row")
         bar = Gtk.Box(spacing=9)
-        icon = Gtk.Image.new_from_icon_name("network-server-symbolic", Gtk.IconSize.BUTTON)
+        desktop = isinstance(profile, DesktopProfile)
+        icon = Gtk.Image.new_from_icon_name("video-display-symbolic" if desktop else "network-server-symbolic", Gtk.IconSize.BUTTON)
         bar.pack_start(icon, False, False, 4)
         labels = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
         name = Gtk.Label(label=profile.alias, xalign=0, ellipsize=Pango.EllipsizeMode.END)
@@ -63,8 +66,9 @@ class CatalogRow(Gtk.ListBoxRow):
         labels.pack_start(name, False, False, 0)
         labels.pack_start(address, False, False, 0)
         bar.pack_start(labels, True, True, 3)
-        bar.pack_start(button("Файлы", lambda: owner.open_files(profile)), False, False, 0)
-        bar.pack_start(button("Подключиться", lambda: owner.open_session(profile), suggested=True), False, False, 0)
+        if not desktop:
+            bar.pack_start(button("Файлы", lambda: owner.open_files(profile)), False, False, 0)
+        bar.pack_start(button("Подключиться", lambda: owner.connect_profile(profile), suggested=True), False, False, 0)
         more = button("⋯", lambda: owner.profile_menu(self, None))
         more.set_tooltip_text("Действия с сервером")
         bar.pack_start(more, False, False, 0)
@@ -138,6 +142,49 @@ class ProfileDialog(Gtk.Dialog):
     def values(self):
         profile = Profile(*(self.entries[name].get_text().strip() for name in ("alias", "host", "user", "port")), self.keys())
         return profile, self.entries["password"].get_text(), self.forget.get_active()
+
+
+class DesktopDialog(Gtk.Dialog):
+    def __init__(self, owner, profile):
+        super().__init__(title="RDP-подключение", transient_for=owner, modal=True)
+        self.set_default_size(500, 370)
+        self.add_button("Отмена", Gtk.ResponseType.CANCEL)
+        self.add_button("Сохранить", Gtk.ResponseType.OK)
+        self.set_default_response(Gtk.ResponseType.OK)
+        self.profile = profile or DesktopProfile(uuid.uuid4().hex, "", "", group=owner.active_group)
+        grid = Gtk.Grid(column_spacing=12, row_spacing=8, margin=15)
+        self.get_content_area().add(grid)
+        self.entries = {}
+        fields = (("name", "Название"), ("host", "Адрес"), ("port", "Порт"), ("user", "Пользователь"),
+                  ("domain", "Домен"), ("width", "Ширина экрана"), ("height", "Высота экрана"))
+        for row, (key, label) in enumerate(fields):
+            value = getattr(self.profile, key)
+            entry = Gtk.Entry(text=str(value or ""), activates_default=True, hexpand=True)
+            self.entries[key] = entry
+            grid.attach(Gtk.Label(label=label, xalign=0), 0, row, 1, 1)
+            grid.attach(entry, 1, row, 1, 1)
+        self.clipboard = Gtk.CheckButton(label="Общий буфер обмена", active=self.profile.clipboard)
+        self.fullscreen = Gtk.CheckButton(label="Полноэкранный режим", active=self.profile.fullscreen)
+        self.error = Gtk.Label(xalign=0, wrap=True)
+        grid.attach(self.clipboard, 1, 7, 1, 1)
+        grid.attach(self.fullscreen, 1, 8, 1, 1)
+        grid.attach(self.error, 1, 9, 1, 1)
+        self.show_all()
+
+    def values(self):
+        fields = {key: entry.get_text().strip() for key, entry in self.entries.items()}
+        try:
+            fields["port"] = int(fields["port"] or "3389")
+            fields["width"] = int(fields["width"] or "0")
+            fields["height"] = int(fields["height"] or "0")
+        except ValueError:
+            raise ValueError("Укажите числовой порт и размеры экрана.") from None
+        host = fields["host"].strip("[]")
+        if not host.isascii():
+            host = host.encode("idna").decode("ascii")
+        fields["host"] = host
+        return replace(self.profile, **fields, clipboard=self.clipboard.get_active(),
+                       fullscreen=self.fullscreen.get_active()).validate()
 
 
 class Shell(Gtk.Box):
@@ -309,6 +356,78 @@ class Shell(Gtk.Box):
             self.broker = None
 
 
+class DesktopSession(Gtk.Box):
+    def __init__(self, owner, profile, command, label):
+        super().__init__(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        self.owner = owner
+        self.profile = profile
+        self.command = command
+        self.live = True
+        self.closed = False
+        self.pid = None
+        self.tab = Gtk.Label(label=label)
+        self.tab.set_tooltip_text(profile.address)
+        bar = Gtk.Box(spacing=8)
+        bar.pack_start(Gtk.Label(label=profile.address, xalign=0), True, True, 0)
+        bar.pack_start(button("Новый сеанс", lambda: owner.connect_profile(profile, True)), False, False, 0)
+        bar.pack_start(button("Закрыть сеанс", lambda: owner.close_session(self)), False, False, 0)
+        self.pack_start(bar, False, False, 0)
+        self.pack_start(Gtk.Label(label="Рабочий стол откроется в окне FreeRDP. Здесь отображаются запросы и сообщения клиента.",
+                                  xalign=0, wrap=True), False, False, 0)
+        self.terminal = Vte.Terminal()
+        self.terminal.set_font(terminal_font())
+        self.terminal.connect("child-exited", self.exited)
+        self.terminal.connect("key-press-event", self.paste_key)
+        scroll = Gtk.ScrolledWindow()
+        scroll.add(self.terminal)
+        self.pack_start(scroll, True, True, 0)
+        self.connect("destroy", self.stop)
+        self.show_all()
+
+    def start(self):
+        try:
+            self.terminal.spawn_async(Vte.PtyFlags.DEFAULT, str(Path.home()), self.command, None,
+                                      GLib.SpawnFlags.DEFAULT, None, None, -1, None, self.spawned, None)
+        except (OSError, RuntimeError, TypeError, GLib.Error) as error:
+            self.spawned(self.terminal, -1, error)
+
+    def paste_key(self, terminal, event):
+        keys = event.state & Gtk.accelerator_get_default_mod_mask()
+        if keys == Gdk.ModifierType.CONTROL_MASK and Gdk.keyval_to_lower(event.keyval) == Gdk.KEY_v:
+            terminal.paste_clipboard()
+            return True
+        return False
+
+    def spawned(self, terminal, pid, error, *_):
+        if error:
+            self.exited(terminal, 0)
+            if not self.closed:
+                message(self.owner, error, Gtk.MessageType.ERROR)
+        elif self.closed:
+            self.terminate(pid)
+        else:
+            self.pid = pid
+
+    def exited(self, terminal, status):
+        self.pid = None
+        self.live = False
+        terminal.set_input_enabled(False)
+        if not self.closed:
+            self.tab.set_text(self.tab.get_text().removesuffix(" · завершён") + " · завершён")
+
+    @staticmethod
+    def terminate(pid):
+        try:
+            os.kill(pid, signal.SIGHUP)
+        except ProcessLookupError:
+            pass
+
+    def stop(self, *_):
+        self.closed = True
+        if self.pid is not None:
+            self.terminate(self.pid)
+
+
 class Window(Gtk.ApplicationWindow):
     def __init__(self, application, config):
         super().__init__(application=application, title="SSH Manager " + VERSION)
@@ -320,8 +439,9 @@ class Window(Gtk.ApplicationWindow):
         try:
             self.settings = config.settings()
         except (ValueError, OSError):
-            self.settings = {"groups": [], "members": {}, "default": "", "dark": True}
+            self.settings = parse_settings(b"")
         self.active_group = self.settings["default"]
+        self.protocol = "ssh"
         self.set_default_size(940, 595)
         self.set_size_request(660, 400)
         self.connect("delete-event", self.can_close)
@@ -329,7 +449,6 @@ class Window(Gtk.ApplicationWindow):
 
         header = Gtk.HeaderBar(show_close_button=True)
         header.set_title("SSH Manager")
-        header.set_subtitle("SSH и SFTP")
         self.set_titlebar(header)
         self.stack = Gtk.Stack(transition_type=Gtk.StackTransitionType.CROSSFADE, transition_duration=130)
         switch = Gtk.StackSwitcher(stack=self.stack)
@@ -347,12 +466,27 @@ class Window(Gtk.ApplicationWindow):
 
         panel = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=11, margin=17)
         heading = Gtk.Box(spacing=8)
-        title = Gtk.Label(label="SSH-подключения", xalign=0)
-        title.get_style_context().add_class("page-title")
-        heading.pack_start(title, True, True, 0)
+        self.title = Gtk.Label(label="SSH-подключения", xalign=0)
+        self.title.get_style_context().add_class("page-title")
+        heading.pack_start(self.title, True, True, 0)
         heading.pack_end(button("Добавить сервер", self.add_profile, suggested=True), False, False, 0)
         heading.pack_end(button("Резервные копии", self.backup_menu), False, False, 0)
         panel.pack_start(heading, False, False, 0)
+        navigation = Gtk.Box(spacing=8)
+        protocols = Gtk.Box()
+        protocols.get_style_context().add_class("linked")
+        ssh = Gtk.RadioButton.new_with_label_from_widget(None, "SSH")
+        rdp = Gtk.RadioButton.new_with_label_from_widget(ssh, "RDP")
+        for tab, kind in ((ssh, "ssh"), (rdp, "rdp")):
+            tab.set_mode(False)
+            tab.connect("toggled", lambda widget, value=kind:
+                        self.select_protocol(value) if widget.get_active() else None)
+            protocols.pack_start(tab, False, False, 0)
+        navigation.pack_start(protocols, False, False, 0)
+        self.import_desktop_button = button("Импорт .rdp…", lambda: self.transfer_desktop(None))
+        self.import_desktop_button.set_no_show_all(True)
+        navigation.pack_end(self.import_desktop_button, False, False, 0)
+        panel.pack_start(navigation, False, False, 0)
         tabs = Gtk.Box(spacing=6)
         self.group_strip = Gtk.Box(spacing=5)
         self.group_strip.get_style_context().add_class("group-strip")
@@ -364,9 +498,17 @@ class Window(Gtk.ApplicationWindow):
         panel.pack_start(tabs, False, False, 0)
         self.search = Gtk.SearchEntry(placeholder_text="Найти сервер")
         self.search.connect("search-changed", lambda *_: self.render_profiles())
-        panel.pack_start(self.search, False, False, 0)
+        filters = Gtk.Box(spacing=8)
+        filters.pack_start(self.search, True, True, 0)
+        self.sort = Gtk.ComboBoxText()
+        self.sort.set_tooltip_text("Сортировка в текущей вкладке")
+        for order, caption in ORDERS:
+            self.sort.append(order, caption)
+        self.sort_signal = self.sort.connect("changed", self.change_sort)
+        filters.pack_end(self.sort, False, False, 0)
+        panel.pack_start(filters, False, False, 0)
         self.list = Gtk.ListBox(selection_mode=Gtk.SelectionMode.NONE, activate_on_single_click=False)
-        self.list.connect("row-activated", lambda _, row: self.edit_profile(row.profile))
+        self.list.connect("row-activated", lambda _, row: self.edit_catalog_entry(row.profile))
         placeholder = Gtk.Label(label="Подключений нет. Добавьте сервер или измените поиск.", margin=22)
         placeholder.show()
         self.list.set_placeholder(placeholder)
@@ -427,19 +569,60 @@ class Window(Gtk.ApplicationWindow):
         self.render_profiles()
 
     def render_profiles(self):
+        self.sort.handler_block(self.sort_signal)
+        try:
+            order = self.settings["sort"].get(self.sort_key, "original")
+            self.sort.set_active_id(order)
+        finally:
+            self.sort.handler_unblock(self.sort_signal)
         for row in self.list.get_children():
             self.list.remove(row)
-        if self.document is None:
+        if self.protocol == "ssh" and self.document is None:
             self.count.set_text("Не удалось прочитать SSH config.")
             return
         query = self.search.get_text().strip().casefold()
-        matches = [profile for profile in self.document.profiles
-                   if (not self.active_group or self.settings["members"].get(profile.alias.lower()) == self.active_group)
-                   and query in (profile.alias + " " + profile.address).casefold()]
-        for profile in matches:
+        if self.protocol == "rdp":
+            candidates = [profile for profile in self.desktop_profiles() if not self.active_group or profile.group == self.active_group]
+        else:
+            candidates = [profile for profile in self.document.profiles if not self.active_group or
+                          self.settings["members"].get(profile.alias.lower()) == self.active_group]
+        matches = [profile for profile in candidates if query in (profile.alias + " " + profile.address).casefold()]
+        for profile in ordered(matches, order):
             self.list.add(CatalogRow(self, profile))
         self.count.set_text(f"Подключений: {len(matches)}")
         self.list.show_all()
+
+    @property
+    def sort_key(self):
+        return self.protocol + ":" + self.active_group
+
+    def change_sort(self, combo):
+        choice = combo.get_active_id()
+        if choice:
+            changes = dict(self.settings["sort"])
+            changes[self.sort_key] = choice
+            try:
+                self.update_catalog_settings(sort=changes)
+            except OSError as error:
+                message(self, error, Gtk.MessageType.ERROR)
+            self.render_profiles()
+
+    def select_protocol(self, protocol):
+        if self.protocol == protocol:
+            return
+        self.protocol = protocol
+        self.title.set_text("SSH-подключения" if protocol == "ssh" else "RDP-подключения")
+        self.import_desktop_button.set_visible(protocol == "rdp")
+        self.search.set_text("")
+        self.render_profiles()
+
+    def desktop_profiles(self):
+        return [DesktopProfile(**profile) for profile in self.settings["desktops"]]
+
+    def update_catalog_settings(self, **changes):
+        settings = {**self.settings, **changes}
+        self.config.save_settings(settings)
+        self.settings = settings
 
     def render_groups(self):
         for widget in self.group_strip.get_children():
@@ -547,6 +730,10 @@ class Window(Gtk.ApplicationWindow):
         if confirm(self, "Удалить вкладку «" + group["name"] + "»? Серверы останутся в общем списке."):
             self.settings["groups"].remove(group)
             self.settings["members"] = {key: value for key, value in self.settings["members"].items() if value != group["id"]}
+            self.settings["desktops"] = [dict(item, group="") if item["group"] == group["id"] else item
+                                         for item in self.settings["desktops"]]
+            self.settings["sort"] = {key: value for key, value in self.settings["sort"].items()
+                                     if not key.endswith(":" + group["id"])}
             if self.settings["default"] == group["id"]:
                 self.settings["default"] = ""
             self.save_settings()
@@ -554,6 +741,15 @@ class Window(Gtk.ApplicationWindow):
 
     def profile_menu(self, row, event):
         profile = row.profile
+        if isinstance(profile, DesktopProfile):
+            return menu_at(row, event, [
+                ("Подключиться", lambda: self.connect_profile(profile)),
+                ("Новый сеанс", lambda: self.connect_profile(profile, True)),
+                ("Изменить", lambda: self.edit_desktop(profile)),
+                ("Сменить вкладку", lambda: self.move_profile(profile)),
+                ("Экспорт .rdp…", lambda: self.transfer_desktop(profile)),
+                ("Удалить подключение", lambda: self.delete_desktop(profile)),
+            ])
         actions = [("Подключиться", lambda: self.open_session(profile)),
                    ("Новый сеанс", lambda: self.open_session(profile, True)),
                    ("Файлы (SFTP)", lambda: self.open_files(profile)),
@@ -571,17 +767,84 @@ class Window(Gtk.ApplicationWindow):
         combo.append("", "Без вкладки")
         for group in groups:
             combo.append(group["id"], group["name"])
-        combo.set_active_id(self.settings["members"].get(profile.alias.lower(), ""))
+        desktop = isinstance(profile, DesktopProfile)
+        combo.set_active_id(profile.group if desktop else self.settings["members"].get(profile.alias.lower(), ""))
         dialog.get_content_area().add(combo)
         dialog.show_all()
         if dialog.run() == Gtk.ResponseType.OK:
-            self.settings["members"][profile.alias.lower()] = combo.get_active_id()
-            self.save_settings()
-            self.render_profiles()
+            destination = combo.get_active_id() or ""
+            try:
+                if desktop:
+                    self.save_desktop(replace(profile, group=destination), editing=True)
+                else:
+                    self.update_catalog_settings(members={**self.settings["members"], profile.alias.lower(): destination})
+            except (OSError, ValueError) as error:
+                message(self, error, Gtk.MessageType.ERROR)
+            else:
+                self.render_profiles()
         dialog.destroy()
 
     def add_profile(self):
-        self.edit_profile(None)
+        if self.protocol == "rdp":
+            self.edit_desktop(None)
+        else:
+            self.edit_profile(None)
+
+    def edit_catalog_entry(self, profile):
+        if isinstance(profile, DesktopProfile):
+            self.edit_desktop(profile)
+        else:
+            self.edit_profile(profile)
+
+    def edit_desktop(self, before):
+        dialog = DesktopDialog(self, before)
+        while dialog.run() == Gtk.ResponseType.OK:
+            try:
+                self.save_desktop(dialog.values(), editing=before is not None)
+            except (OSError, ValueError) as error:
+                dialog.error.set_text(str(error))
+            else:
+                self.search.set_text("")
+                self.render_profiles()
+                break
+        dialog.destroy()
+
+    def save_desktop(self, profile, editing=False):
+        entries = list(self.settings["desktops"])
+        if editing:
+            index = next((i for i, entry in enumerate(entries) if entry["id"] == profile.id), None)
+            if index is None:
+                raise ValueError("RDP-подключение уже удалено.")
+            entries[index] = asdict(profile)
+        else:
+            entries.append(asdict(profile))
+        self.update_catalog_settings(desktops=entries)
+
+    def delete_desktop(self, profile):
+        if not confirm(self, f"Удалить RDP-подключение «{profile.name}»?"):
+            return
+        try:
+            self.update_catalog_settings(desktops=[item for item in self.settings["desktops"] if item["id"] != profile.id])
+        except OSError as error:
+            message(self, error, Gtk.MessageType.ERROR)
+        else:
+            self.render_profiles()
+
+    def transfer_desktop(self, profile):
+        if profile is None:
+            path = chooser(self, "Импорт профиля RDP", Gtk.FileChooserAction.OPEN)
+        else:
+            path = chooser(self, "Экспорт профиля RDP", Gtk.FileChooserAction.SAVE, proposed="connection.rdp")
+        if path:
+            try:
+                if profile is None:
+                    self.save_desktop(DesktopProfile.import_file(path, self.active_group))
+                    self.search.set_text("")
+                    self.render_profiles()
+                else:
+                    profile.export_file(path)
+            except (OSError, ValueError) as error:
+                message(self, error, Gtk.MessageType.ERROR)
 
     def edit_profile(self, before):
         if self.document is None:
@@ -654,25 +917,57 @@ class Window(Gtk.ApplicationWindow):
             window.connect("destroy", lambda unused: self.files.pop(key, None))
         self.files[key].present()
 
+    def connect_profile(self, profile, new=False):
+        if not isinstance(profile, DesktopProfile):
+            self.open_session(profile, new=new)
+            return
+        related = [session for session in self.shells if isinstance(session, DesktopSession) and session.profile.id == profile.id]
+        existing = next((session for session in reversed(related) if session.live), None)
+        if existing is not None and not new:
+            self.show_session(existing)
+            return
+        try:
+            command = profile.command()
+        except ValueError as error:
+            message(self, error, Gtk.MessageType.ERROR)
+            return
+        label = "RDP · " + profile.name
+        used = {session.tab.get_text().removesuffix(" · завершён") for session in related}
+        numbered = label
+        number = 1
+        while numbered in used:
+            number += 1
+            numbered = f"{label} · {number}"
+        session = DesktopSession(self, profile, command, numbered)
+        self.add_session(session)
+        self.show_session(session)
+        session.start()
+
     def open_session(self, profile, new=False, forwarding=True):
-        existing = next((shell for shell in reversed(self.shells) if shell.live and
+        existing = next((shell for shell in reversed(self.shells) if isinstance(shell, Shell) and shell.live and
                          (shell.profile.alias, shell.profile.address) == (profile.alias, profile.address)), None)
         if existing and not new:
             shell = existing
         else:
             shell = Shell(self, profile, forwarding)
-            count = 1 + sum(other.profile.alias == profile.alias for other in self.shells)
+            count = 1 + sum(isinstance(other, Shell) and other.profile.alias == profile.alias for other in self.shells)
             shell.tab = Gtk.Label(label=profile.alias + (f" · {count}" if count > 1 else ""))
             shell.tab.set_tooltip_text(profile.address)
-            self.sessions.append_page(shell, shell.tab)
-            self.sessions.set_tab_reorderable(shell, True)
-            self.shells.append(shell)
+            self.add_session(shell)
+        self.show_session(shell)
+
+    def add_session(self, session):
+        self.sessions.append_page(session, session.tab)
+        self.sessions.set_tab_reorderable(session, True)
+        self.shells.append(session)
+
+    def show_session(self, shell):
         self.stack.set_visible_child_name("sessions")
         self.sessions.set_current_page(self.sessions.page_num(shell))
         shell.terminal.grab_focus()
 
     def close_session(self, shell):
-        if shell not in self.shells or not confirm(self, "Вы уверены?", f"Закрыть SSH-сеанс «{shell.tab.get_text()}»?"):
+        if shell not in self.shells or not confirm(self, "Вы уверены?", f"Закрыть сеанс «{shell.tab.get_text()}»?"):
             return
         self.shells.remove(shell)
         shell.destroy()
@@ -680,10 +975,7 @@ class Window(Gtk.ApplicationWindow):
             self.stack.set_visible_child_name("catalog")
 
     def pick_server(self):
-        if self.document is None or not self.document.profiles:
-            self.stack.set_visible_child_name("catalog")
-            return
-        dialog = Gtk.Dialog(title="Новый SSH-сеанс", transient_for=self, modal=True)
+        dialog = Gtk.Dialog(title="Новый сеанс", transient_for=self, modal=True)
         dialog.set_default_size(470, 380)
         dialog.add_button("Отмена", Gtk.ResponseType.CANCEL)
         dialog.add_button("Новый сеанс", Gtk.ResponseType.OK)
@@ -691,6 +983,11 @@ class Window(Gtk.ApplicationWindow):
         area = dialog.get_content_area()
         area.set_border_width(13)
         area.set_spacing(8)
+        protocols = Gtk.ComboBoxText()
+        protocols.append("ssh", "SSH")
+        protocols.append("rdp", "RDP")
+        protocols.set_active_id(self.protocol)
+        area.pack_start(protocols, False, False, 0)
         search = Gtk.SearchEntry(placeholder_text="Найти сервер", activates_default=True)
         area.pack_start(search, False, False, 0)
         listing = Gtk.ListBox(activate_on_single_click=False)
@@ -701,7 +998,9 @@ class Window(Gtk.ApplicationWindow):
         def filter_profiles(*_):
             listing.foreach(listing.remove)
             query = search.get_text().strip().casefold()
-            for profile in self.document.profiles:
+            profiles = self.desktop_profiles() if protocols.get_active_id() == "rdp" else (
+                self.document.profiles if self.document else [])
+            for profile in ordered(profiles, "name"):
                 if query in (profile.alias + " " + profile.address).casefold():
                     row = Gtk.ListBoxRow()
                     row.profile = profile
@@ -711,12 +1010,14 @@ class Window(Gtk.ApplicationWindow):
             listing.select_row(listing.get_row_at_index(0))
 
         search.connect("search-changed", filter_profiles)
+        protocols.connect("changed", filter_profiles)
         listing.connect("row-activated", lambda *_: dialog.response(Gtk.ResponseType.OK))
         filter_profiles()
         dialog.show_all()
-        if dialog.run() == Gtk.ResponseType.OK and listing.get_selected_row():
-            self.open_session(listing.get_selected_row().profile, True)
+        profile = listing.get_selected_row().profile if dialog.run() == Gtk.ResponseType.OK and listing.get_selected_row() else None
         dialog.destroy()
+        if profile is not None:
+            self.connect_profile(profile, True)
 
     def backup_menu(self):
         from .backup import backup_menu

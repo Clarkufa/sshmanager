@@ -1,8 +1,14 @@
 import AppKit
 import SwiftUI
+import UniformTypeIdentifiers
 
 enum Destination: Hashable {
     case all, group(String), session(UUID)
+}
+
+enum ConnectionProtocol: String, CaseIterable, Identifiable {
+    case ssh = "SSH", rdp = "RDP"
+    var id: Self { self }
 }
 
 struct Notice: Identifiable {
@@ -29,6 +35,8 @@ final class Manager: ObservableObject {
     @Published var groupEditor: GroupEditorState?
     @Published var deleteProfile: Profile?
     @Published var deleteGroup: ServerGroup?
+    @Published var catalogProtocol: ConnectionProtocol = .ssh
+    @Published var desktopEditor: DesktopEditorState?
     @Published var choosingServer = false
     @Published var managingBackups = false
     private let config = ConfigStore.standard
@@ -57,7 +65,7 @@ final class Manager: ObservableObject {
         let store = config
         catalogQueue.async { [weak self] in
             let result = Result {
-                try store.read().profiles.sorted { $0.alias.localizedStandardCompare($1.alias) == .orderedAscending }
+                try store.read().profiles
             }
             DispatchQueue.main.async { [weak self] in
                 switch result {
@@ -152,6 +160,9 @@ final class Manager: ObservableObject {
     func removeGroup(_ group: ServerGroup) {
         updateSettings {
             $0.groups.removeAll { $0.id == group.id }
+            for index in $0.desktops.indices where $0.desktops[index].group == group.id {
+                $0.desktops[index].group = nil
+            }
             if $0.startup == group.id { $0.startup = nil }
         }
         if !settings.groups.contains(where: { $0.id == group.id }), destination == .group(group.id) { destination = .all }
@@ -162,6 +173,108 @@ final class Manager: ObservableObject {
             guard let index = $0.groups.firstIndex(where: { $0.id == group.id }),
                   $0.groups.indices.contains(index + offset) else { return }
             $0.groups.swapAt(index, index + offset)
+        }
+    }
+
+    func sortCatalog(_ order: ServerSort, kind: ConnectionProtocol, group: String?) {
+        updateSettings { latest in
+            if let group {
+                guard let index = latest.groups.firstIndex(where: { $0.id == group }) else { return }
+                if kind == .ssh { latest.groups[index].sshSort = order }
+                else { latest.groups[index].rdpSort = order }
+            } else if kind == .ssh {
+                latest.sshSort = order
+            } else {
+                latest.rdpSort = order
+            }
+        }
+    }
+
+    func addCatalogEntry() {
+        if catalogProtocol == .ssh {
+            editor = ProfileEditorState()
+        } else {
+            let group: String?
+            if case .group(let id) = lastCatalog { group = id } else { group = nil }
+            desktopEditor = DesktopEditorState(original: nil, group: group)
+        }
+    }
+
+    func saveDesktop(_ profile: DesktopProfile, editing: Bool) throws {
+        try profile.validate()
+        var latest = try ManagerSettings.load()
+        if let group = profile.group, !latest.groups.contains(where: { $0.id == group }) {
+            throw ManagerError("Эта вкладка уже удалена.")
+        }
+        if editing {
+            guard let index = latest.desktops.firstIndex(where: { $0.id == profile.id }) else {
+                throw ManagerError("RDP-подключение уже удалено.")
+            }
+            latest.desktops[index] = profile
+        } else {
+            latest.desktops.append(profile)
+        }
+        try latest.save()
+        settings = latest
+    }
+
+    func removeDesktop(_ profile: DesktopProfile) {
+        notice = Notice(title: "Удалить RDP-подключение?", text: "Удалить «\(profile.name)» из каталога?") { [weak self] in
+            self?.updateSettings { $0.desktops.removeAll { $0.id == profile.id } }
+        }
+    }
+
+    func moveDesktop(_ profile: DesktopProfile, to group: String?) {
+        updateSettings { latest in
+            guard let index = latest.desktops.firstIndex(where: { $0.id == profile.id }),
+                  group == nil || latest.groups.contains(where: { $0.id == group }) else {
+                throw ManagerError("Подключение или вкладка уже удалены.")
+            }
+            latest.desktops[index].group = group
+        }
+    }
+
+    func transferDesktop(_ profile: DesktopProfile?, group: String? = nil) {
+        let type = UTType(filenameExtension: "rdp") ?? .data
+        if let profile {
+            let panel = NSSavePanel()
+            panel.allowedContentTypes = [type]
+            panel.nameFieldStringValue = "connection.rdp"
+            guard panel.runModal() == .OK, let url = panel.url else { return }
+            do { try writePrivate(profile.data, to: url) } catch { show(error) }
+        } else {
+            let panel = NSOpenPanel()
+            panel.allowedContentTypes = [type]
+            guard panel.runModal() == .OK, let url = panel.url else { return }
+            do { try saveDesktop(DesktopProfile(file: url, group: group), editing: false) }
+            catch { show(error) }
+        }
+    }
+
+    func connectDesktop(_ profile: DesktopProfile) {
+        let files = FileManager.default
+        let directory = files.temporaryDirectory.appendingPathComponent("SSHManager-\(UUID().uuidString)", isDirectory: true)
+        let url = directory.appendingPathComponent("connection.rdp")
+        do {
+            try files.createDirectory(at: directory, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
+            try writePrivate(profile.data, to: url)
+            let workspace = NSWorkspace.shared
+            let client = workspace.urlForApplication(withBundleIdentifier: "com.microsoft.rdc.macos") ??
+                workspace.urlForApplication(toOpen: url)
+            guard let client else { throw ManagerError("Установите Microsoft Windows App для подключения по RDP.") }
+            workspace.open([url], withApplicationAt: client, configuration: NSWorkspace.OpenConfiguration()) { [weak self] _, error in
+                DispatchQueue.main.async {
+                    if let error { self?.show(error) }
+                }
+                DispatchQueue.global().asyncAfter(deadline: .now() + 120) {
+                    try? files.removeItem(at: url)
+                    try? files.removeItem(at: directory)
+                }
+            }
+        } catch {
+            try? files.removeItem(at: url)
+            try? files.removeItem(at: directory)
+            show(error)
         }
     }
 
@@ -252,6 +365,12 @@ struct ProfileEditorState: Identifiable {
 struct GroupEditorState: Identifiable {
     let id = UUID()
     var original: ServerGroup?
+}
+
+struct DesktopEditorState: Identifiable {
+    let id = UUID()
+    var original: DesktopProfile?
+    var group: String?
 }
 
 private extension Profile {

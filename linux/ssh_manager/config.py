@@ -7,9 +7,10 @@ import re
 import shlex
 import tempfile
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from pathlib import Path
 
+from .rdp import DesktopProfile, ORDERS
 
 ALIAS = re.compile(r"[A-Za-z0-9_.][A-Za-z0-9_.-]*\Z")
 DIRECTIVE = re.compile(r"(?P<indent>[ \t]*)(?P<key>[A-Za-z][A-Za-z0-9]*)(?:[ \t]*=[ \t]*|[ \t]+)(?P<value>.*)")
@@ -193,7 +194,7 @@ def write(path, contents, mode=0o600):
 
 
 def parse_settings(contents):
-    initial = {"groups": [], "members": {}, "default": "", "dark": True}
+    initial = {"groups": [], "members": {}, "default": "", "dark": True, "desktops": [], "sort": {}}
     if not contents:
         return initial
     data = json.loads(contents)
@@ -216,6 +217,26 @@ def parse_settings(contents):
     if any(not ALIAS.fullmatch(alias) or not isinstance(group, str) or group not in ids
            for alias, group in initial["members"].items()):
         raise ValueError("Некорректное распределение серверов по вкладкам.")
+    sort_keys = {protocol + ":" + group for protocol in ("ssh", "rdp") for group in ids}
+    orders = dict(ORDERS)
+    if not isinstance(initial["sort"], dict) or any(
+            key not in sort_keys or not isinstance(order, str) or order not in orders
+            for key, order in initial["sort"].items()):
+        raise ValueError("Некорректная сортировка серверов.")
+    desktop_ids = set()
+    desktops = []
+    if not isinstance(initial["desktops"], list) or len(initial["desktops"]) > 10000:
+        raise ValueError("Некорректный список RDP-подключений.")
+    for entry in initial["desktops"]:
+        try:
+            profile = DesktopProfile(**entry).validate()
+        except TypeError as error:
+            raise ValueError("Некорректное RDP-подключение.") from error
+        if profile.id in desktop_ids or profile.group not in ids:
+            raise ValueError("Некорректная вкладка или повторяющееся RDP-подключение.")
+        desktop_ids.add(profile.id)
+        desktops.append(asdict(profile))
+    initial["desktops"] = desktops
     return initial
 
 
