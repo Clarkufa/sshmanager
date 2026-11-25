@@ -145,9 +145,9 @@ class ProfileDialog(Gtk.Dialog):
 
 
 class DesktopDialog(Gtk.Dialog):
-    def __init__(self, owner, profile):
+    def __init__(self, owner, profile, has_password=False):
         super().__init__(title="RDP-подключение", transient_for=owner, modal=True)
-        self.set_default_size(500, 370)
+        self.set_default_size(500, 430)
         self.add_button("Отмена", Gtk.ResponseType.CANCEL)
         self.add_button("Сохранить", Gtk.ResponseType.OK)
         self.set_default_response(Gtk.ResponseType.OK)
@@ -163,13 +163,22 @@ class DesktopDialog(Gtk.Dialog):
             self.entries[key] = entry
             grid.attach(Gtk.Label(label=label, xalign=0), 0, row, 1, 1)
             grid.attach(entry, 1, row, 1, 1)
+        self.password = Gtk.Entry(visibility=False, activates_default=True, hexpand=True,
+                                  placeholder_text="Сохранён — оставьте пустым" if has_password else "Необязательно")
+        self.password.set_input_purpose(Gtk.InputPurpose.PASSWORD)
+        self.forget = Gtk.CheckButton(label="Удалить сохранённый пароль")
+        self.forget.connect("toggled", lambda check: self.password.set_sensitive(not check.get_active()))
+        grid.attach(Gtk.Label(label="Пароль", xalign=0), 0, 7, 1, 1)
+        grid.attach(self.password, 1, 7, 1, 1)
+        grid.attach(self.forget, 1, 8, 1, 1)
         self.clipboard = Gtk.CheckButton(label="Общий буфер обмена", active=self.profile.clipboard)
         self.fullscreen = Gtk.CheckButton(label="Полноэкранный режим", active=self.profile.fullscreen)
         self.error = Gtk.Label(xalign=0, wrap=True)
-        grid.attach(self.clipboard, 1, 7, 1, 1)
-        grid.attach(self.fullscreen, 1, 8, 1, 1)
-        grid.attach(self.error, 1, 9, 1, 1)
+        grid.attach(self.clipboard, 1, 9, 1, 1)
+        grid.attach(self.fullscreen, 1, 10, 1, 1)
+        grid.attach(self.error, 1, 11, 1, 1)
         self.show_all()
+        self.forget.set_visible(has_password)
 
     def values(self):
         fields = {key: entry.get_text().strip() for key, entry in self.entries.items()}
@@ -183,8 +192,12 @@ class DesktopDialog(Gtk.Dialog):
         if not host.isascii():
             host = host.encode("idna").decode("ascii")
         fields["host"] = host
-        return replace(self.profile, **fields, clipboard=self.clipboard.get_active(),
-                       fullscreen=self.fullscreen.get_active()).validate()
+        profile = replace(self.profile, **fields, clipboard=self.clipboard.get_active(),
+                          fullscreen=self.fullscreen.get_active()).validate()
+        password = "" if self.forget.get_active() else self.password.get_text()
+        if password and not profile.user:
+            raise ValueError("Укажите пользователя, чтобы сохранить пароль RDP.")
+        return profile, password, self.forget.get_active()
 
 
 class Shell(Gtk.Box):
@@ -357,11 +370,12 @@ class Shell(Gtk.Box):
 
 
 class DesktopSession(Gtk.Box):
-    def __init__(self, owner, profile, command, label):
+    def __init__(self, owner, profile, command, label, environment=None):
         super().__init__(orientation=Gtk.Orientation.VERTICAL, spacing=8)
         self.owner = owner
         self.profile = profile
         self.command = command
+        self.environment = environment or {}
         self.live = True
         self.closed = False
         self.pid = None
@@ -369,6 +383,7 @@ class DesktopSession(Gtk.Box):
         self.tab.set_tooltip_text(profile.address)
         bar = Gtk.Box(spacing=8)
         bar.pack_start(Gtk.Label(label=profile.address, xalign=0), True, True, 0)
+        bar.pack_start(button("Переподключить", self.restart), False, False, 0)
         bar.pack_start(button("Новый сеанс", lambda: owner.connect_profile(profile, True)), False, False, 0)
         bar.pack_start(button("Закрыть сеанс", lambda: owner.close_session(self)), False, False, 0)
         self.pack_start(bar, False, False, 0)
@@ -385,8 +400,12 @@ class DesktopSession(Gtk.Box):
         self.show_all()
 
     def start(self):
+        environment = None
+        if self.environment:
+            values = dict(os.environ, **self.environment)
+            environment = [key + "=" + value for key, value in values.items()]
         try:
-            self.terminal.spawn_async(Vte.PtyFlags.DEFAULT, str(Path.home()), self.command, None,
+            self.terminal.spawn_async(Vte.PtyFlags.DEFAULT, str(Path.home()), self.command, environment,
                                       GLib.SpawnFlags.DEFAULT, None, None, -1, None, self.spawned, None)
         except (OSError, RuntimeError, TypeError, GLib.Error) as error:
             self.spawned(self.terminal, -1, error)
@@ -414,6 +433,16 @@ class DesktopSession(Gtk.Box):
         terminal.set_input_enabled(False)
         if not self.closed:
             self.tab.set_text(self.tab.get_text().removesuffix(" · завершён") + " · завершён")
+            terminal.feed("\r\n\x1b[0mСеанс RDP завершён. Нажмите «Переподключить», чтобы подключиться снова.\r\n".encode())
+
+    def restart(self):
+        if self.live:
+            return
+        self.closed = False
+        self.live = True
+        self.terminal.set_input_enabled(True)
+        self.tab.set_text(self.tab.get_text().removesuffix(" · завершён"))
+        self.start()
 
     @staticmethod
     def terminate(pid):
@@ -797,11 +826,30 @@ class Window(Gtk.ApplicationWindow):
             self.edit_profile(profile)
 
     def edit_desktop(self, before):
-        dialog = DesktopDialog(self, before)
+        try:
+            has_password = before is not None and self.vault.lookup(before.secret) is not None
+        except (OSError, RuntimeError, subprocess.TimeoutExpired):
+            has_password = False
+        dialog = DesktopDialog(self, before, has_password)
         while dialog.run() == Gtk.ResponseType.OK:
             try:
-                self.save_desktop(dialog.values(), editing=before is not None)
-            except (OSError, ValueError) as error:
+                profile, password, forget = dialog.values()
+                secret = profile.secret
+                previous = self.vault.lookup(secret) if (password or forget or has_password) else None
+                changed = False
+                if forget and previous is not None:
+                    self.vault.save(secret, None)
+                    changed = True
+                elif password or (previous is not None and before is not None and before.account != profile.account):
+                    self.vault.save(secret, password or previous)
+                    changed = True
+                try:
+                    self.save_desktop(profile, editing=before is not None)
+                except Exception:
+                    if changed:
+                        self.vault.save(secret, previous)
+                    raise
+            except (OSError, RuntimeError, ValueError, subprocess.TimeoutExpired) as error:
                 dialog.error.set_text(str(error))
             else:
                 self.search.set_text("")
@@ -828,6 +876,11 @@ class Window(Gtk.ApplicationWindow):
         except OSError as error:
             message(self, error, Gtk.MessageType.ERROR)
         else:
+            try:
+                if self.vault.lookup(profile.secret) is not None:
+                    self.vault.save(profile.secret, None)
+            except (OSError, RuntimeError, subprocess.TimeoutExpired) as error:
+                message(self, error, Gtk.MessageType.ERROR)
             self.render_profiles()
 
     def transfer_desktop(self, profile):
@@ -927,8 +980,9 @@ class Window(Gtk.ApplicationWindow):
             self.show_session(existing)
             return
         try:
-            command = profile.command()
-        except ValueError as error:
+            password = self.vault.lookup(profile.secret) if profile.user else None
+            command, environment = profile.command(password)
+        except (OSError, RuntimeError, ValueError, subprocess.TimeoutExpired) as error:
             message(self, error, Gtk.MessageType.ERROR)
             return
         label = "RDP · " + profile.name
@@ -938,7 +992,7 @@ class Window(Gtk.ApplicationWindow):
         while numbered in used:
             number += 1
             numbered = f"{label} · {number}"
-        session = DesktopSession(self, profile, command, numbered)
+        session = DesktopSession(self, profile, command, numbered, environment)
         self.add_session(session)
         self.show_session(session)
         session.start()

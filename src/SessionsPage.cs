@@ -139,9 +139,10 @@ namespace SshManager
         private readonly TextBox search;
         private readonly ListBox list;
         private readonly Label count, selectedTitle, selectedDetail, empty;
-        private readonly Button duplicate, close, files;
+        private readonly Button duplicate, close, files, fullScreenButton, windowButton, reconnectButton;
         private readonly SurfaceButton themeButton;
         private readonly ContextMenuStrip sessionMenu;
+        private readonly ToolTip hints;
         private readonly Timer timer;
         private TerminalSession active;
         private long activationOrder;
@@ -231,8 +232,12 @@ namespace SshManager
             sessionMenu.Items.Add(Theme.MenuItem("Новый сеанс этого сервера", Glyph.Plus, (sender, args) => DuplicateActive()));
             var sessionFiles = Theme.MenuItem("Файлы (SFTP)", Glyph.Folder, (sender, args) => OpenFiles());
             var fullScreen = Theme.MenuItem("Полноэкранный режим RDP", Glyph.Server, (sender, args) => OpenFullScreen());
+            var detach = Theme.MenuItem("Открыть в отдельном окне", Glyph.Move, (sender, args) => DetachActive());
+            var reconnect = Theme.MenuItem("Переподключить", Glyph.Refresh, (sender, args) => active?.Desktop?.Reconnect());
             sessionMenu.Items.Add(sessionFiles);
             sessionMenu.Items.Add(fullScreen);
+            sessionMenu.Items.Add(detach);
+            sessionMenu.Items.Add(reconnect);
             var withoutForwarding = Theme.MenuItem("Новый сеанс без проброса портов", Glyph.Terminal,
                 (sender, args) => DuplicateActive(withoutForwarding: true));
             sessionMenu.Items.Add(withoutForwarding);
@@ -242,7 +247,8 @@ namespace SshManager
                 args.Cancel = active == null || list.SelectedItem == null;
                 withoutForwarding.Available = active != null && active.ForwardingFailed;
                 sessionFiles.Available = active != null && active.Desktop == null;
-                fullScreen.Available = active?.Desktop?.IsOpen == true;
+                fullScreen.Available = active?.Desktop?.IsConnected == true;
+                detach.Available = reconnect.Available = active?.Desktop != null;
             };
             list.ContextMenuStrip = sessionMenu;
             list.MouseDown += (sender, args) =>
@@ -272,7 +278,16 @@ namespace SshManager
             files.Click += (sender, args) => OpenFiles();
             close = Theme.Button("Закрыть", 81, danger: true, quiet: true);
             close.Click += (sender, args) => CloseActive();
-            buttons.Controls.AddRange(new Control[] { files, duplicate, close });
+            fullScreenButton = Theme.Button("Весь экран", 116, glyph: Glyph.Server);
+            fullScreenButton.Click += (sender, args) => OpenFullScreen();
+            windowButton = Theme.Button("В окне", 92, glyph: Glyph.Move);
+            windowButton.Click += (sender, args) => DetachActive();
+            reconnectButton = Theme.Button("Переподключить", 150, glyph: Glyph.Refresh);
+            reconnectButton.Click += (sender, args) => active?.Desktop?.Reconnect();
+            hints = new ToolTip();
+            hints.SetToolTip(fullScreenButton, "Ctrl+Alt+Break переключает полноэкранный режим внутри сеанса");
+            hints.SetToolTip(windowButton, "Переоткрыть RDP-сеанс в отдельном окне");
+            buttons.Controls.AddRange(new Control[] { files, reconnectButton, windowButton, fullScreenButton, duplicate, close });
             info.Controls.Add(buttons, 1, 0);
             workspace.Controls.Add(info, 0, 0);
 
@@ -299,17 +314,19 @@ namespace SshManager
             return sessions.Count(session => session.IsOpen && (alias == null || SameTarget(session, alias)));
         }
 
-        public void Open(SessionTarget target, bool forceNew)
+        public bool Open(SessionTarget target, bool forceNew, RdpCredential credential = null)
         {
             var related = sessions.Where(session => SameTarget(session, target.Key)).ToArray();
             var existing = forceNew ? null : related.Where(session => session.IsOpen).OrderByDescending(session => session.LastUsed).FirstOrDefault();
-            if (existing != null) { Activate(existing, true); return; }
+            if (existing != null) { Activate(existing, true); return true; }
 
             int number = related.Length == 0 ? 1 : related.Max(session => session.Number) + 1;
             if (target.Desktop != null)
             {
-                OpenDesktop(target, number);
-                return;
+                credential = credential ?? RdpLogonDialog.Resolve(this, target.Desktop);
+                if (credential == null) return false;
+                OpenDesktop(target, number, credential);
+                return true;
             }
 
             var size = terminal.GridSize;
@@ -321,6 +338,7 @@ namespace SshManager
             Activate(opened, true);
             timer.Start();
             Changed?.Invoke();
+            return true;
         }
 
         public void FocusTerminal()
@@ -365,7 +383,7 @@ namespace SshManager
             if (focus) FocusTerminal();
         }
 
-        private void OpenDesktop(SessionTarget target, int number)
+        private void OpenDesktop(SessionTarget target, int number, RdpCredential credential)
         {
             var previous = active;
             var view = new RdpDesktop { Visible = false };
@@ -376,7 +394,8 @@ namespace SshManager
                 display.Controls.Add(view);
                 Activate(opened, false);
                 view.Changed += OnDesktopChanged;
-                view.Connect(target.Desktop);
+                view.CloseRequested += () => CloseSession(opened, confirm: false);
+                view.Connect(target.Desktop, credential);
                 FocusTerminal();
             }
             catch
@@ -388,6 +407,16 @@ namespace SshManager
                 throw;
             }
             Changed?.Invoke();
+        }
+
+        private void DetachActive()
+        {
+            var session = active;
+            if (session?.Desktop?.Profile == null) return;
+            var profile = session.Desktop.Profile;
+            var credential = session.Desktop.Credential;
+            CloseSession(session, confirm: false);
+            RdpWindow.Open(profile, credential);
         }
 
         private void OnDesktopChanged()
@@ -462,6 +491,8 @@ namespace SshManager
                 (active.Status.Length == 0 ? "" : "  ·  " + active.Status);
             close.Enabled = duplicate.Enabled = active != null;
             files.Visible = active != null && active.Desktop == null;
+            windowButton.Visible = reconnectButton.Visible = fullScreenButton.Visible = active?.Desktop != null;
+            fullScreenButton.Enabled = active?.Desktop?.IsConnected == true;
             empty.Visible = active == null;
         }
 
@@ -516,13 +547,20 @@ namespace SshManager
 
         private void CloseActive()
         {
-            var closing = active;
-            if (closing == null) return;
-            if (MessageBox.Show(this, "Закрыть " + closing.Target.Protocol + "-сеанс «" + closing.Title + "»?", "Вы уверены?",
+            if (active != null) CloseSession(active, confirm: active.IsOpen);
+        }
+
+        private void CloseSession(TerminalSession closing, bool confirm)
+        {
+            if (!sessions.Contains(closing)) return;
+            if (confirm && MessageBox.Show(this, "Закрыть " + closing.Target.Protocol + "-сеанс «" + closing.Title + "»?", "Вы уверены?",
                 MessageBoxButtons.YesNo, MessageBoxIcon.Question, MessageBoxDefaultButton.Button2) != DialogResult.Yes) return;
             sessions.Remove(closing);
-            Activate(sessions.OrderByDescending(session => session.LastUsed).FirstOrDefault(), true);
-            closing.Dispose();
+            if (closing == active) Activate(sessions.OrderByDescending(session => session.LastUsed).FirstOrDefault(), true);
+            else { RefreshList(); RefreshDetails(); }
+            closing.Desktop?.Hide();
+            // The overlay's own button can request the close, so release the ActiveX control after that click returns.
+            BeginInvoke(new Action(closing.Dispose));
             Changed?.Invoke();
         }
 
@@ -537,6 +575,7 @@ namespace SshManager
             {
                 if (timer != null) timer.Dispose();
                 if (sessionMenu != null) sessionMenu.Dispose();
+                if (hints != null) hints.Dispose();
                 foreach (var session in sessions) session.Dispose();
             }
             base.Dispose(disposing);

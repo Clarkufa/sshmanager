@@ -76,7 +76,9 @@ private struct ManagerView: View {
             GroupEditor(state: state) { try manager.saveGroup($0, original: state.original) }
         }
         .sheet(item: $manager.desktopEditor) { state in
-            DesktopEditor(state: state) { try manager.saveDesktop($0, editing: state.original != nil) }
+            DesktopEditor(state: state, hasPassword: state.original.map(manager.hasDesktopPassword) ?? false) {
+                try manager.saveDesktop($0, editing: state.original != nil, password: $1, removePassword: $2)
+            }
         }
         .sheet(isPresented: $manager.choosingServer) {
             ServerPicker(profiles: manager.profiles, desktops: manager.settings.desktops, kind: manager.catalogProtocol) { choice in
@@ -610,9 +612,13 @@ private struct DesktopEditor: View {
     @State private var width: String
     @State private var height: String
     @State private var error = ""
-    let save: (DesktopProfile) throws -> Void
+    @State private var password = ""
+    @State private var removePassword = false
+    let hasPassword: Bool
+    let save: (DesktopProfile, String, Bool) throws -> Void
 
-    init(state: DesktopEditorState, save: @escaping (DesktopProfile) throws -> Void) {
+    init(state: DesktopEditorState, hasPassword: Bool, save: @escaping (DesktopProfile, String, Bool) throws -> Void) {
+        self.hasPassword = hasPassword
         let start = state.original ?? DesktopProfile(group: state.group)
         _profile = State(initialValue: start)
         _port = State(initialValue: String(start.port))
@@ -630,6 +636,9 @@ private struct DesktopEditor: View {
                 TextField("Порт", text: $port)
                 TextField("Пользователь", text: $profile.user)
                 TextField("Домен", text: $profile.domain)
+                SecureField("Пароль", text: $password, prompt: Text(hasPassword ? "Сохранён в Связке ключей" : "Необязательно"))
+                    .disabled(removePassword)
+                if hasPassword { Toggle("Удалить сохранённый пароль", isOn: $removePassword) }
                 TextField("Ширина экрана", text: $width, prompt: Text("Автоматически"))
                 TextField("Высота экрана", text: $height, prompt: Text("Автоматически"))
                 Toggle("Общий буфер обмена", isOn: $profile.clipboard)
@@ -654,7 +663,7 @@ private struct DesktopEditor: View {
         value.port = trim(port).isEmpty ? 3389 : Int(trim(port)) ?? -1
         value.width = trim(width).isEmpty ? 0 : Int(trim(width)) ?? -1
         value.height = trim(height).isEmpty ? 0 : Int(trim(height)) ?? -1
-        do { try save(value); dismiss() }
+        do { try save(value, removePassword ? "" : password, removePassword); dismiss() }
         catch { self.error = error.localizedDescription }
     }
 }

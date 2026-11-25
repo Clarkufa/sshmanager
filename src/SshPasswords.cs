@@ -93,10 +93,11 @@ namespace SshManager
             return password != null;
         }
 
-        public static byte[] Read(PasswordTarget target)
+        public static byte[] Read(PasswordTarget target) => target == null ? null : Read(Name(target));
+
+        internal static byte[] Read(string name)
         {
-            if (target == null) return null;
-            if (!CredRead(Name(target), Generic, 0, out IntPtr pointer))
+            if (!CredRead(name, Generic, 0, out IntPtr pointer))
             {
                 int error = Marshal.GetLastWin32Error();
                 if (error == NotFound || error == NoLogonSession) return null;
@@ -116,9 +117,10 @@ namespace SshManager
             finally { CredFree(pointer); }
         }
 
-        public static void Set(PasswordTarget target, byte[] password)
+        public static void Set(PasswordTarget target, byte[] password) => Set(Name(target), target.User, password);
+
+        internal static void Set(string name, string user, byte[] password)
         {
-            var name = Name(target);
             if (password == null)
             {
                 if (CredDelete(name, Generic, 0)) return;
@@ -126,14 +128,14 @@ namespace SshManager
                 if (error != NotFound) throw VaultError("удалить", error);
                 return;
             }
-            if (!IsValid(password)) throw new InvalidDataException("Неверный формат сохранённого SSH-пароля.");
+            if (!IsValid(password)) throw new InvalidDataException("Неверный формат сохранённого пароля.");
             var blob = GCHandle.Alloc(password, GCHandleType.Pinned);
             try
             {
                 var credential = new Credential
                 {
                     Type = Generic, Target = name, Size = password.Length, Blob = blob.AddrOfPinnedObject(),
-                    Persist = PersistLocal, User = target.User
+                    Persist = PersistLocal, User = String.IsNullOrEmpty(user) ? null : user
                 };
                 if (!CredWrite(ref credential, 0)) throw VaultError("сохранить", Marshal.GetLastWin32Error());
             }
@@ -181,6 +183,38 @@ namespace SshManager
         private static extern bool CredDelete(string target, uint type, uint flags);
         [DllImport("advapi32.dll")]
         private static extern void CredFree(IntPtr credential);
+    }
+
+    internal static class RdpPasswords
+    {
+        private static string Name(string profileId) => "SSH Manager/RDP/" + profileId;
+
+        public static bool Exists(RdpProfile profile)
+        {
+            var password = SshPasswords.Read(Name(profile.Id));
+            SshPasswords.Clear(password);
+            return password != null;
+        }
+
+        public static string Read(RdpProfile profile)
+        {
+            var password = SshPasswords.Read(Name(profile.Id));
+            try { return password == null ? null : Encoding.UTF8.GetString(password); }
+            finally { SshPasswords.Clear(password); }
+        }
+
+        public static byte[] ReadBytes(string profileId) => SshPasswords.Read(Name(profileId));
+
+        public static void Set(RdpProfile profile, string password)
+        {
+            if (String.IsNullOrEmpty(password)) { Set(profile.Id, profile.Account, null); return; }
+            var bytes = SshPasswords.Encode(password);
+            try { Set(profile.Id, profile.Account, bytes); }
+            finally { SshPasswords.Clear(bytes); }
+        }
+
+        public static void Set(string profileId, string account, byte[] password) =>
+            SshPasswords.Set(Name(profileId), account, password);
     }
 
     internal sealed class PasswordUpdates : IDisposable

@@ -506,10 +506,31 @@ namespace SshManager
         private void EditDesktop(RdpProfile profile)
         {
             string selected = null;
-            bool import;
-            using (var dialog = new RdpDialog(profile, activeGroupId, replacement =>
+            bool import, hasPassword = false;
+            try { hasPassword = profile != null && RdpPasswords.Exists(profile); }
+            catch (IOException error) { Theme.ShowError(this, error); }
+            using (var dialog = new RdpDialog(profile, activeGroupId, hasPassword, (replacement, password, forgetPassword) =>
             {
-                groups = groupFile.Update(items => items.SaveDesktop(replacement, profile != null));
+                bool changePassword = forgetPassword || password.Length > 0 ||
+                    (hasPassword && profile != null && profile.Account != replacement.Account);
+                byte[] previous = changePassword ? RdpPasswords.ReadBytes(replacement.Id) : null;
+                try
+                {
+                    if (forgetPassword) RdpPasswords.Set(replacement, null);
+                    else if (password.Length > 0) RdpPasswords.Set(replacement, password);
+                    else if (changePassword && previous != null) RdpPasswords.Set(replacement.Id, replacement.Account, previous);
+                    try { groups = groupFile.Update(items => items.SaveDesktop(replacement, profile != null)); }
+                    catch
+                    {
+                        if (changePassword)
+                        {
+                            try { RdpPasswords.Set(replacement.Id, profile?.Account ?? replacement.Account, previous); }
+                            catch (IOException) { }
+                        }
+                        throw;
+                    }
+                }
+                finally { SshPasswords.Clear(previous); }
                 selected = replacement.Id;
             }))
             {
@@ -527,6 +548,9 @@ namespace SshManager
             if (profile == null || MessageBox.Show(this, "Удалить RDP-подключение «" + profile.Name + "»?",
                 Text, MessageBoxButtons.YesNo, MessageBoxIcon.Warning, MessageBoxDefaultButton.Button2) != DialogResult.Yes) return;
             UpdateGroups(items => items.Desktops.RemoveAll(item => item.Id == profile.Id), activeGroupId);
+            if (groups.Desktops.Any(item => item.Id == profile.Id)) return;
+            try { RdpPasswords.Set(profile, null); }
+            catch (IOException error) { Theme.ShowError(this, error); }
         }
 
         private void TransferDesktop(RdpProfile profile)
@@ -801,6 +825,7 @@ namespace SshManager
             {
                 Theme.MenuItem("Подключиться", Glyph.Server, (sender, args) => ConnectDesktop(profile)),
                 Theme.MenuItem("Новый сеанс", Glyph.Plus, (sender, args) => ConnectDesktop(profile, true)),
+                Theme.MenuItem("Открыть в отдельном окне", Glyph.Move, (sender, args) => ConnectDesktopWindow(profile)),
                 Theme.MenuItem("Открыть в клиенте Windows", Glyph.Server, (sender, args) =>
                 {
                     try { profile.OpenExternal(); }
@@ -890,7 +915,7 @@ namespace SshManager
             {
                 var workspace = SessionWorkspace();
                 ShowSessions();
-                workspace.Open(new SessionTarget(profile, groups.Find(profile.GroupId)), forceNew);
+                if (!workspace.Open(new SessionTarget(profile, groups.Find(profile.GroupId)), forceNew) && fromCatalog) ShowServers();
             }
             catch (Exception error) when (error is ExternalException || error is TargetInvocationException ||
                 error is InvalidOperationException || error is ArgumentException)
@@ -898,6 +923,16 @@ namespace SshManager
                 if (fromCatalog) ShowServers();
                 Theme.ShowError(this, new IOException("Не удалось открыть встроенный RDP-сеанс. Попробуйте «Открыть в клиенте Windows» в меню подключения.\n" +
                     (error.InnerException ?? error).Message, error));
+            }
+        }
+
+        private void ConnectDesktopWindow(RdpProfile profile)
+        {
+            try { RdpWindow.Open(profile, owner: this); }
+            catch (Exception error) when (error is ExternalException || error is TargetInvocationException ||
+                error is InvalidOperationException || error is ArgumentException)
+            {
+                Theme.ShowError(this, new IOException("Не удалось открыть RDP-окно.\n" + (error.InnerException ?? error).Message, error));
             }
         }
 

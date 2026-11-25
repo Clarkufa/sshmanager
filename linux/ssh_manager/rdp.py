@@ -1,7 +1,9 @@
+import hashlib
 import ipaddress
 import os
 import re
 import shutil
+import subprocess
 import unicodedata
 import uuid
 from dataclasses import dataclass
@@ -32,6 +34,34 @@ def ordered(profiles, order):
     return sorted(profiles, key=key, reverse=order.endswith("_desc"))
 
 
+ARGS_VARIABLE = "SSH_MANAGER_RDP_ARGS"
+_versions = {}
+
+
+@dataclass(frozen=True)
+class DesktopAccount:
+    """Secret Service key for one RDP profile: every profile (even the same IP on another port) has its own password."""
+    key: str
+    user: str
+    host: str
+    port: str
+
+
+def freerdp_major(client):
+    """FreeRDP 3 accepts arguments from the environment, which keeps the password out of argv."""
+    name = os.path.basename(client)
+    if name.endswith("3"):
+        return 3
+    if client not in _versions:
+        try:
+            output = subprocess.run([client, "/version"], capture_output=True, text=True, timeout=5).stdout
+            match = re.search(r"version\s+(\d+)\.", output)
+            _versions[client] = int(match.group(1)) if match else 2
+        except (OSError, subprocess.SubprocessError):
+            _versions[client] = 2
+    return _versions[client]
+
+
 @dataclass(frozen=True)
 class DesktopProfile:
     id: str
@@ -49,6 +79,15 @@ class DesktopProfile:
     @property
     def alias(self):
         return self.name
+
+    @property
+    def account(self):
+        return self.domain + "\\" + self.user if self.domain and self.user else self.user
+
+    @property
+    def secret(self):
+        key = hashlib.sha256(("rdp\n" + self.id).encode()).hexdigest().upper()
+        return DesktopAccount(key, self.account or "-", self.host, str(self.port))
 
     @property
     def address(self):
@@ -78,23 +117,33 @@ class DesktopProfile:
             raise ValueError("Некорректные параметры RDP-подключения.")
         return self
 
-    def command(self):
+    def command(self, password=None):
+        """Return (argv, extra environment). The saved user, domain and password are always passed explicitly."""
         x11 = ("xfreerdp3", "xfreerdp")
         wayland = ("sdl-freerdp3", "sdl-freerdp", "wlfreerdp3", "wlfreerdp")
         names = x11 + wayland if os.environ.get("DISPLAY") else wayland + x11
         client = next((path for name in names if (path := shutil.which(name))), None)
         if not client:
             raise ValueError("Установите клиент FreeRDP из репозитория вашего дистрибутива.")
-        args = [client, "/v:" + self.address, "/t:" + self.name, "+clipboard" if self.clipboard else "-clipboard"]
+        args = ["/v:" + self.address, "/t:" + self.name, "+clipboard" if self.clipboard else "-clipboard", "+auto-reconnect"]
         if self.user:
             args.append("/u:" + self.user)
         if self.domain:
             args.append("/d:" + self.domain)
+        if password:
+            if any(char in password for char in "\0\r\n"):
+                raise ValueError("Пароль RDP должен быть одной строкой.")
+            args.append("/p:" + password)
         if self.width:
             args.append(f"/size:{self.width}x{self.height}")
+        else:
+            args += ["/size:80%", "/dynamic-resolution"]
         if self.fullscreen:
             args.append("/f")
-        return args
+        if password and freerdp_major(client) >= 3:
+            return [client, "/args-from:env:" + ARGS_VARIABLE], {ARGS_VARIABLE: "\n".join(args)}
+        # FreeRDP 2 overwrites /p: in its argv with asterisks right after parsing.
+        return [client] + args, {}
 
     @classmethod
     def import_file(cls, filename, group):

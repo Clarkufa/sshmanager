@@ -200,8 +200,30 @@ final class Manager: ObservableObject {
         }
     }
 
-    func saveDesktop(_ profile: DesktopProfile, editing: Bool) throws {
+    func saveDesktop(_ profile: DesktopProfile, editing: Bool, password: String = "", removePassword: Bool = false) throws {
         try profile.validate()
+        guard password.utf8.count <= 1022, !password.contains(where: \.isNewline), !password.contains("\0")
+        else { throw ManagerError("Пароль слишком длинный или содержит недопустимые символы.") }
+        if !password.isEmpty, profile.user.isEmpty { throw ManagerError("Укажите пользователя, чтобы сохранить пароль RDP.") }
+        var rollback: (() throws -> Void)?
+        if !password.isEmpty || removePassword {
+            let before = try Passwords.read(profile.keychainAccount)
+            try Passwords.set(removePassword ? nil : password, for: profile.keychainAccount)
+            rollback = { try Passwords.set(before, for: profile.keychainAccount) }
+        }
+        do { try storeDesktop(profile, editing: editing) }
+        catch {
+            do { try rollback?() }
+            catch let keychainError { throw ManagerError(error.localizedDescription + "\n" + keychainError.localizedDescription) }
+            throw error
+        }
+    }
+
+    func hasDesktopPassword(_ profile: DesktopProfile) -> Bool {
+        (try? Passwords.read(profile.keychainAccount)) != nil
+    }
+
+    private func storeDesktop(_ profile: DesktopProfile, editing: Bool) throws {
         var latest = try ManagerSettings.load()
         if let group = profile.group, !latest.groups.contains(where: { $0.id == group }) {
             throw ManagerError("Эта вкладка уже удалена.")
@@ -221,6 +243,7 @@ final class Manager: ObservableObject {
     func removeDesktop(_ profile: DesktopProfile) {
         notice = Notice(title: "Удалить RDP-подключение?", text: "Удалить «\(profile.name)» из каталога?") { [weak self] in
             self?.updateSettings { $0.desktops.removeAll { $0.id == profile.id } }
+            do { try Passwords.set(nil, for: profile.keychainAccount) } catch { self?.show(error) }
         }
     }
 
@@ -246,12 +269,88 @@ final class Manager: ObservableObject {
             let panel = NSOpenPanel()
             panel.allowedContentTypes = [type]
             guard panel.runModal() == .OK, let url = panel.url else { return }
-            do { try saveDesktop(DesktopProfile(file: url, group: group), editing: false) }
+            do { try storeDesktop(DesktopProfile(file: url, group: group), editing: false) }
             catch { show(error) }
         }
     }
 
     func connectDesktop(_ profile: DesktopProfile) {
+        var password: String?
+        do { password = try Passwords.read(profile.keychainAccount) } catch { show(error) }
+        if let client = DesktopProfile.freeRDPClient() {
+            if profile.user.isEmpty {
+                show(ManagerError("Укажите пользователя в RDP-профиле, чтобы подключиться через FreeRDP."))
+                return
+            }
+            if password == nil {
+                guard let answer = askDesktopPassword(profile) else { return }
+                password = answer.password
+                if answer.remember, !answer.password.isEmpty {
+                    do { try Passwords.set(answer.password, for: profile.keychainAccount) } catch { show(error) }
+                }
+            }
+            launchFreeRDP(client, profile: profile, password: password)
+            return
+        }
+        openInWindowsApp(profile, password: password)
+    }
+
+    private func askDesktopPassword(_ profile: DesktopProfile) -> (password: String, remember: Bool)? {
+        let alert = NSAlert()
+        alert.messageText = "Вход: " + profile.name
+        alert.informativeText = profile.account + " · " + profile.address
+        let field = NSSecureTextField(frame: NSRect(x: 0, y: 28, width: 280, height: 24))
+        field.placeholderString = "Пароль"
+        let remember = NSButton(checkboxWithTitle: "Сохранить в Связке ключей", target: nil, action: nil)
+        remember.frame = NSRect(x: 0, y: 0, width: 280, height: 20)
+        let container = NSView(frame: NSRect(x: 0, y: 0, width: 280, height: 54))
+        container.addSubview(field)
+        container.addSubview(remember)
+        alert.accessoryView = container
+        alert.addButton(withTitle: "Подключиться")
+        alert.addButton(withTitle: "Отмена")
+        alert.window.initialFirstResponder = field
+        guard alert.runModal() == .alertFirstButtonReturn else { return nil }
+        return (field.stringValue, remember.state == .on)
+    }
+
+    private func launchFreeRDP(_ client: URL, profile: DesktopProfile, password: String?) {
+        do {
+            let args = try profile.freeRDPArguments(password: password)
+            let process = Process()
+            process.executableURL = client
+            var environment = ProcessInfo.processInfo.environment
+            if password != nil, DesktopProfile.freeRDPMajor(client) >= 3 {
+                // FreeRDP 3 reads every argument from the environment, so the password never appears in argv.
+                environment[DesktopProfile.argumentsVariable] = args.joined(separator: "\n")
+                process.arguments = ["/args-from:env:" + DesktopProfile.argumentsVariable]
+            } else {
+                // FreeRDP 2 overwrites /p: in its argv right after parsing.
+                process.arguments = args
+            }
+            process.environment = environment
+            process.standardInput = FileHandle.nullDevice
+            let output = Pipe()
+            process.standardOutput = output
+            process.standardError = output
+            let log = OutputTail()
+            output.fileHandleForReading.readabilityHandler = { handle in log.append(handle.availableData) }
+            process.terminationHandler = { [weak self] finished in
+                output.fileHandleForReading.readabilityHandler = nil
+                let status = finished.terminationStatus
+                // 0 is a normal close; FreeRDP uses 1-3 and 12 for user or server initiated disconnects.
+                guard ![0, 1, 2, 3, 12].contains(status) else { return }
+                let lines = log.text.split(separator: "\n").suffix(6).joined(separator: "\n")
+                DispatchQueue.main.async {
+                    self?.notice = Notice(title: "FreeRDP: подключение к «\(profile.name)» прервано",
+                                          text: "Код \(status).\n" + lines)
+                }
+            }
+            try process.run()
+        } catch { show(error) }
+    }
+
+    private func openInWindowsApp(_ profile: DesktopProfile, password: String?) {
         let files = FileManager.default
         let directory = files.temporaryDirectory.appendingPathComponent("SSHManager-\(UUID().uuidString)", isDirectory: true)
         let url = directory.appendingPathComponent("connection.rdp")
@@ -264,7 +363,18 @@ final class Manager: ObservableObject {
             guard let client else { throw ManagerError("Установите Microsoft Windows App для подключения по RDP.") }
             workspace.open([url], withApplicationAt: client, configuration: NSWorkspace.OpenConfiguration()) { [weak self] _, error in
                 DispatchQueue.main.async {
-                    if let error { self?.show(error) }
+                    if let error { self?.show(error); return }
+                    guard let password, !password.isEmpty else { return }
+                    // Windows App ignores passwords in .rdp files: offer the saved one through the clipboard for a minute.
+                    let board = NSPasteboard.general
+                    board.clearContents()
+                    board.setString(password, forType: .string)
+                    let change = board.changeCount
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 60) {
+                        if board.changeCount == change { board.clearContents() }
+                    }
+                    self?.notice = Notice(title: "Пароль скопирован",
+                                          text: "Windows App не принимает пароль из файла. Вставьте его (⌘V) при запросе входа для \(profile.account). Буфер обмена очистится через минуту. Чтобы пароль передавался автоматически, установите FreeRDP: brew install freerdp")
                 }
                 DispatchQueue.global().asyncAfter(deadline: .now() + 120) {
                     try? files.removeItem(at: url)

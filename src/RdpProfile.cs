@@ -5,6 +5,7 @@ using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Net;
+using System.Runtime.InteropServices;
 using System.Text;
 using System.Xml.Linq;
 
@@ -142,12 +143,17 @@ namespace SshManager
                 groupId, width, height, Number("redirectclipboard", 0) == 1, Number("screen mode id", 1) == 2);
         }
 
-        public void Export(string file)
+        public void Export(string file) => Export(file, null);
+
+        private void Export(string file, string password)
         {
             var lines = new List<string> { "full address:s:" + Address, "username:s:" + Account,
                 "screen mode id:i:" + (FullScreen ? 2 : 1), "redirectclipboard:i:" + (Clipboard ? 1 : 0),
                 "enablecredsspsupport:i:1", "authentication level:i:2", "drivestoredirect:s:", "redirectprinters:i:0" };
             if (Width != 0) lines.AddRange(new[] { "desktopwidth:i:" + Width, "desktopheight:i:" + Height });
+            else lines.Add("dynamic resolution:i:1");
+            if (!String.IsNullOrEmpty(password))
+                lines.AddRange(new[] { "password 51:b:" + ProtectPassword(password), "prompt for credentials:i:0" });
             File.WriteAllLines(file, lines, Encoding.Unicode);
         }
 
@@ -156,7 +162,7 @@ namespace SshManager
             string file = Path.Combine(Path.GetTempPath(), "SSHManager-" + Guid.NewGuid().ToString("N") + ".rdp");
             try
             {
-                Export(file);
+                Export(file, RdpPasswords.Read(this));
                 var process = Process.Start(new ProcessStartInfo(Path.Combine(Environment.SystemDirectory, "mstsc.exe"), Terminal.Quote(file))
                 { UseShellExecute = false });
                 process.Exited += (sender, args) => { DeleteTemporary(file); process.Dispose(); };
@@ -164,6 +170,39 @@ namespace SshManager
             }
             catch { DeleteTemporary(file); throw; }
         }
+
+        // mstsc accepts a DPAPI blob (current user) of the UTF-16 password in "password 51:b:".
+        private static string ProtectPassword(string password)
+        {
+            var bytes = Encoding.Unicode.GetBytes(password);
+            var input = GCHandle.Alloc(bytes, GCHandleType.Pinned);
+            var output = new DataBlob();
+            try
+            {
+                var data = new DataBlob { Size = bytes.Length, Data = input.AddrOfPinnedObject() };
+                if (!CryptProtectData(ref data, "psw", IntPtr.Zero, IntPtr.Zero, IntPtr.Zero, 1, ref output))
+                    throw new IOException("Не удалось подготовить пароль для клиента Windows.", new System.ComponentModel.Win32Exception());
+                var result = new byte[output.Size];
+                Marshal.Copy(output.Data, result, 0, result.Length);
+                return BitConverter.ToString(result).Replace("-", "");
+            }
+            finally
+            {
+                Array.Clear(bytes, 0, bytes.Length);
+                input.Free();
+                if (output.Data != IntPtr.Zero) LocalFree(output.Data);
+            }
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct DataBlob { public int Size; public IntPtr Data; }
+
+        [DllImport("crypt32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        private static extern bool CryptProtectData(ref DataBlob data, string description, IntPtr entropy, IntPtr reserved,
+            IntPtr prompt, int flags, ref DataBlob output);
+
+        [DllImport("kernel32.dll")]
+        private static extern IntPtr LocalFree(IntPtr memory);
 
         private static void DeleteTemporary(string file)
         {

@@ -54,6 +54,26 @@ enum ServerSort: String, CaseIterable, Identifiable {
     }
 }
 
+/// Keeps the last lines a background client printed, for the error shown when it exits.
+final class OutputTail: @unchecked Sendable {
+    private let lock = NSLock()
+    private var data = Data()
+
+    func append(_ chunk: Data) {
+        guard !chunk.isEmpty else { return }
+        lock.lock()
+        data.append(chunk)
+        if data.count > 16_384 { data.removeFirst(data.count - 16_384) }
+        lock.unlock()
+    }
+
+    var text: String {
+        lock.lock()
+        defer { lock.unlock() }
+        return String(decoding: data, as: UTF8.self)
+    }
+}
+
 struct DesktopProfile: Identifiable {
     var id = UUID().uuidString.lowercased().replacingOccurrences(of: "-", with: "")
     var name = ""
@@ -68,6 +88,52 @@ struct DesktopProfile: Identifiable {
     var fullScreen = false
 
     var address: String { "\(host.contains(":") ? "[\(host)]" : host):\(port)" }
+    /// Keychain account of this profile. Profiles on the same IP but another port keep separate passwords.
+    var keychainAccount: String { "rdp\n" + id }
+
+    static let argumentsVariable = "SSH_MANAGER_RDP_ARGS"
+
+    static func freeRDPClient() -> URL? {
+        let names = ["sdl-freerdp3", "sdl-freerdp", "xfreerdp3", "xfreerdp"]
+        let directories = ["/opt/homebrew/bin", "/usr/local/bin", "/opt/local/bin"]
+        for name in names {
+            for directory in directories {
+                let path = directory + "/" + name
+                if FileManager.default.isExecutableFile(atPath: path) { return URL(fileURLWithPath: path) }
+            }
+        }
+        return nil
+    }
+
+    static func freeRDPMajor(_ client: URL) -> Int {
+        if client.lastPathComponent.hasSuffix("3") { return 3 }
+        let process = Process()
+        let output = Pipe()
+        process.executableURL = client
+        process.arguments = ["/version"]
+        process.standardOutput = output
+        process.standardError = FileHandle.nullDevice
+        guard (try? process.run()) != nil else { return 2 }
+        let data = output.fileHandleForReading.readDataToEndOfFile()
+        process.waitUntilExit()
+        let text = String(decoding: data, as: UTF8.self)
+        guard let range = text.range(of: #"version\s+(\d+)\."#, options: .regularExpression) else { return 2 }
+        return text[range].contains("version 3") ? 3 : 2
+    }
+
+    /// FreeRDP arguments with the profile's user, domain and password passed explicitly.
+    func freeRDPArguments(password: String?) throws -> [String] {
+        if let password, password.contains(where: { $0 == "\0" || $0.isNewline }) {
+            throw ManagerError("Пароль RDP должен быть одной строкой.")
+        }
+        var args = ["/v:" + address, "/t:" + name, clipboard ? "+clipboard" : "-clipboard", "+auto-reconnect", "/cert:tofu"]
+        if !user.isEmpty { args.append("/u:" + user) }
+        if !domain.isEmpty { args.append("/d:" + domain) }
+        if let password, !password.isEmpty { args.append("/p:" + password) }
+        if width != 0 { args.append("/size:\(width)x\(height)") } else { args += ["/size:80%", "/dynamic-resolution"] }
+        if fullScreen { args.append("/f") }
+        return args
+    }
     var account: String { domain.isEmpty || user.isEmpty ? user : "\(domain)\\\(user)" }
 
     func validate() throws {
@@ -158,6 +224,7 @@ struct DesktopProfile: Identifiable {
                      "redirectclipboard:i:\(clipboard ? 1 : 0)", "enablecredsspsupport:i:1", "authentication level:i:2",
                      "drivestoredirect:s:", "redirectprinters:i:0"]
         if width != 0 { lines.append(contentsOf: ["desktopwidth:i:\(width)", "desktopheight:i:\(height)"]) }
+        else { lines.append("dynamic resolution:i:1") }
         let text = lines.joined(separator: "\r\n") + "\r\n"
         return Data([0xff, 0xfe]) + Data(text.utf16.flatMap { [UInt8(truncatingIfNeeded: $0), UInt8($0 >> 8)] })
     }
