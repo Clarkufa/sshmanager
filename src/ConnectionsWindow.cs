@@ -4,6 +4,8 @@ using System.Drawing;
 using System.Drawing.Drawing2D;
 using System.IO;
 using System.Linq;
+using System.Reflection;
+using System.Runtime.InteropServices;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Windows.Forms;
@@ -39,7 +41,11 @@ namespace SshManager
         private readonly Label source;
         private readonly Label status;
         private readonly Label empty;
+        private readonly Label catalogTitle;
+        private readonly SurfaceButton sshTab, rdpTab;
+        private readonly string settingsPath;
         private readonly ContextMenuStrip serverMenu;
+        private ContextMenuStrip desktopMenu;
         private readonly ContextMenuStrip tabMenu;
         private readonly ToolStripMenuItem tabColorMenu;
         private readonly ToolStripMenuItem moveTabLeft;
@@ -51,10 +57,12 @@ namespace SshManager
         private ConfigDocument document;
         private string activeGroupId;
         private SessionsPage sessions;
+        private bool showRdp;
 
         public ConnectionsWindow(string sshDirectory, string groupsPath)
         {
             this.sshDirectory = sshDirectory;
+            settingsPath = groupsPath;
             string path = Path.Combine(sshDirectory, "config");
             file = new ConfigFile(path);
             groupFile = new GroupFile(groupsPath);
@@ -80,16 +88,17 @@ namespace SshManager
             frame.Controls.Add(pages, 0, 0);
             Controls.Add(frame);
 
-            var layout = new TableLayoutPanel { Dock = DockStyle.Fill, Padding = new Padding(24, 15, 24, 0), ColumnCount = 1, RowCount = 4 };
+            var layout = new TableLayoutPanel { Dock = DockStyle.Fill, Padding = new Padding(24, 15, 24, 0), ColumnCount = 1, RowCount = 5 };
             catalog = layout;
             layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 62));
+            layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 39));
             layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 49));
             layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 46));
             layout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
             pages.Controls.Add(layout);
 
             add = Theme.Button("Добавить сервер", 158, true, Glyph.Plus);
-            add.Click += (sender, args) => EditConnection(null);
+            add.Click += (sender, args) => { if (showRdp) EditDesktop(null); else EditConnection(null); };
             var header = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 5, Margin = new Padding(0, 0, 0, 7) };
             header.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 51));
             header.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
@@ -97,7 +106,8 @@ namespace SshManager
             header.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
             header.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
             header.Controls.Add(new PictureBox { Image = Theme.AppMark(), SizeMode = PictureBoxSizeMode.Zoom, Size = new Size(42, 42), Anchor = AnchorStyles.Left, Margin = new Padding(0) }, 0, 0);
-            header.Controls.Add(new Label { Text = "SSH-подключения", Font = Theme.Title, AutoSize = true, Anchor = AnchorStyles.Left, Margin = new Padding(0) }, 1, 0);
+            catalogTitle = new Label { Text = "SSH-подключения", Font = Theme.Title, AutoSize = true, Anchor = AnchorStyles.Left, Margin = new Padding(0) };
+            header.Controls.Add(catalogTitle, 1, 0);
             add.Anchor = AnchorStyles.Right;
             sessionsButton = Theme.Button("Сеансы", 116, glyph: Glyph.Terminal);
             sessionsButton.Anchor = AnchorStyles.Right;
@@ -111,23 +121,34 @@ namespace SshManager
             header.Controls.Add(add, 4, 0);
             layout.Controls.Add(header, 0, 0);
 
+            var protocols = new FlowLayoutPanel { Dock = DockStyle.Fill, WrapContents = false, Margin = Padding.Empty };
+            sshTab = Theme.Button("SSH", 86, glyph: Glyph.Terminal);
+            rdpTab = Theme.Button("RDP", 86, glyph: Glyph.Server);
+            sshTab.AccessibleRole = rdpTab.AccessibleRole = AccessibleRole.PageTab;
+            sshTab.Style = ButtonStyle.SelectedTab;
+            rdpTab.Style = ButtonStyle.Tab;
+            sshTab.Click += (sender, args) => SelectProtocol(false);
+            rdpTab.Click += (sender, args) => SelectProtocol(true);
+            protocols.Controls.AddRange(new Control[] { sshTab, rdpTab });
+            layout.Controls.Add(protocols, 0, 1);
+
             var tabBar = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2, Margin = new Padding(0, 0, 0, 1) };
             tabBar.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
             tabBar.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
             tabs = new TabStrip { Dock = DockStyle.Fill, Margin = new Padding(0) };
             tabs.ReorderRequested += (id, anchorId, before) =>
-                UpdateGroups(items => items.PlaceTab(id, anchorId, before), activeGroupId, Selected?.Alias);
+                UpdateGroups(items => items.PlaceTab(id, anchorId, before), activeGroupId, SelectedKey);
             tabBar.Controls.Add(tabs, 0, 0);
             var newTab = Theme.Button("Новая вкладка", 140, glyph: Glyph.Plus, quiet: true);
             newTab.Height = 31;
             newTab.Click += (sender, args) => EditGroup(null);
             tabBar.Controls.Add(newTab, 1, 0);
-            layout.Controls.Add(tabBar, 0, 1);
+            layout.Controls.Add(tabBar, 0, 2);
 
             var tools = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2, Margin = new Padding(0) };
             tools.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
             tools.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
-            layout.Controls.Add(tools, 0, 2);
+            layout.Controls.Add(tools, 0, 3);
 
             var filter = new FlowLayoutPanel { Dock = DockStyle.Fill, WrapContents = false, Margin = new Padding(0) };
             var serverSearch = new ServerSearch();
@@ -145,25 +166,29 @@ namespace SshManager
             backupMenu.Items.Add(Theme.MenuItem("Экспорт архива…", Glyph.Copy, async (sender, args) => await RunBackup(backup.Export)));
             backupMenu.Items.Add(Theme.MenuItem("Импорт архива…", Glyph.Folder, async (sender, args) => await RunBackup(backup.Import)));
             backupButton.Click += (sender, args) => backupMenu.Show(backupButton, new Point(0, backupButton.Height));
-            edit.Click += (sender, args) => { if (Selected != null) EditConnection(Selected); };
-            delete.Click += (sender, args) => DeleteConnection(Selected);
+            edit.Click += (sender, args) => EditRow(grid.CurrentRow?.Tag);
+            delete.Click += (sender, args) => { if (showRdp) DeleteDesktop(SelectedDesktop); else DeleteConnection(Selected); };
             refresh.Click += (sender, args) => Reload();
             actions.Controls.AddRange(new Control[] { backupButton, refresh, edit, delete });
             tools.Controls.Add(actions, 1, 0);
 
             var list = new Panel { Dock = DockStyle.Fill, Margin = new Padding(0), Padding = new Padding(1), BackColor = Theme.Line };
-            layout.Controls.Add(list, 0, 3);
+            layout.Controls.Add(list, 0, 4);
             grid = MakeGrid();
             grid.SelectionChanged += (sender, args) => UpdateActions();
             grid.CellMouseClick += (sender, args) =>
             {
                 if (args.Button == MouseButtons.Left && args.RowIndex >= 0 && args.ColumnIndex >= 0)
-                    RunGridAction(grid.Columns[args.ColumnIndex], (Connection)grid.Rows[args.RowIndex].Tag);
+                    RunGridAction(grid.Columns[args.ColumnIndex], grid.Rows[args.RowIndex].Tag);
             };
             grid.CellDoubleClick += (sender, args) =>
             {
                 if (args.RowIndex >= 0 && args.ColumnIndex >= 0 && !(grid.Columns[args.ColumnIndex] is DataGridViewButtonColumn))
-                    EditConnection((Connection)grid.Rows[args.RowIndex].Tag);
+                    EditRow(grid.Rows[args.RowIndex].Tag);
+            };
+            grid.ColumnHeaderMouseClick += (sender, args) =>
+            {
+                if (args.Button == MouseButtons.Left && args.ColumnIndex >= 0 && args.ColumnIndex <= 1) SortColumn(args.ColumnIndex);
             };
             grid.CellPainting += PaintGridCell;
             grid.MouseUp += (sender, args) =>
@@ -174,9 +199,9 @@ namespace SshManager
             };
             grid.KeyDown += (sender, args) =>
             {
-                if (Selected == null) return;
+                if (grid.CurrentRow?.Tag == null) return;
                 if ((args.KeyCode == Keys.Enter || args.KeyCode == Keys.Space) &&
-                    RunGridAction(grid.CurrentCell.OwningColumn, Selected))
+                    RunGridAction(grid.CurrentCell.OwningColumn, grid.CurrentRow.Tag))
                 {
                     args.Handled = args.SuppressKeyPress = true;
                     return;
@@ -212,7 +237,7 @@ namespace SshManager
             {
                 string id = activeGroupId;
                 if (groups.StartupTabId != id)
-                    UpdateGroups(items => items.SetStartupTab(id), id, Selected?.Alias);
+                    UpdateGroups(items => items.SetStartupTab(id), id, SelectedKey);
             });
             tabMenu.Items.AddRange(new ToolStripItem[]
             {
@@ -254,7 +279,33 @@ namespace SshManager
             Shown += async (sender, args) => await CheckUpdates(interactive: false);
         }
 
-        private Connection Selected { get { return grid.CurrentRow == null ? null : (Connection)grid.CurrentRow.Tag; } }
+        private Connection Selected => grid.CurrentRow?.Tag as Connection;
+        private RdpProfile SelectedDesktop => grid.CurrentRow?.Tag as RdpProfile;
+        private string SelectedKey => SelectedDesktop?.Id ?? Selected?.Alias;
+
+        private void SelectProtocol(bool rdp)
+        {
+            if (showRdp == rdp) return;
+            showRdp = rdp;
+            sshTab.Style = rdp ? ButtonStyle.Tab : ButtonStyle.SelectedTab;
+            rdpTab.Style = rdp ? ButtonStyle.SelectedTab : ButtonStyle.Tab;
+            catalogTitle.Text = rdp ? "RDP-подключения" : "SSH-подключения";
+            grid.Columns[0].HeaderText = rdp ? "Название" : "Псевдоним";
+            grid.Columns[TerminalColumn].HeaderText = rdp ? "Рабочий стол" : "Терминал";
+            grid.Columns[FilesColumn].Visible = !rdp;
+            source.Text = rdp ? settingsPath : Path.Combine(sshDirectory, "config");
+            search.Clear();
+            RefreshList(null);
+        }
+
+        private void SortColumn(int index)
+        {
+            var current = groups.Sort(activeGroupId, showRdp);
+            var ascending = index == 0 ? ServerSort.Name : ServerSort.Address;
+            var descending = index == 0 ? ServerSort.NameDescending : ServerSort.AddressDescending;
+            var next = current == ascending ? descending : current == descending ? ServerSort.Original : ascending;
+            UpdateGroups(items => items.SetSort(activeGroupId, showRdp, next), activeGroupId, SelectedKey);
+        }
 
         private async Task CheckUpdates(bool interactive)
         {
@@ -342,7 +393,7 @@ namespace SshManager
 
         private void Reload(bool openStartupTab = false)
         {
-            var selected = Selected;
+            var selected = SelectedKey;
             var groupId = activeGroupId;
             try { document = file.Load(); }
             catch (Exception ex) when (Theme.IsFileError(ex))
@@ -354,7 +405,7 @@ namespace SshManager
             catch (Exception ex) when (Theme.IsFileError(ex)) { Theme.ShowError(this, ex); }
             if (Theme.IsDark != groups.DarkTheme) ApplySelectedTheme();
             RefreshTabs(openStartupTab ? groups.StartupTabId : groupId);
-            RefreshList(selected == null ? null : selected.Alias);
+            RefreshList(selected);
         }
 
         private void ToggleTheme()
@@ -376,12 +427,18 @@ namespace SshManager
         private void RefreshList(string selectAlias)
         {
             grid.Rows.Clear();
+            var order = groups.Sort(activeGroupId, showRdp);
+            grid.Columns[0].HeaderCell.SortGlyphDirection = order == ServerSort.Name ? SortOrder.Ascending :
+                order == ServerSort.NameDescending ? SortOrder.Descending : SortOrder.None;
+            grid.Columns[1].HeaderCell.SortGlyphDirection = order == ServerSort.Address ? SortOrder.Ascending :
+                order == ServerSort.AddressDescending ? SortOrder.Descending : SortOrder.None;
             var activeGroup = groups.Find(activeGroupId);
+            if (showRdp) { RefreshDesktops(selectAlias, order, activeGroup); return; }
             var connections = document == null ? new Connection[0] : document.Connections()
                 .Where(connection => activeGroup == null || activeGroup.Aliases.Contains(connection.Alias)).ToArray();
             string query = search.Text.Trim();
             DataGridViewRow toSelect = null;
-            foreach (var connection in connections)
+            foreach (var connection in ServerOrder.Apply(connections, order, item => item.Alias, item => HostOrAlias(item)))
             {
                 var host = connection.Get("hostname");
                 var user = connection.Get("user");
@@ -390,7 +447,7 @@ namespace SshManager
                 if (query.Length > 0 && !new[] { connection.Alias, host, user, groupName }.Any(text => text.IndexOf(query, StringComparison.OrdinalIgnoreCase) >= 0)) continue;
                 var port = connection.Get("port");
                 var row = grid.Rows[grid.Rows.Add(connection.Alias, Dash(host), Dash(user), Dash(port), Dash(groupName),
-                    "Файлы", SessionAction(connection))];
+                    "Файлы", SessionAction(connection.Alias))];
                 row.Tag = connection;
                 if (String.Equals(selectAlias, connection.Alias, StringComparison.Ordinal)) toSelect = row;
             }
@@ -400,16 +457,100 @@ namespace SshManager
             else if (connections.Length == 0) empty.Text = activeGroup == null
                 ? "Добавьте сервер, чтобы создать первое подключение."
                 : "Добавьте сервер или перенесите сюда подключение из «Все серверы».";
+            UpdateListStatus(connections.Length);
+        }
+
+        private void RefreshDesktops(string selected, ServerSort order, ServerGroup activeGroup)
+        {
+            var desktops = groups.Desktops.Where(profile => activeGroup == null || profile.GroupId == activeGroup.Id).ToArray();
+            var query = search.Text.Trim();
+            foreach (var profile in ServerOrder.Apply(desktops, order, item => item.Name, item => item.Host))
+            {
+                var groupName = groups.Find(profile.GroupId)?.Name ?? "";
+                if (!new[] { profile.Name, profile.Address, profile.Account, groupName }
+                    .Any(value => value.IndexOf(query, StringComparison.OrdinalIgnoreCase) >= 0)) continue;
+                var row = grid.Rows[grid.Rows.Add(profile.Name, profile.Host, Dash(profile.Account), profile.Port, Dash(groupName),
+                    "", SessionAction(SessionTarget.RdpKey(profile)))];
+                row.Tag = profile;
+                if (profile.Id == selected) grid.CurrentCell = row.Cells[0];
+            }
+            empty.Text = desktops.Length == 0 ? "Добавьте RDP-подключение или импортируйте профиль .rdp." : "По вашему запросу ничего не найдено.";
+            UpdateListStatus(desktops.Length);
+        }
+
+        private void UpdateListStatus(int total)
+        {
             empty.Visible = grid.Rows.Count == 0;
-            status.Text = grid.Rows.Count == connections.Length ? "Подключений: " + connections.Length : "Найдено: " + grid.Rows.Count + " из " + connections.Length;
+            status.Text = grid.Rows.Count == total ? "Подключений: " + total : "Найдено: " + grid.Rows.Count + " из " + total;
             UpdateActions();
         }
 
         private void UpdateActions()
         {
-            add.Enabled = document != null;
-            edit.Enabled = Selected != null;
-            delete.Enabled = Selected != null;
+            add.Enabled = showRdp || document != null;
+            edit.Enabled = delete.Enabled = grid.CurrentRow?.Tag != null;
+        }
+
+        private static string HostOrAlias(Connection connection)
+        {
+            string host = connection.Get("hostname");
+            return host.Length == 0 ? connection.Alias : host;
+        }
+
+        private void EditRow(object entry)
+        {
+            if (entry is Connection connection) EditConnection(connection);
+            else if (entry is RdpProfile profile) EditDesktop(profile);
+        }
+
+        private void EditDesktop(RdpProfile profile)
+        {
+            string selected = null;
+            bool import;
+            using (var dialog = new RdpDialog(profile, activeGroupId, replacement =>
+            {
+                groups = groupFile.Update(items => items.SaveDesktop(replacement, profile != null));
+                selected = replacement.Id;
+            }))
+            {
+                dialog.ShowDialog(this);
+                import = dialog.ImportRequested;
+            }
+            if (import) { TransferDesktop(null); return; }
+            if (selected == null) return;
+            search.Clear();
+            RefreshList(selected);
+        }
+
+        private void DeleteDesktop(RdpProfile profile)
+        {
+            if (profile == null || MessageBox.Show(this, "Удалить RDP-подключение «" + profile.Name + "»?",
+                Text, MessageBoxButtons.YesNo, MessageBoxIcon.Warning, MessageBoxDefaultButton.Button2) != DialogResult.Yes) return;
+            UpdateGroups(items => items.Desktops.RemoveAll(item => item.Id == profile.Id), activeGroupId);
+        }
+
+        private void TransferDesktop(RdpProfile profile)
+        {
+            bool import = profile == null;
+            using (FileDialog dialog = import ? (FileDialog)new OpenFileDialog() : new SaveFileDialog { FileName = "connection.rdp" })
+            {
+                dialog.Filter = "Профиль удалённого рабочего стола (*.rdp)|*.rdp";
+                dialog.DefaultExt = "rdp";
+                if (dialog.ShowDialog(this) != DialogResult.OK) return;
+                try
+                {
+                    if (!import) profile.Export(dialog.FileName);
+                    else
+                    {
+                        var imported = RdpProfile.Import(dialog.FileName, activeGroupId);
+                        groups = groupFile.Update(items => items.SaveDesktop(imported, false));
+                        search.Clear();
+                        RefreshList(imported.Id);
+                    }
+                }
+                catch (Exception error) when (Theme.IsFileError(error) || error is ArgumentException || error is InvalidOperationException)
+                { Theme.ShowError(this, error); }
+            }
         }
 
         private void EditConnection(Connection connection)
@@ -554,7 +695,7 @@ namespace SshManager
 
         private void ShowTabMenu(Control tab, string id, Point location)
         {
-            string alias = Selected?.Alias;
+            string alias = SelectedKey;
             SelectGroup(id);
             RefreshList(alias);
             var group = groups.Find(id);
@@ -576,7 +717,7 @@ namespace SshManager
         private void ShiftActiveTab(int offset)
         {
             string id = activeGroupId;
-            UpdateGroups(items => items.ShiftTab(id, offset), id, Selected?.Alias);
+            UpdateGroups(items => items.ShiftTab(id, offset), id, SelectedKey);
         }
 
         private void AddColorMenuItem(TabColor color)
@@ -621,6 +762,7 @@ namespace SshManager
         private void ShowServerMenu(int index, Point point)
         {
             grid.CurrentCell = grid.Rows[index].Cells[0];
+            if (SelectedDesktop is RdpProfile desktop) { ShowDesktopMenu(desktop, point); return; }
             menuConnection = Selected;
             if (menuConnection == null) return;
             var connection = menuConnection;
@@ -646,6 +788,40 @@ namespace SshManager
                 }
             }));
             serverMenu.Show(grid, point);
+        }
+
+        private void ShowDesktopMenu(RdpProfile profile, Point point)
+        {
+            desktopMenu?.Dispose();
+            desktopMenu = Theme.Menu();
+            var move = Theme.MenuItem("Переместить во вкладку", Glyph.Move);
+            AddDestination(Groups.UngroupedName, null);
+            foreach (var group in groups.Items) AddDestination(group.Name, group.Id);
+            desktopMenu.Items.AddRange(new ToolStripItem[]
+            {
+                Theme.MenuItem("Подключиться", Glyph.Server, (sender, args) => ConnectDesktop(profile)),
+                Theme.MenuItem("Новый сеанс", Glyph.Plus, (sender, args) => ConnectDesktop(profile, true)),
+                Theme.MenuItem("Открыть в клиенте Windows", Glyph.Server, (sender, args) =>
+                {
+                    try { profile.OpenExternal(); }
+                    catch (Exception error) when (Theme.IsFileError(error) || error is System.ComponentModel.Win32Exception)
+                    { Theme.ShowError(this, error); }
+                }),
+                Theme.MenuItem("Изменить", Glyph.Edit, (sender, args) => EditDesktop(profile)),
+                move,
+                Theme.MenuItem("Экспорт .rdp…", Glyph.Copy, (sender, args) => TransferDesktop(profile)),
+                new ToolStripSeparator(),
+                Theme.MenuItem("Удалить", Glyph.Delete, (sender, args) => DeleteDesktop(profile))
+            });
+            desktopMenu.Show(grid, point);
+
+            void AddDestination(string name, string id)
+            {
+                var item = Theme.MenuItem(SafeMenuText(name), Glyph.Folder, (sender, args) =>
+                    UpdateGroups(items => items.MoveDesktop(profile.Id, id), activeGroupId, profile.Id));
+                item.Checked = profile.GroupId == id;
+                move.DropDownItems.Add(item);
+            }
         }
 
         private void AddMoveItem(Connection connection, string name, string groupId, string current)
@@ -707,10 +883,29 @@ namespace SshManager
             catch (IOException ex) { Theme.ShowError(this, ex); }
         }
 
-        private bool RunGridAction(DataGridViewColumn column, Connection connection)
+        private void ConnectDesktop(RdpProfile profile, bool forceNew = false)
         {
-            if (column.Name == FilesColumn) OpenFiles(connection);
-            else if (column.Name == TerminalColumn) Connect(connection);
+            bool fromCatalog = catalog.Visible;
+            try
+            {
+                var workspace = SessionWorkspace();
+                ShowSessions();
+                workspace.Open(new SessionTarget(profile, groups.Find(profile.GroupId)), forceNew);
+            }
+            catch (Exception error) when (error is ExternalException || error is TargetInvocationException ||
+                error is InvalidOperationException || error is ArgumentException)
+            {
+                if (fromCatalog) ShowServers();
+                Theme.ShowError(this, new IOException("Не удалось открыть встроенный RDP-сеанс. Попробуйте «Открыть в клиенте Windows» в меню подключения.\n" +
+                    (error.InnerException ?? error).Message, error));
+            }
+        }
+
+        private bool RunGridAction(DataGridViewColumn column, object entry)
+        {
+            if (column.Name == FilesColumn && entry is Connection fileSource) OpenFiles(fileSource);
+            else if (column.Name == TerminalColumn && entry is Connection connection) Connect(connection);
+            else if (column.Name == TerminalColumn && entry is RdpProfile profile) ConnectDesktop(profile);
             else return false;
             return true;
         }
@@ -754,8 +949,12 @@ namespace SshManager
             sessions.PickServer += () =>
             {
                 var connections = document == null ? new Connection[0] : document.Connections().ToArray();
-                using (var picker = new ServerPickerDialog(connections, groups.ForAlias))
-                    if (picker.ShowDialog(this) == DialogResult.OK) Connect(picker.SelectedConnection, forceNew: true);
+                using (var picker = new ServerPickerDialog(connections, groups, showRdp))
+                {
+                    if (picker.ShowDialog(this) != DialogResult.OK) return;
+                    if (picker.SelectedProfile != null) ConnectDesktop(picker.SelectedProfile, forceNew: true);
+                    else Connect(picker.SelectedConnection, forceNew: true);
+                }
             };
             sessions.ShowServers += ShowServers;
             sessions.Changed += () =>
@@ -764,7 +963,10 @@ namespace SshManager
                 sessionsButton.Text = open == 0 ? "Сеансы" : "Сеансы · " + open;
                 sessionsButton.AccessibleName = sessionsButton.Text;
                 foreach (DataGridViewRow row in grid.Rows)
-                    if (row.Tag is Connection) row.Cells[TerminalColumn].Value = SessionAction((Connection)row.Tag);
+                {
+                    if (row.Tag is Connection connection) row.Cells[TerminalColumn].Value = SessionAction(connection.Alias);
+                    else if (row.Tag is RdpProfile profile) row.Cells[TerminalColumn].Value = SessionAction(SessionTarget.RdpKey(profile));
+                }
             };
             pages.Controls.Add(sessions);
             return sessions;
@@ -790,9 +992,9 @@ namespace SshManager
             grid.Focus();
         }
 
-        private string SessionAction(Connection connection)
+        private string SessionAction(string key)
         {
-            int count = sessions == null ? 0 : sessions.CountOpen(connection.Alias);
+            int count = sessions == null ? 0 : sessions.CountOpen(key);
             return count == 0 ? "Подключиться" : "К сеансу · " + count;
         }
 
@@ -828,6 +1030,11 @@ namespace SshManager
             };
             list.Columns.Add(MakeColumn("Псевдоним", 30, 103));
             list.Columns.Add(MakeColumn("Адрес", 34, 105));
+            for (int column = 0; column <= 1; column++)
+            {
+                list.Columns[column].SortMode = DataGridViewColumnSortMode.Programmatic;
+                list.Columns[column].HeaderCell.ToolTipText = "Нажмите для сортировки";
+            }
             list.Columns.Add(MakeColumn("Пользователь", 23, 103));
             list.Columns.Add(new DataGridViewTextBoxColumn { Name = PortColumn, HeaderText = "Порт", Width = 64, SortMode = DataGridViewColumnSortMode.NotSortable });
             list.Columns.Add(MakeColumn("Вкладка", 22, 79));
@@ -924,6 +1131,7 @@ namespace SshManager
             {
                 updateLifetime.Cancel();
                 if (serverMenu != null) serverMenu.Dispose();
+                desktopMenu?.Dispose();
                 if (backupMenu != null) backupMenu.Dispose();
                 if (tabMenu != null) tabMenu.Dispose();
             }

@@ -1,7 +1,7 @@
 using System.Reflection;
 
 [assembly: AssemblyTitle("SSH Manager")]
-[assembly: AssemblyDescription("Windows OpenSSH connection manager")]
+[assembly: AssemblyDescription("Windows SSH and RDP connection manager")]
 [assembly: AssemblyProduct("SSH Manager")]
-[assembly: AssemblyVersion("1.8.11.0")]
-[assembly: AssemblyFileVersion("1.8.11.0")]
+[assembly: AssemblyVersion("1.9.0.0")]
+[assembly: AssemblyFileVersion("1.9.0.0")]

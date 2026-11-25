@@ -13,6 +13,7 @@ namespace SshManager
         public readonly string Id;
         public string Name;
         public string ColorId;
+        public ServerSort SshSort, RdpSort;
         public readonly HashSet<string> Aliases = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
         public ServerGroup(string id, string name) { Id = id; Name = name; }
@@ -23,11 +24,50 @@ namespace SshManager
         public const string AllName = "Все серверы";
         public const string UngroupedName = "Без вкладки";
         public readonly List<ServerGroup> Items = new List<ServerGroup>();
+        public readonly List<RdpProfile> Desktops = new List<RdpProfile>();
+        public ServerSort SshSort, RdpSort;
         public string StartupTabId { get; private set; }
         public bool DarkTheme { get; set; }
 
         public ServerGroup Find(string id) { return Items.FirstOrDefault(group => group.Id == id); }
         public ServerGroup ForAlias(string alias) { return Items.FirstOrDefault(group => group.Aliases.Contains(alias)); }
+
+        public ServerSort Sort(string id, bool rdp)
+        {
+            var tab = Find(id);
+            return rdp ? tab?.RdpSort ?? RdpSort : tab?.SshSort ?? SshSort;
+        }
+
+        public void SetSort(string id, bool rdp, ServerSort sort)
+        {
+            if (id == null)
+            {
+                if (rdp) RdpSort = sort;
+                else SshSort = sort;
+            }
+            else
+            {
+                var tab = RequireTab(id);
+                if (rdp) tab.RdpSort = sort;
+                else tab.SshSort = sort;
+            }
+        }
+
+        public void SaveDesktop(RdpProfile profile, bool editing)
+        {
+            if (profile.GroupId != null) RequireTab(profile.GroupId);
+            int index = Desktops.FindIndex(item => item.Id == profile.Id);
+            if (index < 0 && editing) throw new InvalidOperationException("RDP-профиль уже удалён. Обновите список.");
+            if (index < 0) Desktops.Add(profile);
+            else Desktops[index] = profile;
+        }
+
+        public void MoveDesktop(string id, string groupId)
+        {
+            var profile = Desktops.FirstOrDefault(item => item.Id == id);
+            if (profile == null) throw new InvalidOperationException("RDP-профиль уже удалён. Обновите список.");
+            SaveDesktop(profile.InGroup(groupId), true);
+        }
 
         public void NameGroup(string id, string name)
         {
@@ -80,6 +120,8 @@ namespace SshManager
         public void RemoveTab(string id)
         {
             Items.RemoveAll(group => group.Id == id);
+            for (int i = 0; i < Desktops.Count; i++)
+                if (Desktops[i].GroupId == id) Desktops[i] = Desktops[i].InGroup(null);
             if (StartupTabId == id) StartupTabId = null;
         }
 
@@ -107,7 +149,7 @@ namespace SshManager
             }
             catch (FileNotFoundException) { return new Groups(); }
             catch (DirectoryNotFoundException) { return new Groups(); }
-            catch (Exception ex) when (ex is XmlException || ex is ArgumentException)
+            catch (Exception ex) when (ex is XmlException || ex is ArgumentException || ex is FormatException || ex is OverflowException)
             {
                 throw new IOException("Не удалось прочитать настройки вкладок. Проверьте файл «" + path + "».", ex);
             }
@@ -121,6 +163,8 @@ namespace SshManager
                 root = XDocument.Load(reader).Root;
             if (root == null || root.Name != "tabs") throw new XmlException("Ожидался файл настроек вкладок.");
             groups.DarkTheme = (string)root.Attribute("theme") == "dark";
+            groups.SshSort = ServerOrder.Parse((string)root.Attribute("sshSort"));
+            groups.RdpSort = ServerOrder.Parse((string)root.Attribute("rdpSort"));
             var known = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             foreach (var node in root.Elements("tab"))
             {
@@ -132,12 +176,21 @@ namespace SshManager
                 groups.NameGroup(id, name);
                 var group = groups.Find(id);
                 group.ColorId = (string)node.Attribute("color");
+                group.SshSort = ServerOrder.Parse((string)node.Attribute("sshSort"));
+                group.RdpSort = ServerOrder.Parse((string)node.Attribute("rdpSort"));
                 foreach (var host in node.Elements("host"))
                 {
                     var alias = (string)host.Attribute("alias");
                     if (alias == null || !ConfigDocument.IsAlias(alias) || !known.Add(alias)) throw new XmlException("Повреждён список серверов во вкладках.");
                     group.Aliases.Add(alias);
                 }
+            }
+            var desktopIds = new HashSet<string>();
+            foreach (var node in root.Elements("rdp"))
+            {
+                var profile = RdpProfile.Parse(node, groups.Find((string)node.Attribute("group"))?.Id);
+                if (!desktopIds.Add(profile.Id)) throw new XmlException("Повторяющийся идентификатор RDP-профиля.");
+                groups.Desktops.Add(profile);
             }
             string startup = (string)root.Attribute("startupTab");
             if (groups.Find(startup) != null) groups.SetStartupTab(startup);
@@ -162,11 +215,14 @@ namespace SshManager
                     var document = new XDocument(new XElement("tabs",
                         latest.StartupTabId == null ? null : new XAttribute("startupTab", latest.StartupTabId),
                         latest.DarkTheme ? new XAttribute("theme", "dark") : null,
+                        SortAttribute("sshSort", latest.SshSort), SortAttribute("rdpSort", latest.RdpSort),
                         latest.Items.Select(group =>
                         new XElement("tab", new XAttribute("id", group.Id), new XAttribute("name", group.Name),
                             group.ColorId == null ? null : new XAttribute("color", group.ColorId),
+                            SortAttribute("sshSort", group.SshSort), SortAttribute("rdpSort", group.RdpSort),
                             group.Aliases.OrderBy(alias => alias, StringComparer.OrdinalIgnoreCase)
-                                .Select(alias => new XElement("host", new XAttribute("alias", alias)))))));
+                                .Select(alias => new XElement("host", new XAttribute("alias", alias))))),
+                        latest.Desktops.Select(profile => profile.ToXml())));
                     using (var stream = new FileStream(temp, FileMode.CreateNew, FileAccess.Write, FileShare.None))
                     {
                         document.Save(stream);
@@ -183,5 +239,7 @@ namespace SshManager
                 }
             }
         }
+
+        private static XAttribute SortAttribute(string name, ServerSort value) => value == ServerSort.Original ? null : new XAttribute(name, value);
     }
 }

@@ -15,6 +15,10 @@ namespace SshManager
         public readonly Color Color;
         public readonly PasswordTarget Password;
         public readonly bool WithoutForwarding;
+        public readonly RdpProfile Desktop;
+        public string Protocol => Desktop == null ? "SSH" : "RDP";
+        public string Key => Desktop == null ? Alias : RdpKey(Desktop);
+        public static string RdpKey(RdpProfile profile) => "RDP:" + profile.Id;
 
         public SessionTarget(Connection connection, ServerGroup group)
         {
@@ -29,6 +33,15 @@ namespace SshManager
             Group = group == null ? "" : group.Name;
             var color = group == null ? null : TabColor.Find(group.ColorId);
             Color = color == null ? Theme.Teal : color.Swatch;
+        }
+
+        public SessionTarget(RdpProfile profile, ServerGroup group)
+        {
+            Desktop = profile;
+            Alias = profile.Name;
+            Address = profile.Address;
+            Group = group == null ? "" : group.Name;
+            Color = TabColor.Find(group?.ColorId)?.Swatch ?? Theme.Teal;
         }
 
         private SessionTarget(SessionTarget original)
@@ -52,6 +65,7 @@ namespace SshManager
         public readonly SessionTarget Target;
         public readonly PseudoTerminal Process;
         public readonly TerminalScreen Screen;
+        public readonly RdpDesktop Desktop;
         public readonly int Number;
         public string Name = "";
         public long LastUsed;
@@ -68,6 +82,13 @@ namespace SshManager
             Screen = new TerminalScreen(size.Width, size.Height, bytes => Process.Send(bytes));
         }
 
+        public TerminalSession(SessionTarget target, RdpDesktop desktop, int number)
+        {
+            Target = target;
+            Desktop = desktop;
+            Number = number;
+        }
+
         public string Title
         {
             get
@@ -77,7 +98,8 @@ namespace SshManager
             }
         }
 
-        public bool IsOpen { get { return !ExitCode.HasValue; } }
+        public bool IsOpen => Desktop == null ? !ExitCode.HasValue : Desktop.IsOpen;
+        public string Status => Desktop?.Status ?? (IsOpen ? "" : "завершён");
 
         public bool CheckForForwardingError(byte[] bytes)
         {
@@ -101,7 +123,11 @@ namespace SshManager
             return ForwardingFailed;
         }
         public override string ToString() { return Title; }
-        public void Dispose() { Process.Dispose(); }
+        public void Dispose()
+        {
+            Process?.Dispose();
+            Desktop?.Dispose();
+        }
     }
 
     internal sealed class SessionsPage : UserControl
@@ -109,6 +135,7 @@ namespace SshManager
         private readonly List<TerminalSession> sessions = new List<TerminalSession>();
         private readonly Func<SessionTarget, Size, PseudoTerminal> startProcess;
         private readonly NativeTerminalView terminal;
+        private readonly Panel display;
         private readonly TextBox search;
         private readonly ListBox list;
         private readonly Label count, selectedTitle, selectedDetail, empty;
@@ -202,7 +229,10 @@ namespace SshManager
             sessionMenu = Theme.Menu();
             sessionMenu.Items.Add(Theme.MenuItem("Переименовать сеанс", Glyph.Edit, (sender, args) => RenameActive()));
             sessionMenu.Items.Add(Theme.MenuItem("Новый сеанс этого сервера", Glyph.Plus, (sender, args) => DuplicateActive()));
-            sessionMenu.Items.Add(Theme.MenuItem("Файлы (SFTP)", Glyph.Folder, (sender, args) => OpenFiles()));
+            var sessionFiles = Theme.MenuItem("Файлы (SFTP)", Glyph.Folder, (sender, args) => OpenFiles());
+            var fullScreen = Theme.MenuItem("Полноэкранный режим RDP", Glyph.Server, (sender, args) => OpenFullScreen());
+            sessionMenu.Items.Add(sessionFiles);
+            sessionMenu.Items.Add(fullScreen);
             var withoutForwarding = Theme.MenuItem("Новый сеанс без проброса портов", Glyph.Terminal,
                 (sender, args) => DuplicateActive(withoutForwarding: true));
             sessionMenu.Items.Add(withoutForwarding);
@@ -211,6 +241,8 @@ namespace SshManager
             {
                 args.Cancel = active == null || list.SelectedItem == null;
                 withoutForwarding.Available = active != null && active.ForwardingFailed;
+                sessionFiles.Available = active != null && active.Desktop == null;
+                fullScreen.Available = active?.Desktop?.IsOpen == true;
             };
             list.ContextMenuStrip = sessionMenu;
             list.MouseDown += (sender, args) =>
@@ -244,9 +276,9 @@ namespace SshManager
             info.Controls.Add(buttons, 1, 0);
             workspace.Controls.Add(info, 0, 0);
 
-            var display = new Panel { Dock = DockStyle.Fill, Margin = new Padding(0), BackColor = NativeTerminalView.Background };
+            display = new Panel { Dock = DockStyle.Fill, Margin = new Padding(0), BackColor = NativeTerminalView.Background };
             terminal = new NativeTerminalView { Dock = DockStyle.Fill, AccessibleName = "SSH-терминал" };
-            empty = new Label { Dock = DockStyle.Fill, Text = "Выберите сервер в каталоге, чтобы начать SSH-сеанс.",
+            empty = new Label { Dock = DockStyle.Fill, Text = "Выберите сервер в каталоге, чтобы начать сеанс.",
                 ForeColor = Color.Gainsboro, TextAlign = ContentAlignment.MiddleCenter, BackColor = NativeTerminalView.Background, Padding = new Padding(16) };
             display.Controls.Add(terminal);
             display.Controls.Add(empty);
@@ -264,19 +296,26 @@ namespace SshManager
 
         public int CountOpen(string alias = null)
         {
-            return sessions.Count(session => session.IsOpen && (alias == null || SameAlias(session, alias)));
+            return sessions.Count(session => session.IsOpen && (alias == null || SameTarget(session, alias)));
         }
 
         public void Open(SessionTarget target, bool forceNew)
         {
-            var related = sessions.Where(session => SameAlias(session, target.Alias)).ToArray();
+            var related = sessions.Where(session => SameTarget(session, target.Key)).ToArray();
             var existing = forceNew ? null : related.Where(session => session.IsOpen).OrderByDescending(session => session.LastUsed).FirstOrDefault();
             if (existing != null) { Activate(existing, true); return; }
+
+            int number = related.Length == 0 ? 1 : related.Max(session => session.Number) + 1;
+            if (target.Desktop != null)
+            {
+                OpenDesktop(target, number);
+                return;
+            }
 
             var size = terminal.GridSize;
             var child = startProcess(target, size);
             TerminalSession opened;
-            try { opened = new TerminalSession(target, child, related.Length == 0 ? 1 : related.Max(session => session.Number) + 1, size); }
+            try { opened = new TerminalSession(target, child, number, size); }
             catch { child.Dispose(); throw; }
             sessions.Add(opened);
             Activate(opened, true);
@@ -286,9 +325,10 @@ namespace SshManager
 
         public void FocusTerminal()
         {
-            if (active == null || !terminal.Visible) return;
-            terminal.Select();
-            terminal.Focus();
+            Control view = active?.Desktop ?? (Control)terminal;
+            if (active == null || !view.Visible) return;
+            view.Select();
+            view.Focus();
         }
         public void FocusSearch() { search.Focus(); search.SelectAll(); }
 
@@ -309,13 +349,59 @@ namespace SshManager
         {
             if (selected != active)
             {
+                active?.Desktop?.Hide();
                 active = selected;
                 if (selected != null) selected.LastUsed = ++activationOrder;
-                terminal.Attach(selected);
+                terminal.Attach(selected?.Desktop == null ? selected : null);
+                terminal.Visible = selected != null && selected.Desktop == null;
+                if (selected?.Desktop != null)
+                {
+                    selected.Desktop.Show();
+                    selected.Desktop.BringToFront();
+                }
             }
             RefreshList();
             RefreshDetails();
             if (focus) FocusTerminal();
+        }
+
+        private void OpenDesktop(SessionTarget target, int number)
+        {
+            var previous = active;
+            var view = new RdpDesktop { Visible = false };
+            var opened = new TerminalSession(target, view, number);
+            sessions.Add(opened);
+            try
+            {
+                display.Controls.Add(view);
+                Activate(opened, false);
+                view.Changed += OnDesktopChanged;
+                view.Connect(target.Desktop);
+                FocusTerminal();
+            }
+            catch
+            {
+                sessions.Remove(opened);
+                view.Changed -= OnDesktopChanged;
+                Activate(previous, true);
+                opened.Dispose();
+                throw;
+            }
+            Changed?.Invoke();
+        }
+
+        private void OnDesktopChanged()
+        {
+            RefreshList();
+            RefreshDetails();
+            Changed?.Invoke();
+        }
+
+        private void OpenFullScreen()
+        {
+            try { active?.Desktop?.FullScreen(); }
+            catch (Exception error) when (error is ExternalException || error is System.Reflection.TargetInvocationException)
+            { Theme.ShowError(this, error); }
         }
 
         private void PumpOutput()
@@ -323,7 +409,7 @@ namespace SshManager
             bool exited = false;
             bool repaint = false;
             bool detailsChanged = false;
-            foreach (var session in sessions.Where(session => session.IsOpen))
+            foreach (var session in sessions.Where(session => session.IsOpen && session.Process != null))
             {
                 byte[] bytes;
                 for (int i = 0; i < 12 && session.Process.TryRead(out bytes); i++)
@@ -347,7 +433,7 @@ namespace SshManager
                 RefreshDetails();
                 Changed?.Invoke();
             }
-            if (CountOpen() == 0) timer.Stop();
+            if (!sessions.Any(session => session.IsOpen && session.Process != null)) timer.Stop();
         }
 
         private void RefreshList()
@@ -358,7 +444,7 @@ namespace SshManager
             try
             {
                 list.Items.Clear();
-                var visible = sessions.Where(session => new[] { session.Title, session.Target.Address, session.Target.Group }
+                var visible = sessions.Where(session => new[] { session.Title, session.Target.Address, session.Target.Group, session.Target.Protocol }
                     .Any(text => text.IndexOf(query, StringComparison.OrdinalIgnoreCase) >= 0));
                 foreach (var session in visible) list.Items.Add(session);
                 list.SelectedItem = active;
@@ -369,18 +455,19 @@ namespace SshManager
 
         private void RefreshDetails()
         {
-            selectedTitle.Text = active == null ? "SSH-терминал" : active.Title;
-            selectedDetail.Text = active == null ? "" : active.Target.Address +
+            selectedTitle.Text = active == null ? "Сеансы SSH и RDP" : active.Title;
+            selectedDetail.Text = active == null ? "" : active.Target.Protocol + "  ·  " + active.Target.Address +
                 (active.Target.Group.Length == 0 ? "" : "  ·  " + active.Target.Group) +
                 (active.ForwardingFailed ? "  ·  ошибка проброса порта" : active.Target.WithoutForwarding ? "  ·  без проброса" : "") +
-                (active.IsOpen ? "" : "  ·  завершён");
-            close.Enabled = duplicate.Enabled = files.Enabled = active != null;
+                (active.Status.Length == 0 ? "" : "  ·  " + active.Status);
+            close.Enabled = duplicate.Enabled = active != null;
+            files.Visible = active != null && active.Desktop == null;
             empty.Visible = active == null;
         }
 
         private void OpenFiles()
         {
-            if (active != null) ShowFiles?.Invoke(active.Target);
+            if (active != null && active.Desktop == null) ShowFiles?.Invoke(active.Target);
         }
 
         private void DrawSession(object sender, DrawItemEventArgs args)
@@ -395,7 +482,8 @@ namespace SshManager
             var subtitle = new Rectangle(bounds.X + 20, bounds.Y + 24, bounds.Width - 26, 19);
             const TextFormatFlags flags = TextFormatFlags.EndEllipsis | TextFormatFlags.NoPrefix | TextFormatFlags.SingleLine | TextFormatFlags.VerticalCenter;
             TextRenderer.DrawText(args.Graphics, session.Title, Theme.Emphasis, title, Theme.Ink, flags);
-            TextRenderer.DrawText(args.Graphics, session.IsOpen ? session.Target.Address : "Завершён · " + session.Target.Address, Theme.Body, subtitle, Theme.Muted, flags);
+            TextRenderer.DrawText(args.Graphics, session.Target.Protocol + " · " + (session.IsOpen ? session.Target.Address : "Сеанс завершён"),
+                Theme.Body, subtitle, Theme.Muted, flags);
             args.DrawFocusRectangle();
         }
 
@@ -403,7 +491,8 @@ namespace SshManager
         {
             if (active == null) return;
             try { Open(withoutForwarding ? active.Target.SkipForwarding() : active.Target, true); }
-            catch (Exception ex) when (Theme.IsFileError(ex) || ex is ExternalException || ex is ArgumentException)
+            catch (Exception ex) when (Theme.IsFileError(ex) || ex is ExternalException || ex is ArgumentException ||
+                ex is System.Reflection.TargetInvocationException || ex is InvalidOperationException)
             {
                 Theme.ShowError(this, ex);
             }
@@ -416,7 +505,7 @@ namespace SshManager
             using (var dialog = new NameDialog("Переименовать сеанс", "Метка сеанса", session.Name, "Сохранить", name =>
             {
                 if (name.Any(char.IsControl) || (name.Length > 0 && sessions.Any(item => item != session &&
-                    SameAlias(item, session.Target.Alias) && String.Equals(item.Name, name, StringComparison.OrdinalIgnoreCase))))
+                    SameTarget(item, session.Target.Key) && String.Equals(item.Name, name, StringComparison.OrdinalIgnoreCase))))
                     throw new ArgumentException("Укажите уникальную метку для сеанса этого сервера.");
                 session.Name = name;
             }))
@@ -429,17 +518,17 @@ namespace SshManager
         {
             var closing = active;
             if (closing == null) return;
-            if (MessageBox.Show(this, "Закрыть SSH-сеанс «" + closing.Title + "»?", "Вы уверены?",
+            if (MessageBox.Show(this, "Закрыть " + closing.Target.Protocol + "-сеанс «" + closing.Title + "»?", "Вы уверены?",
                 MessageBoxButtons.YesNo, MessageBoxIcon.Question, MessageBoxDefaultButton.Button2) != DialogResult.Yes) return;
             sessions.Remove(closing);
-            closing.Dispose();
             Activate(sessions.OrderByDescending(session => session.LastUsed).FirstOrDefault(), true);
+            closing.Dispose();
             Changed?.Invoke();
         }
 
-        private static bool SameAlias(TerminalSession session, string alias)
+        private static bool SameTarget(TerminalSession session, string key)
         {
-            return String.Equals(session.Target.Alias, alias, StringComparison.OrdinalIgnoreCase);
+            return String.Equals(session.Target.Key, key, StringComparison.OrdinalIgnoreCase);
         }
 
         protected override void Dispose(bool disposing)
