@@ -9,9 +9,10 @@ Source1:        ssh-manager.desktop
 BuildArch:      noarch
 
 Requires:       python3 >= 3.10
-Requires:       python3dist(pygobject)
+Requires:       python3-gobject
 Requires:       python3dist(paramiko)
 Requires:       python3dist(cryptography)
+Requires:       gobject-introspection
 Requires:       gtk3
 Requires:       vte291
 Requires:       /usr/bin/ssh
