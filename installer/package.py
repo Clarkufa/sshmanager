@@ -89,7 +89,8 @@ def package(app, output, file_version):
                          ("REBOOT", "ReallySuppress"),
                          ("SecureCustomProperties", "OLDERPRODUCTS;NEWERPRODUCTS;DESKTOPSHORTCUT")],
             "Binary": [("AppCheck", msilib.Binary(str(app)))],
-            "CustomAction": [("CheckApplicationClosed", 2, "AppCheck", '--msi-check-running "[#AppExecutable]" [UILevel]')],
+            "CustomAction": [("CheckApplicationClosed", 2, "AppCheck", '--msi-check-running "[#AppExecutable]"')],
+            "Error": [(1722, "SSH Manager запущен. Выберите «Выход» в меню значка рядом с часами и снова запустите установщик.")],
             "Directory": [
                 ("TARGETDIR", None, "SourceDir"),
                 ("LocalAppDataFolder", "TARGETDIR", "."),
@@ -133,7 +134,8 @@ def package(app, output, file_version):
             "RegisterProduct", "PublishFeatures", "PublishProduct", "InstallFinalize",
         }
         tables["InstallExecuteSequence"] = [action for action in sequence.InstallExecuteSequence if action[0] in actions]
-        tables["InstallExecuteSequence"].append(("CheckApplicationClosed", None, 1450))
+        # InstallValidate can ask Restart Manager to close a running app in unattended mode.
+        tables["InstallExecuteSequence"].append(("CheckApplicationClosed", None, 1350))
         tables["InstallExecuteSequence"].append(("RemoveExistingProducts", "OLDERPRODUCTS", 1520))
         for name, rows in tables.items():
             msilib.add_data(db, name, rows)
