@@ -13,7 +13,14 @@ struct Notice: Identifiable {
 }
 
 final class Manager: ObservableObject {
-    @Published var destination: Destination = .all
+    @Published var destination: Destination = .all {
+        didSet {
+            switch destination {
+            case .all, .group: lastCatalog = destination
+            case .session: break
+            }
+        }
+    }
     @Published private(set) var profiles: [Profile] = []
     @Published private(set) var settings = ManagerSettings()
     @Published private(set) var sessions: [TerminalSession] = []
@@ -26,6 +33,7 @@ final class Manager: ObservableObject {
     @Published var managingBackups = false
     private let config = ConfigStore.standard
     private let catalogQueue = DispatchQueue(label: "sshmanager.catalog", qos: .userInitiated)
+    private var lastCatalog: Destination = .all
     private var lastSessions: [UUID] = []
     private var fileWindows: [String: FilesWindow] = [:]
 
@@ -162,7 +170,9 @@ final class Manager: ObservableObject {
             activate(latest)
             return
         }
-        let session = TerminalSession(profile: profile, noForwarding: noForwarding)
+        let session = TerminalSession(profile: profile, noForwarding: noForwarding) { [weak self] id in
+            self?.showServers(from: id)
+        }
         sessions.append(session)
         activate(session)
     }
@@ -182,6 +192,20 @@ final class Manager: ObservableObject {
         guard let id = lastSessions.first(where: { .session($0) != destination }),
               let session = sessions.first(where: { $0.id == id }) else { return }
         activate(session)
+    }
+
+    var showingSession: Bool {
+        if case .session = destination { return true }
+        return false
+    }
+
+    func showServers(from id: UUID? = nil) {
+        guard case .session(let current) = destination, id == nil || id == current else { return }
+        if case .group(let group) = lastCatalog, !settings.groups.contains(where: { $0.id == group }) {
+            destination = .all
+        } else {
+            destination = lastCatalog
+        }
     }
 
     func closeSession(_ session: TerminalSession) {

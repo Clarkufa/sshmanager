@@ -171,10 +171,12 @@ final class TerminalSession: NSObject, ObservableObject, WKScriptMessageHandler,
     private var rendering: Int?
     private var pending: [Data] = []
     private let source: URL
+    private let showServers: (UUID) -> Void
 
-    init(profile: Profile, noForwarding: Bool = false) {
+    init(profile: Profile, noForwarding: Bool = false, showServers: @escaping (UUID) -> Void) {
         self.profile = profile
         self.noForwarding = noForwarding
+        self.showServers = showServers
         label = profile.alias
         source = Bundle.main.resourceURL!.appendingPathComponent("Terminal/index.html").absoluteURL.standardizedFileURL
         super.init()
@@ -235,6 +237,8 @@ final class TerminalSession: NSObject, ObservableObject, WKScriptMessageHandler,
             NSPasteboard.general.setString(text, forType: .string)
         } else if type == "paste" {
             paste()
+        } else if type == "showServers" {
+            showServers(id)
         }
     }
 

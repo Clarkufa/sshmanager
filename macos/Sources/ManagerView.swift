@@ -22,6 +22,9 @@ struct SSHManagerApp: App {
                 Button("Новая вкладка…") { manager.groupEditor = GroupEditorState() }
             }
             CommandMenu("Подключения") {
+                Button("К серверам") { manager.showServers() }
+                    .keyboardShortcut(.escape, modifiers: .shift)
+                    .disabled(!manager.showingSession)
                 Button("Два последних сеанса") { manager.switchSession() }
                     .keyboardShortcut(.tab, modifiers: .control)
                     .disabled(manager.sessions.isEmpty)

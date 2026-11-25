@@ -3,7 +3,7 @@
 const post = (type, fields = {}) => window.webkit.messageHandlers.terminal.postMessage({type, ...fields});
 const element = document.getElementById("terminal");
 const terminal = new Terminal({
-    fontFamily: "Menlo, monospace", fontSize: 13, cursorBlink: false,
+    fontFamily: "ui-monospace, Menlo, monospace", fontSize: 13, cursorBlink: false,
     scrollback: 10000, minimumContrastRatio: 4.5,
     theme: { background: "#121823", foreground: "#E2E8F3", cursor: "#72E0B5", selectionBackground: "#36596C" }
 });
@@ -28,6 +28,11 @@ const copySelection = () => post("copy", {text: terminal.getSelection()});
 terminal.attachCustomKeyEventHandler(event => {
     if (event.type !== "keydown" || event.altKey) return true;
     const typed = event.key.toLowerCase();
+    if (typed === "escape" && event.shiftKey && !event.ctrlKey && !event.metaKey) {
+        if (!event.repeat) post("showServers");
+        event.preventDefault();
+        return false;
+    }
     const key = /^[a-z]$/.test(typed) ? typed : ({KeyA: "a", KeyC: "c", KeyV: "v"}[event.code] || typed);
     const command = event.metaKey && !event.ctrlKey && !event.shiftKey;
     const control = event.ctrlKey && !event.metaKey;

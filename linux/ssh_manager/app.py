@@ -37,6 +37,16 @@ def prepare_terminal_paste(text):
     return re.sub(r"[\x00-\x08\x0a-\x0c\x0e-\x1f\x7f-\x9f]", "", text.replace("\r\n", "\r").replace("\n", "\r"))
 
 
+def terminal_font():
+    source = Gio.SettingsSchemaSource.get_default()
+    schema = source.lookup("org.gnome.desktop.interface", True) if source else None
+    if schema and schema.has_key("monospace-font-name"):
+        font = Gio.Settings.new_full(schema, None, None).get_string("monospace-font-name").strip()
+        if font:
+            return Pango.FontDescription.from_string(font)
+    return Pango.FontDescription.from_string("Monospace 11")
+
+
 class CatalogRow(Gtk.ListBoxRow):
     def __init__(self, owner, profile):
         super().__init__()
@@ -151,7 +161,7 @@ class Shell(Gtk.Box):
         self.terminal = Vte.Terminal()
         self.terminal.set_scrollback_lines(7000)
         self.terminal.set_mouse_autohide(True)
-        self.terminal.set_font(Pango.FontDescription("Monospace 11"))
+        self.terminal.set_font(terminal_font())
         foreground, background = Gdk.RGBA(), Gdk.RGBA()
         foreground.parse("#e5edf6")
         background.parse("#111a27")
@@ -315,6 +325,7 @@ class Window(Gtk.ApplicationWindow):
         self.set_default_size(940, 595)
         self.set_size_request(660, 400)
         self.connect("delete-event", self.can_close)
+        self.connect("key-press-event", self.navigate_sessions)
 
         header = Gtk.HeaderBar(show_close_button=True)
         header.set_title("SSH Manager")
@@ -380,6 +391,15 @@ class Window(Gtk.ApplicationWindow):
         self.apply_theme()
         self.reload(show_error=False)
         self.updates.check()
+
+    def navigate_sessions(self, window, event):
+        modifiers = event.state & Gtk.accelerator_get_default_mod_mask()
+        if (self.stack.get_visible_child_name() == "sessions" and event.keyval == Gdk.KEY_Escape
+                and modifiers == Gdk.ModifierType.SHIFT_MASK):
+            self.stack.set_visible_child_name("catalog")
+            self.search.grab_focus()
+            return True
+        return False
 
     def apply_theme(self):
         Gtk.Settings.get_default().set_property("gtk-application-prefer-dark-theme", self.settings["dark"])

@@ -47,8 +47,11 @@ $projectLicense = Join-Path $PSScriptRoot 'LICENSE'
 $icon = Join-Path $PSScriptRoot 'assets\SshManager.ico'
 $mark = Join-Path $PSScriptRoot 'assets\AppMark.png'
 $manifest = Join-Path $PSScriptRoot 'installer\app.manifest'
+$terminalFonts = Join-Path $thirdParty 'CascadiaMono\CascadiaMono-2407.24.zip'
+$terminalFontLicense = Join-Path $thirdParty 'CascadiaMono\LICENSE.txt'
 & $dotnet $compiler /nologo /noconfig /nostdlib+ /target:winexe /platform:anycpu /optimize+ /deterministic+ /codepage:65001 `
     "/out:$app" "/win32icon:$icon" "/win32manifest:$manifest" "/resource:$mark,SshManager.AppMark.png" `
+    "/resource:$terminalFonts,SshManager.CascadiaMono.zip" "/resource:$terminalFontLicense,SshManager.CascadiaMono-LICENSE.txt" `
     "/resource:$vtLicense,SshManager.VtNetCore-LICENSE.txt" "/resource:$projectLicense,SshManager.LICENSE.txt" $refs $sources
 if ($LASTEXITCODE -ne 0) { throw 'App compilation failed.' }
 

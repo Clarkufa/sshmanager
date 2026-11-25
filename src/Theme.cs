@@ -442,7 +442,7 @@ namespace SshManager
             BackColor = Theme.Surface;
             Size = new Size(265, 34);
             Margin = new Padding(0, 1, 0, 0);
-            Padding = new Padding(34, 8, 11, 0);
+            Padding = new Padding(34, 8, 11, 6);
             Input = new TextBox { AccessibleName = accessibleName, BorderStyle = BorderStyle.None, Dock = DockStyle.Fill, BackColor = Theme.Surface, ForeColor = Theme.Ink };
             var inputArea = new Panel { Dock = DockStyle.Fill, Margin = Padding.Empty };
             var hint = new Label { Text = placeholder, Dock = DockStyle.Fill, ForeColor = Theme.Muted,

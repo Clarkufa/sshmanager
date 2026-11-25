@@ -744,14 +744,7 @@ namespace SshManager
                 using (var picker = new ServerPickerDialog(connections, groups.ForAlias))
                     if (picker.ShowDialog(this) == DialogResult.OK) Connect(picker.SelectedConnection, forceNew: true);
             };
-            sessions.ShowServers += () =>
-            {
-                sessions.Hide();
-                catalog.Show();
-                source.Show();
-                status.Show();
-                grid.Focus();
-            };
+            sessions.ShowServers += ShowServers;
             sessions.Changed += () =>
             {
                 int open = sessions.CountOpen();
@@ -775,6 +768,15 @@ namespace SshManager
             workspace.FocusTerminal();
         }
 
+        private void ShowServers()
+        {
+            sessions.Hide();
+            catalog.Show();
+            source.Show();
+            status.Show();
+            grid.Focus();
+        }
+
         private string SessionAction(Connection connection)
         {
             int count = sessions == null ? 0 : sessions.CountOpen(connection.Alias);
@@ -785,6 +787,7 @@ namespace SshManager
         {
             if (sessions != null && sessions.Visible)
             {
+                if (keyData == (Keys.Shift | Keys.Escape)) { ShowServers(); return true; }
                 if (keyData == (Keys.Control | Keys.Tab)) { sessions.Cycle(); return true; }
                 if (keyData == (Keys.Control | Keys.Shift | Keys.P)) { sessions.FocusSearch(); return true; }
             }
