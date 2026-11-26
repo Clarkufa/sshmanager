@@ -63,7 +63,34 @@ enum Appearance: String, CaseIterable, Identifiable {
     }
 }
 
+struct Snippet: Identifiable, Equatable {
+    var id = UUID()
+    var name: String
+    var command: String
+}
+
+struct RecentEntry: Equatable {
+    var key: String
+    var at: Int
+}
+
+/// «Настройки» (docs/ui-spec.md §7), stored as attributes of the tabs.xml root like the Windows app.
+struct Preferences: Equatable {
+    var terminalFont = ""
+    var terminalSize = 13
+    var scrollback = 3000
+    var defaultUser = ""
+    var defaultPort = ""
+    var autoReconnect = false
+    var closeToTray = true
+    var checkUpdates = true
+}
+
 struct ManagerSettings {
+    var favorites: [String] = []
+    var recent: [RecentEntry] = []
+    var snippets: [Snippet] = []
+    var preferences = Preferences()
     var groups: [ServerGroup] = []
     var startup: String?
     var appearance: Appearance = .system
@@ -89,6 +116,28 @@ struct ManagerSettings {
         settings.sshSort = order("sshSort", on: root, fallback: .name)
         settings.rdpSort = order("rdpSort", on: root, fallback: .original)
         if let theme = root.attribute(forName: "theme")?.stringValue { settings.appearance = Appearance(rawValue: theme) ?? .system }
+        func text(_ key: String) -> String? { root.attribute(forName: key)?.stringValue }
+        var preferences = Preferences()
+        preferences.terminalFont = String((text("terminalFont") ?? "").prefix(80))
+        preferences.terminalSize = min(max(Int(text("terminalSize") ?? "") ?? 13, 6), 48)
+        preferences.scrollback = min(max(Int(text("scrollback") ?? "") ?? 3000, 100), 100_000)
+        preferences.defaultUser = String((text("defaultUser") ?? "").prefix(128))
+        preferences.defaultPort = text("defaultPort").flatMap { Int($0).map(String.init) } ?? ""
+        preferences.autoReconnect = text("autoReconnect") == "1"
+        preferences.closeToTray = text("closeToTray") != "0"
+        preferences.checkUpdates = text("checkUpdates") != "0"
+        settings.preferences = preferences
+        settings.favorites = root.elements(forName: "favorite").compactMap { $0.attribute(forName: "key")?.stringValue }
+            .filter { $0.hasPrefix("ssh:") || $0.hasPrefix("rdp:") }
+        settings.recent = Array(root.elements(forName: "recent").compactMap { element -> RecentEntry? in
+            guard let key = element.attribute(forName: "key")?.stringValue else { return nil }
+            return RecentEntry(key: key, at: Int(element.attribute(forName: "at")?.stringValue ?? "") ?? 0)
+        }.prefix(10))
+        settings.snippets = root.elements(forName: "snippet").compactMap { element -> Snippet? in
+            guard let name = element.attribute(forName: "name")?.stringValue, !name.isEmpty,
+                  let command = element.attribute(forName: "command")?.stringValue else { return nil }
+            return Snippet(name: String(name.prefix(80)), command: String(command.prefix(4000)))
+        }
         var aliases: Set<String> = []
         for element in root.elements(forName: "tab") {
             guard let id = element.attribute(forName: "id")?.stringValue, id.count == 32,
@@ -128,6 +177,31 @@ struct ManagerSettings {
         if appearance != .system { Self.attribute("theme", value: appearance.rawValue, on: root) }
         Self.attribute("sshSort", value: sshSort.rawValue, on: root)
         Self.attribute("rdpSort", value: rdpSort.rawValue, on: root)
+        if !preferences.terminalFont.isEmpty { Self.attribute("terminalFont", value: preferences.terminalFont, on: root) }
+        Self.attribute("terminalSize", value: String(preferences.terminalSize), on: root)
+        Self.attribute("scrollback", value: String(preferences.scrollback), on: root)
+        if !preferences.defaultUser.isEmpty { Self.attribute("defaultUser", value: preferences.defaultUser, on: root) }
+        if !preferences.defaultPort.isEmpty { Self.attribute("defaultPort", value: preferences.defaultPort, on: root) }
+        Self.attribute("autoReconnect", value: preferences.autoReconnect ? "1" : "0", on: root)
+        Self.attribute("closeToTray", value: preferences.closeToTray ? "1" : "0", on: root)
+        Self.attribute("checkUpdates", value: preferences.checkUpdates ? "1" : "0", on: root)
+        for key in favorites {
+            let element = XMLElement(name: "favorite")
+            Self.attribute("key", value: key, on: element)
+            root.addChild(element)
+        }
+        for entry in recent.prefix(10) {
+            let element = XMLElement(name: "recent")
+            Self.attribute("key", value: entry.key, on: element)
+            Self.attribute("at", value: String(entry.at), on: element)
+            root.addChild(element)
+        }
+        for snippet in snippets {
+            let element = XMLElement(name: "snippet")
+            Self.attribute("name", value: snippet.name, on: element)
+            Self.attribute("command", value: snippet.command, on: element)
+            root.addChild(element)
+        }
         for group in groups {
             let element = XMLElement(name: "tab")
             Self.attribute("id", value: group.id, on: element)

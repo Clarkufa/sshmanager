@@ -8,6 +8,12 @@ const terminal = new Terminal({
     theme: { background: "#111A27", foreground: "#E1E8F1", cursor: "#90E1C7", selectionBackground: "#2B4F62" }
 });
 const fit = new FitAddon.FitAddon();
+window.configureTerminal = (family, size, scrollback) => {
+    terminal.options.fontFamily = family;
+    terminal.options.fontSize = size;
+    terminal.options.scrollback = scrollback;
+    fit.fit();
+};
 terminal.loadAddon(fit);
 terminal.open(element);
 element.addEventListener("mousedown", event => {

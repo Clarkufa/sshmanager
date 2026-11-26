@@ -86,6 +86,11 @@ struct DesktopProfile: Identifiable {
     var height = 0
     var clipboard = false
     var fullScreen = false
+    var drives: [String] = []
+    var printers = false
+    var multimon = false
+    var gateway = ""
+    var gatewayUser = ""
 
     var address: String { "\(host.contains(":") ? "[\(host)]" : host):\(port)" }
     /// Keychain account of this profile. Profiles on the same IP but another port keep separate passwords.
@@ -122,7 +127,7 @@ struct DesktopProfile: Identifiable {
     }
 
     /// FreeRDP arguments with the profile's user, domain and password passed explicitly.
-    func freeRDPArguments(password: String?) throws -> [String] {
+    func freeRDPArguments(password: String?, major: Int = 3) throws -> [String] {
         if let password, password.contains(where: { $0 == "\0" || $0.isNewline }) {
             throw ManagerError("Пароль RDP должен быть одной строкой.")
         }
@@ -132,6 +137,28 @@ struct DesktopProfile: Identifiable {
         if let password, !password.isEmpty { args.append("/p:" + password) }
         if width != 0 { args.append("/size:\(width)x\(height)") } else { args += ["/size:80%", "/dynamic-resolution"] }
         if fullScreen { args.append("/f") }
+        for (index, path) in drives.enumerated() {
+            let name = (URL(fileURLWithPath: path).lastPathComponent.isEmpty ? "drive" : URL(fileURLWithPath: path).lastPathComponent)
+            args.append("/drive:\(name)\(index + 1),\(path)")
+        }
+        if printers { args.append("/printer") }
+        if multimon { args.append("/multimon") }
+        if !gateway.isEmpty {
+            if major >= 3 {
+                var value = "/gateway:g:" + gateway
+                if !gatewayUser.isEmpty {
+                    value += ",u:" + gatewayUser
+                    if let password, !password.isEmpty { value += ",p:" + password }
+                }
+                args.append(value)
+            } else {
+                args.append("/g:" + gateway)
+                if !gatewayUser.isEmpty {
+                    args.append("/gu:" + gatewayUser)
+                    if let password, !password.isEmpty { args.append("/gp:" + password) }
+                }
+            }
+        }
         return args
     }
     var account: String { domain.isEmpty || user.isEmpty ? user : "\(domain)\\\(user)" }
@@ -146,6 +173,11 @@ struct DesktopProfile: Identifiable {
         guard IPv4Address(host) != nil || IPv6Address(host) != nil || host.range(of: dns, options: .regularExpression) != nil
         else { throw ManagerError("Укажите DNS-имя, IPv4 или IPv6 без порта.") }
         guard (1...65535).contains(port) else { throw ManagerError("Укажите порт от 1 до 65535.") }
+        guard drives.count <= 16, drives.allSatisfy({ $0.hasPrefix("/") && !$0.contains(",") && !$0.contains(";") })
+        else { throw ManagerError("Укажите папки для подключения полными путями без запятых.") }
+        guard gateway.isEmpty || gateway.range(of: #"^[A-Za-z0-9_.:\[\]-]+$"#, options: .regularExpression) != nil,
+              gatewayUser.utf16.count <= 128
+        else { throw ManagerError("Укажите адрес шлюза RD Gateway без пробелов.") }
         guard (width == 0 && height == 0) || ((640...8192).contains(width) && (480...8192).contains(height))
         else { throw ManagerError("Укажите разрешение от 640 × 480 до 8192 × 8192 или оставьте оба поля пустыми.") }
     }
@@ -170,6 +202,11 @@ struct DesktopProfile: Identifiable {
         height = try number("height", 0)
         clipboard = field("clipboard") == "1"
         fullScreen = field("fullScreen") == "1"
+        drives = (field("drives") ?? "").split(separator: ";").map(String.init).filter { !$0.isEmpty }
+        printers = field("printers") == "1"
+        multimon = field("multimon") == "1"
+        gateway = field("gateway") ?? ""
+        gatewayUser = field("gatewayUser") ?? ""
         try validate()
     }
 
@@ -179,6 +216,11 @@ struct DesktopProfile: Identifiable {
         if width != 0 { fields["width"] = String(width); fields["height"] = String(height) }
         if clipboard { fields["clipboard"] = "1" }
         if fullScreen { fields["fullScreen"] = "1" }
+        if !drives.isEmpty { fields["drives"] = drives.joined(separator: ";") }
+        if printers { fields["printers"] = "1" }
+        if multimon { fields["multimon"] = "1" }
+        if !gateway.isEmpty { fields["gateway"] = gateway }
+        if !gatewayUser.isEmpty { fields["gatewayUser"] = gatewayUser }
         return fields
     }
 
@@ -222,7 +264,11 @@ struct DesktopProfile: Identifiable {
     var data: Data {
         var lines = ["full address:s:\(address)", "username:s:\(account)", "screen mode id:i:\(fullScreen ? 2 : 1)",
                      "redirectclipboard:i:\(clipboard ? 1 : 0)", "enablecredsspsupport:i:1", "authentication level:i:2",
-                     "drivestoredirect:s:", "redirectprinters:i:0"]
+                     "drivestoredirect:s:", "redirectprinters:i:\(printers ? 1 : 0)", "use multimon:i:\(multimon ? 1 : 0)"]
+        if !gateway.isEmpty {
+            lines += ["gatewayhostname:s:\(gateway)", "gatewayusagemethod:i:1", "gatewayprofileusagemethod:i:1"]
+            if !gatewayUser.isEmpty { lines.append("gatewayusername:s:\(gatewayUser)") }
+        }
         if width != 0 { lines.append(contentsOf: ["desktopwidth:i:\(width)", "desktopheight:i:\(height)"]) }
         else { lines.append("dynamic resolution:i:1") }
         let text = lines.joined(separator: "\r\n") + "\r\n"

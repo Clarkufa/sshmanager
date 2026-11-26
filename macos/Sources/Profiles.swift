@@ -14,6 +14,9 @@ struct Profile: Identifiable, Equatable {
     var user = ""
     var port = ""
     var identities = ""
+    var proxyJump = ""
+    /// "LocalForward 8080 localhost:80", "RemoteForward …", "DynamicForward 1080"
+    var forwards: [String] = []
 
     var id: String { alias.lowercased() }
     var address: String {
@@ -52,6 +55,23 @@ struct Profile: Identifiable, Equatable {
                   !line.unicodeScalars.contains(where: CharacterSet.controlCharacters.contains)
               })
         else { throw ManagerError("Проверьте адрес сервера, имя пользователя и пути к ключам.") }
+        guard proxyJump == original?.proxyJump || proxyJump.isEmpty ||
+                proxyJump.range(of: #"^[A-Za-z0-9_.@:%,\[\]-]+$"#, options: .regularExpression) != nil
+        else { throw ManagerError("Укажите переходной сервер как псевдоним или user@host:port, несколько — через запятую.") }
+        let endpoint = #"(?:[A-Za-z0-9_.*-]+:|\[[0-9A-Fa-f:.]+\]:)?[0-9]{1,5}"#
+        let target = #"(?:[A-Za-z0-9_.-]+|\[[0-9A-Fa-f:.]+\]):[0-9]{1,5}"#
+        for forward in forwards where !(original?.forwards.contains(forward) ?? false) {
+            let parts = forward.split(separator: " ").map(String.init)
+            let valid: Bool
+            switch parts.first {
+            case "DynamicForward": valid = parts.count == 2 && parts[1].range(of: "^" + endpoint + "$", options: .regularExpression) != nil
+            case "LocalForward", "RemoteForward":
+                valid = parts.count == 3 && parts[1].range(of: "^" + endpoint + "$", options: .regularExpression) != nil &&
+                    parts[2].range(of: "^" + target + "$", options: .regularExpression) != nil
+            default: valid = false
+            }
+            guard valid else { throw ManagerError("Проброс порта: укажите «порт хост:порт» (L, R) или «порт» (D).") }
+        }
         guard port == original?.port || port.isEmpty ||
                 (port.utf8.allSatisfy { (48...57).contains($0) } && (1...65535).contains(Int(port) ?? 0))
         else { throw ManagerError("Порт должен быть числом от 1 до 65535.") }
@@ -89,7 +109,12 @@ struct ConfigDocument {
             for line in lines[(start + 1)..<end] {
                 let (key, arguments) = Self.statement(line)
                 guard let value = arguments.first else { continue }
+                if let name = Self.forwardNames[key] {
+                    profile.forwards.append(([name] + arguments).joined(separator: " "))
+                    continue
+                }
                 switch key {
+                case "proxyjump" where profile.proxyJump.isEmpty: profile.proxyJump = value
                 case "hostname" where profile.host.isEmpty: profile.host = value
                 case "user" where profile.user.isEmpty: profile.user = value
                 case "port" where profile.port.isEmpty: profile.port = value
@@ -129,13 +154,13 @@ struct ConfigDocument {
                 let insertion = indices.first ?? 1
                 let comments = indices.map { Self.comment(result[$0]) }.filter { !$0.isEmpty }
                 for at in indices.reversed() { result.remove(at: at) }
-                let newLines = field.values.map { "    " + field.key + " " + Self.quote($0) }
+                let newLines = field.values.map { "    " + field.key + " " + Self.render(field.key, $0) }
                 result.insert(contentsOf: newLines + comments, at: insertion)
             }
             lines.replaceSubrange(range, with: result)
         } else if let profile {
             let entry = ["Host " + profile.alias] + Self.fields(profile).flatMap { field in
-                field.values.map { "    " + field.key + " " + Self.quote($0) }
+                field.values.map { "    " + field.key + " " + Self.render(field.key, $0) }
             }
             // OpenSSH takes the first value from matching sections. Keep the new profile ahead of defaults.
             let insertion = lines.firstIndex {
@@ -147,10 +172,22 @@ struct ConfigDocument {
     }
 
     private static func fields(_ profile: Profile) -> [(key: String, values: [String])] {
-        [("HostName", [profile.host]), ("User", [profile.user]), ("Port", [profile.port]),
-         ("IdentityFile", profile.identities.components(separatedBy: .newlines))].map {
+        var result: [(key: String, values: [String])] = [("HostName", [profile.host]), ("User", [profile.user]), ("Port", [profile.port]),
+         ("IdentityFile", profile.identities.components(separatedBy: .newlines)), ("ProxyJump", [profile.proxyJump])].map {
             ($0.0, $0.1.filter { !$0.isEmpty })
         }
+        for name in ["LocalForward", "RemoteForward", "DynamicForward"] {
+            result.append((name, profile.forwards.filter { $0.hasPrefix(name + " ") }.map { String($0.dropFirst(name.count + 1)) }))
+        }
+        return result
+    }
+
+    static let forwardNames = ["localforward": "LocalForward", "remoteforward": "RemoteForward", "dynamicforward": "DynamicForward"]
+
+    /// Forwards keep their tokens separate (LocalForward 8080 localhost:80); other values are one quoted string.
+    static func render(_ key: String, _ value: String) -> String {
+        if forwardNames.values.contains(key) { return value.split(separator: " ").map { quote(String($0)) }.joined(separator: " ") }
+        return quote(value)
     }
 
     static func quote(_ value: String) -> String {

@@ -161,6 +161,11 @@ final class TerminalSession: NSObject, ObservableObject, WKScriptMessageHandler,
     let profile: Profile
     let noForwarding: Bool
     let number: Int
+    let direct: Bool
+    let remoteCommand: String?
+    /// Called once SSH has exited, with its exit code (automatic reconnect).
+    var onExit: ((Int32) -> Void)?
+    var preferences = Preferences()
     @Published var name = ""
     @Published private(set) var exitCode: Int32?
     @Published private(set) var forwardingFailed = false
@@ -177,10 +182,14 @@ final class TerminalSession: NSObject, ObservableObject, WKScriptMessageHandler,
     private let source: URL
     private let showServers: (UUID) -> Void
 
-    init(profile: Profile, noForwarding: Bool = false, number: Int = 1, showServers: @escaping (UUID) -> Void) {
+    init(profile: Profile, noForwarding: Bool = false, number: Int = 1, direct: Bool = false, remoteCommand: String? = nil,
+         preferences: Preferences = Preferences(), showServers: @escaping (UUID) -> Void) {
         self.profile = profile
         self.noForwarding = noForwarding
         self.number = number
+        self.direct = direct
+        self.remoteCommand = remoteCommand
+        self.preferences = preferences
         self.showServers = showServers
         source = Bundle.main.resourceURL!.appendingPathComponent("Terminal/index.html").absoluteURL.standardizedFileURL
         super.init()
@@ -241,7 +250,7 @@ final class TerminalSession: NSObject, ObservableObject, WKScriptMessageHandler,
         if type == "ready" || type == "resize" {
             guard let cols = payload["cols"] as? Int, let rows = payload["rows"] as? Int,
                   (1...1000).contains(cols), (1...1000).contains(rows) else { return }
-            if type == "ready" { start(columns: UInt16(cols), rows: UInt16(rows)) }
+            if type == "ready" { apply(preferences); start(columns: UInt16(cols), rows: UInt16(rows)) }
             else { channel?.resize(columns: UInt16(cols), rows: UInt16(rows)) }
         } else if type == "input", let text = payload["text"] as? String {
             channel?.send(Data(text.utf8))
@@ -259,6 +268,22 @@ final class TerminalSession: NSObject, ObservableObject, WKScriptMessageHandler,
         } else if type == "showServers" {
             showServers(id)
         }
+    }
+
+    /// Terminal font, size and scrollback from «Настройки».
+    func apply(_ preferences: Preferences) {
+        self.preferences = preferences
+        let family = preferences.terminalFont.isEmpty ? "ui-monospace, Menlo, monospace" : "\"\(preferences.terminalFont)\", monospace"
+        view.callAsyncJavaScript("window.configureTerminal?.(family, size, scrollback)",
+                                 arguments: ["family": family, "size": preferences.terminalSize, "scrollback": preferences.scrollback],
+                                 in: nil, in: .page, completionHandler: nil)
+    }
+
+    /// Sends a saved command followed by Enter.
+    func send(_ text: String) {
+        guard !closed, exitCode == nil, let channel else { return }
+        let command = text.replacingOccurrences(of: "\r\n", with: "\r").replacingOccurrences(of: "\n", with: "\r") + "\r"
+        channel.send(Data(command.utf8))
     }
 
     private func edit(_ key: String) -> Bool {
@@ -295,12 +320,14 @@ final class TerminalSession: NSObject, ObservableObject, WKScriptMessageHandler,
         started = true
         focus()
         do {
-            channel = try TerminalChannel(request: SSHRequest(profile: profile), noForwarding: noForwarding,
+            channel = try TerminalChannel(request: SSHRequest(profile: profile, direct: direct, remoteCommand: remoteCommand),
+                                          noForwarding: noForwarding,
                                           columns: columns, rows: rows, output: { [weak self] in self?.render($0) },
                                           exited: { [weak self] code in
                 guard let self, !self.closed else { return }
                 self.exitCode = code
                 self.render(Data("\r\n\u{1b}[0mSSH завершился (код \(code)).\r\n".utf8))
+                self.onExit?(code)
             })
         } catch {
             exitCode = 1

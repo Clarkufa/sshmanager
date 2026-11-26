@@ -4,11 +4,17 @@ import Foundation
 struct SSHRequest {
     let profile: Profile
     let configURL: URL?
+    /// Quick connect: connect to the host directly instead of an alias from the OpenSSH config.
+    var direct = false
+    /// A command to run on the server instead of a shell (copying a public key).
+    var remoteCommand: String?
     private let passwordHost: String?
 
-    init(profile: Profile, configURL: URL? = nil) {
+    init(profile: Profile, configURL: URL? = nil, direct: Bool = false, remoteCommand: String? = nil) {
         self.profile = profile
         self.configURL = configURL
+        self.direct = direct
+        self.remoteCommand = remoteCommand
         passwordHost = (try? Passwords.read(profile.account)) != nil ? profile.passwordHost : nil
     }
 
@@ -24,9 +30,14 @@ struct SSHRequest {
         if sftp {
             result += ["-T", "-o", "RemoteCommand=none", "-o", "SessionType=subsystem",
                        "-o", "ControlMaster=no", "-o", "ControlPath=none", "-o", "BatchMode=no", "-s", "--", profile.alias, "sftp"]
+        } else if direct {
+            if !profile.port.isEmpty { result += ["-p", profile.port] }
+            if !profile.user.isEmpty { result += ["-l", profile.user] }
+            result += ["--", profile.host]
         } else {
             result += ["--", profile.alias]
         }
+        if let remoteCommand, !sftp { result.append(remoteCommand) }
         return result
     }
 

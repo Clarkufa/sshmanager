@@ -4,6 +4,8 @@ import AppKit
 /// app running with its sessions; the icon, the Dock icon or launching again shows the window.
 final class AppDelegate: NSObject, NSApplicationDelegate {
     static var reopen: (() -> Void)?
+    /// «Оставлять работать в строке меню при закрытии окна» from the settings.
+    static var closeToTray = true
     private var statusItem: NSStatusItem?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -25,7 +27,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         statusItem = item
     }
 
-    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
+    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { !AppDelegate.closeToTray }
 
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
         if !flag { showWindow() }

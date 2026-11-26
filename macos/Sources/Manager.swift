@@ -3,7 +3,7 @@ import SwiftUI
 import UniformTypeIdentifiers
 
 enum Destination: Hashable {
-    case all, group(String)
+    case all, favorites, group(String)
 }
 
 enum ConnectionProtocol: String, CaseIterable, Identifiable {
@@ -64,7 +64,14 @@ final class Manager: ObservableObject {
     @Published var showingSessions = false
     @Published private(set) var activeSession: UUID?
     @Published private(set) var profiles: [Profile] = []
-    @Published private(set) var settings = ManagerSettings()
+    @Published private(set) var settings = ManagerSettings() {
+        didSet { AppDelegate.closeToTray = settings.preferences.closeToTray }
+    }
+    @Published var editingSettings = false
+    @Published var importing = false
+    @Published var addingSnippet = false
+    private var transient: Set<String> = []
+    private var reconnectAttempts: [String: Int] = [:]
     @Published private(set) var sessions: [TerminalSession] = []
     @Published private(set) var desktopSessions: [DesktopSession] = []
     @Published var notice: Notice?
@@ -141,6 +148,145 @@ final class Manager: ObservableObject {
     }
 
     func group(of profile: Profile) -> ServerGroup? { settings.groups.first { $0.aliases.contains(profile.id) } }
+
+    // MARK: favorites, recent, quick connect
+
+    static func key(_ profile: Profile) -> String { "ssh:" + profile.id }
+    static func key(_ desktop: DesktopProfile) -> String { "rdp:" + desktop.id }
+
+    func isFavorite(_ key: String) -> Bool { settings.favorites.contains(key) }
+
+    func toggleFavorite(_ key: String) {
+        updateSettings { latest in
+            if latest.favorites.contains(key) { latest.favorites.removeAll { $0 == key } }
+            else { latest.favorites.append(key) }
+        }
+        if destination == .favorites && settings.favorites.isEmpty { destination = .all }
+    }
+
+    private func recordRecent(_ key: String) {
+        updateSettings { latest in
+            latest.recent.removeAll { $0.key == key }
+            latest.recent.insert(RecentEntry(key: key, at: Int(Date().timeIntervalSince1970)), at: 0)
+            latest.recent = Array(latest.recent.prefix(10))
+        }
+    }
+
+    /// Connects without a saved profile, then offers to save it (docs/ui-spec.md §7).
+    func quickConnect(_ text: String) {
+        do {
+            let target = try QuickTarget(text)
+            if target.rdp {
+                var desktop = DesktopProfile(group: currentGroup?.id)
+                desktop.name = target.host
+                desktop.host = target.host
+                desktop.port = target.port
+                desktop.user = target.user
+                try desktop.validate()
+                connectDesktop(desktop, new: true)
+                notice = Notice(title: "SSH Manager", text: "Сохранить подключение «\(target.host)»?") { [weak self] in
+                    do { try self?.storeQuickDesktop(desktop) } catch { self?.show(error) }
+                }
+                return
+            }
+            let alias = quickAlias(target.host, existing: profiles.map(\.alias) + Array(transient))
+            var profile = Profile(alias: alias)
+            profile.host = target.host
+            profile.user = target.user
+            profile.port = target.port == 22 ? "" : String(target.port)
+            transient.insert(alias.lowercased())
+            startSession(profile, noForwarding: false, direct: true)
+            notice = Notice(title: "SSH Manager", text: "Сохранить подключение «\(alias)»?") { [weak self] in
+                guard let self else { return }
+                do {
+                    try self.save(profile, original: nil, password: "", removePassword: false)
+                    self.transient.remove(alias.lowercased())
+                } catch { self.show(error) }
+            }
+        } catch { show(error) }
+    }
+
+    private func storeQuickDesktop(_ desktop: DesktopProfile) throws { try storeDesktop(desktop, editing: false) }
+
+    // MARK: snippets, preferences, import, keys
+
+    func saveSnippet(name: String, command: String) {
+        updateSettings { $0.snippets.append(Snippet(name: name, command: command)) }
+    }
+
+    func removeSnippet(_ snippet: Snippet) {
+        notice = Notice(title: "SSH Manager", text: "Удалить команду «\(snippet.name)»?") { [weak self] in
+            self?.updateSettings { $0.snippets.removeAll { $0.id == snippet.id } }
+        }
+    }
+
+    func send(_ snippet: Snippet, to session: TerminalSession, everywhere: Bool) {
+        let targets = everywhere ? sessions.filter(\.live) : [session]
+        for target in targets { target.send(snippet.command) }
+    }
+
+    func savePreferences(_ preferences: Preferences) throws {
+        var latest = try ManagerSettings.load()
+        latest.preferences = preferences
+        try latest.save()
+        settings = latest
+        for session in sessions { session.apply(preferences) }
+    }
+
+    func importConnections(_ chosen: [FoundConnection]) {
+        var added = 0
+        var names = profiles.map(\.alias)
+        for item in chosen {
+            do {
+                if item.rdp {
+                    var desktop = DesktopProfile(group: currentGroup?.id)
+                    desktop.name = String((item.name.isEmpty ? item.host : item.name).prefix(80))
+                    desktop.host = item.host
+                    desktop.port = item.port
+                    desktop.user = item.user
+                    desktop.domain = item.domain
+                    try desktop.validate()
+                    try storeDesktop(desktop, editing: false)
+                } else {
+                    let alias = quickAlias(item.name, existing: names)
+                    names.append(alias)
+                    var profile = Profile(alias: alias)
+                    profile.host = item.host
+                    profile.user = item.user
+                    profile.port = item.port == 22 ? "" : String(item.port)
+                    try save(profile, original: nil, password: "", removePassword: false)
+                }
+                added += 1
+            } catch { show(error) }
+        }
+        reload()
+        if notice == nil { notice = Notice(title: "SSH Manager", text: "Импортировано подключений: \(added).") }
+    }
+
+    func copyKey(to profile: Profile) {
+        let folder = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".ssh")
+        let keys = ((try? FileManager.default.contentsOfDirectory(atPath: folder.path)) ?? []).filter { $0.hasSuffix(".pub") }
+        var url: URL? = keys.count == 1 ? folder.appendingPathComponent(keys[0]) : nil
+        if url == nil {
+            let panel = NSOpenPanel()
+            panel.directoryURL = folder
+            panel.showsHiddenFiles = true
+            panel.message = "Публичный ключ для сервера (*.pub)"
+            guard panel.runModal() == .OK else { return }
+            url = panel.url
+        }
+        guard let url else { return }
+        do {
+            let command = try Keys.copyCommand(String(decoding: try readRegularFile(url, limit: 64 * 1024), as: UTF8.self))
+            let number = (sessions.filter { $0.profile.id == profile.id }.map(\.number).max() ?? 0) + 1
+            let session = TerminalSession(profile: profile, number: number, remoteCommand: command,
+                                          preferences: settings.preferences) { [weak self] _ in self?.showServers() }
+            session.name = "ключ"
+            sessions.append(session)
+            order.append(session.id)
+            activate(session.id)
+        } catch { show(error) }
+    }
     func group(of desktop: DesktopProfile) -> ServerGroup? { settings.groups.first { $0.id == desktop.group } }
 
     var currentSort: ServerSort {
@@ -433,17 +579,43 @@ final class Manager: ObservableObject {
             activate(latest.id)
             return
         }
-        let number = (related.map(\.number).max() ?? 0) + 1
-        let session = TerminalSession(profile: profile, noForwarding: noForwarding, number: number) { [weak self] _ in
-            self?.showServers()
+        recordRecent(Self.key(profile))
+        startSession(profile, noForwarding: noForwarding, direct: false)
+    }
+
+    private func startSession(_ profile: Profile, noForwarding: Bool, direct: Bool, name: String = "", replacing old: TerminalSession? = nil) {
+        let related = sessions.filter { $0.profile.id == profile.id }
+        let number = old?.number ?? (related.map(\.number).max() ?? 0) + 1
+        let session = TerminalSession(profile: profile, noForwarding: noForwarding, number: number, direct: direct,
+                                      preferences: settings.preferences) { [weak self] _ in self?.showServers() }
+        session.name = name
+        session.onExit = { [weak self, weak session] code in
+            guard let self, let session else { return }
+            self.objectWillChange.send()
+            let key = Self.key(profile)
+            guard self.settings.preferences.autoReconnect, code != 0, code != 130,
+                  self.reconnectAttempts[key, default: 0] < 3 else { return }
+            self.reconnectAttempts[key, default: 0] += 1
+            DispatchQueue.main.asyncAfter(deadline: .now() + 5) { [weak self, weak session] in
+                guard let self, let session, self.sessions.contains(where: { $0 === session }) else { return }
+                self.reconnect(.ssh(session), automatic: true)
+            }
         }
-        sessions.append(session)
-        order.append(session.id)
+        if let old {
+            old.close()
+            if let index = sessions.firstIndex(where: { $0.id == old.id }) { sessions[index] = session }
+            if let index = order.firstIndex(of: old.id) { order[index] = session.id }
+            lastSessions.removeAll { $0 == old.id }
+        } else {
+            sessions.append(session)
+            order.append(session.id)
+        }
         activate(session.id)
     }
 
     /// Opens an RDP session, asking for the password first when none is saved and FreeRDP will connect.
     func connectDesktop(_ profile: DesktopProfile, new: Bool = false) {
+        if settings.desktops.contains(where: { $0.id == profile.id }) { recordRecent(Self.key(profile)) }
         let related = desktopSessions.filter { $0.profile.id == profile.id }
         if !new, let latest = lastSessions.compactMap({ id in related.first { $0.id == id && $0.live } }).first {
             activate(latest.id)
@@ -486,19 +658,12 @@ final class Manager: ObservableObject {
     }
 
     /// SSH: starts the same server again in place of the ended session.
-    func reconnect(_ entry: SessionEntry) {
+    func reconnect(_ entry: SessionEntry, automatic: Bool = false) {
         switch entry {
         case .rdp(let session): session.start()
         case .ssh(let old):
-            let session = TerminalSession(profile: old.profile, noForwarding: old.noForwarding, number: old.number) { [weak self] _ in
-                self?.showServers()
-            }
-            session.name = old.name
-            old.close()
-            if let index = sessions.firstIndex(where: { $0.id == old.id }) { sessions[index] = session }
-            if let index = order.firstIndex(of: old.id) { order[index] = session.id }
-            lastSessions.removeAll { $0 == old.id }
-            activate(session.id)
+            if !automatic { reconnectAttempts[Self.key(old.profile)] = 0 }
+            startSession(old.profile, noForwarding: old.noForwarding, direct: old.direct, name: old.name, replacing: old)
         }
     }
 
