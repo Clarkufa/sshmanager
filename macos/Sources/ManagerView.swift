@@ -29,9 +29,6 @@ struct SSHManagerApp: App {
                 Button("Новая вкладка…") { manager.groupEditor = GroupEditorState() }
             }
             CommandMenu("Подключения") {
-                Button("Каталог") { manager.showServers() }
-                    .keyboardShortcut(.escape, modifiers: .shift)
-                    .disabled(!manager.showingSessions)
                 Button("Сеансы") { manager.showSessionsPage() }
                 Button("Колонка «Серверы»") { manager.toggleServerColumn(shown: manager.serverColumn) }
                 Button("Колонка «Сеансы»") { manager.toggleSessionColumn(shown: manager.sessionColumn) }
@@ -45,20 +42,14 @@ struct SSHManagerApp: App {
                     .keyboardShortcut("p", modifiers: [.command, .shift])
                 Button("Обновить") { manager.reloadAll() }
                     .keyboardShortcut("r", modifiers: .command)
-                // The catalog table's search when it is shown, otherwise the search of the «Серверы» column.
                 Button("Найти сервер") {
-                    let catalog = manager.workspace == .catalog
-                    if !catalog { manager.revealServerColumn() }
-                    DispatchQueue.main.async {
-                        NotificationCenter.default.post(name: catalog ? .focusCatalogSearch : .focusServerSearch, object: nil)
-                    }
+                    manager.revealServerColumn()
+                    DispatchQueue.main.async { NotificationCenter.default.post(name: .focusServerSearch, object: nil) }
                 }.keyboardShortcut("f", modifiers: .command)
                 Button("Изменить сервер") { NotificationCenter.default.post(name: .editCatalogRow, object: nil) }
                     .keyboardShortcut("e", modifiers: .command)
-                    .disabled(manager.showingSessions)
                 Button("Удалить сервер") { NotificationCenter.default.post(name: .deleteCatalogRow, object: nil) }
                     .keyboardShortcut(.delete, modifiers: .command)
-                    .disabled(manager.showingSessions)
                 Button("Открыть OpenSSH config") { manager.openConfig() }
                 Button("Известные хосты…") { manager.openKnownHosts(nil) }
                 Button("Быстрое подключение") {
@@ -188,14 +179,15 @@ private struct ColumnLayout {
 
     init(width: CGFloat, manager: Manager) {
         let free = width - 2 * Self.margin
-        let need: CGFloat = manager.workspace == .catalog ? 620 : 460
+        let need: CGFloat = 460
         var servers = manager.serverColumn
         var sessions = manager.sessionColumn
         func room() -> CGFloat {
             free - (servers ? Self.serverWidth + Self.gap : 0) - (sessions ? Self.sessionWidth + Self.gap : 0)
         }
-        if servers && !manager.serverColumnForced && room() < need { servers = false }
+        // The server list is the way to every connection: the session column folds first.
         if sessions && !manager.sessionColumnForced && room() < need { sessions = false }
+        if servers && !manager.serverColumnForced && room() < need { servers = false }
         self.servers = servers
         self.sessions = sessions
     }
@@ -270,8 +262,9 @@ private struct ServerColumn: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
             ColumnTitle(title: "Серверы") {
-                Button { manager.showServers() } label: { GlyphLabel(title: "Каталог", glyph: .server, kind: .quiet) }
-                    .winButton(.quiet).help("Таблица подключений")
+                Menu { ColumnMenu(manager: manager) } label: { Text("⋯").font(.system(size: 15, weight: .semibold)) }
+                    .menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize()
+                    .help("Вкладки, сортировка, резервные копии и импорт")
             }
             ServerPicker(manager: manager, onSelected: {})
         }
@@ -339,6 +332,58 @@ private struct SessionColumn: View {
     }
 }
 
+/// «⋯» of the «Серверы» column (docs/ui-spec.md §2.2).
+private struct ColumnMenu: View {
+    @ObservedObject var manager: Manager
+
+    private static let orders: [(ServerSort, String)] = [(.original, "Исходный порядок"), (.name, "По названию ↑"),
+        (.nameDescending, "По названию ↓"), (.address, "По адресу ↑"), (.addressDescending, "По адресу ↓")]
+
+    var body: some View {
+        Button { manager.groupEditor = GroupEditorState() } label: { Label("Новая вкладка…", systemImage: "plus") }
+        Menu {
+            ForEach(Self.orders, id: \.0) { pair in
+                Button { manager.sortCatalog(pair.0, kind: manager.catalogProtocol, group: nil) } label: {
+                    if manager.columnSort == pair.0 { Label(pair.1, systemImage: "checkmark") } else { Text(pair.1) }
+                }
+            }
+        } label: { Label("Сортировка", systemImage: "arrow.up.arrow.down") }
+        Divider()
+        Button { manager.reloadAll() } label: { Label("Обновить список", systemImage: "arrow.clockwise") }
+        Button { manager.exportBackup() } label: { Label("Экспорт архива…", systemImage: "square.and.arrow.up") }
+        Button { manager.importBackup() } label: { Label("Импорт архива…", systemImage: "square.and.arrow.down") }
+        Button { manager.importing = true } label: { Label("Импорт из других программ…", systemImage: "folder") }
+        Button { manager.transferDesktop(nil, group: nil) } label: { Label("Импорт .rdp…", systemImage: "display") }
+        Divider()
+        Button { manager.openConfig() } label: { Label("Открыть SSH config", systemImage: "doc.text") }
+        Button { manager.openKnownHosts(nil) } label: { Label("Известные хосты…", systemImage: "key.horizontal") }
+    }
+}
+
+/// The workspace without a session or files (docs/ui-spec.md §2.3).
+private struct StartPage: View {
+    @ObservedObject var manager: Manager
+    @Environment(\.colorScheme) private var scheme
+
+    var body: some View {
+        let palette = Palette.of(scheme)
+        let empty = manager.profiles.isEmpty && manager.settings.desktops.isEmpty && manager.settings.vnc.isEmpty
+        VStack(spacing: 10) {
+            Text(empty ? "Добавьте первый сервер" : "Выберите сервер слева").font(.system(size: 26, weight: .semibold))
+            Text(empty ? "SSH-серверы сохраняются в ~/.ssh/config, RDP и VNC — в настройках приложения. Можно перенести подключения из PuTTY, mRemoteNG или MobaXterm."
+                 : "Двойной щелчок или Enter открывает сеанс. Правая кнопка — изменить, открыть файлы, перенести во вкладку. Быстрое подключение — ⌘L.")
+                .foregroundStyle(palette.muted).multilineTextAlignment(.center).frame(maxWidth: 560)
+            HStack(spacing: 8) {
+                Button { manager.addCatalogEntry() } label: { GlyphLabel(title: "Добавить сервер", glyph: .plus, kind: .primary) }
+                    .winButton(.primary)
+                Button { manager.importing = true } label: { GlyphLabel(title: "Импорт из других программ…", glyph: .folder) }
+                    .winButton(.outline)
+            }.padding(.top, 8)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+}
+
 /// «Открытые файлы» row: the server and «Файлы · SFTP» once connected.
 private struct FilesRow: View {
     @ObservedObject var files: FilesController
@@ -358,7 +403,7 @@ private struct WorkspaceArea: View {
     var body: some View {
         switch manager.workspace {
         case .catalog:
-            CatalogPage(manager: manager)
+            StartPage(manager: manager)
         case .session:
             VStack(alignment: .leading, spacing: 7) {
                 SessionInfo(manager: manager, entry: manager.activeEntry, groupName: manager.activeEntry.map { manager.groupName(of: $0) } ?? "")
@@ -443,14 +488,10 @@ private struct Footer: View {
     var body: some View {
         let palette = Palette.of(scheme)
         HStack(spacing: 12) {
-            if !manager.showingSessions {
-                Text(manager.catalogProtocol == .ssh ? manager.configPath : "~/Library/Application Support/SSH Manager/tabs.xml")
-                    .foregroundStyle(palette.muted).lineLimit(1).truncationMode(.middle)
-                Spacer()
-                Text(CatalogModel(manager: manager, query: manager.catalogQuery).statusText).foregroundStyle(palette.muted)
-            } else {
-                Spacer()
-            }
+            Text(manager.catalogProtocol == .ssh ? manager.configPath : "~/Library/Application Support/SSH Manager/tabs.xml")
+                .foregroundStyle(palette.muted).lineLimit(1).truncationMode(.middle)
+            Spacer()
+            Text("Подключений: \(manager.serverCount)").foregroundStyle(palette.muted)
             Button {
                 if updates.available != nil { updates.presented = true } else { updates.check(manual: true) }
             } label: {
@@ -464,426 +505,6 @@ private struct Footer: View {
         .font(.system(size: 12))
         .padding(.horizontal, 16)
         .frame(height: 47)
-    }
-}
-
-// MARK: - Catalog
-
-/// Rows of the current tab after search and sorting.
-private struct CatalogModel {
-    let manager: Manager
-    var query = ""
-
-    var favorites: Bool { manager.destination == .favorites }
-
-    var groupProfiles: [Profile] {
-        if favorites { return manager.profiles.filter { manager.isFavorite(Manager.key($0)) } }
-        guard let group = manager.currentGroup else { return manager.profiles }
-        return manager.profiles.filter { group.aliases.contains($0.id) }
-    }
-
-    var groupDesktops: [DesktopProfile] {
-        if favorites { return manager.settings.desktops.filter { manager.isFavorite(Manager.key($0)) } }
-        guard let group = manager.currentGroup else { return manager.settings.desktops }
-        return manager.settings.desktops.filter { $0.group == group.id }
-    }
-
-    var groupVnc: [VncProfile] {
-        if favorites { return manager.settings.vnc.filter { manager.isFavorite(Manager.key($0)) } }
-        guard let group = manager.currentGroup else { return manager.settings.vnc }
-        return manager.settings.vnc.filter { $0.group == group.id }
-    }
-
-    var profiles: [Profile] {
-        let search = query.trimmingCharacters(in: .whitespacesAndNewlines)
-        let filtered = groupProfiles.filter { profile in
-            search.isEmpty || [profile.alias, profile.host, profile.user, manager.group(of: profile)?.name ?? ""]
-                .contains { $0.localizedCaseInsensitiveContains(search) }
-        }
-        return manager.currentSort.apply(filtered, name: \.alias, host: { $0.host.isEmpty ? $0.alias : $0.host })
-    }
-
-    var desktops: [DesktopProfile] {
-        let search = query.trimmingCharacters(in: .whitespacesAndNewlines)
-        let filtered = groupDesktops.filter { profile in
-            search.isEmpty || [profile.name, profile.address, profile.account, manager.group(of: profile)?.name ?? ""]
-                .contains { $0.localizedCaseInsensitiveContains(search) }
-        }
-        return manager.currentSort.apply(filtered, name: \.name, host: \.host)
-    }
-
-    var vnc: [VncProfile] {
-        let search = query.trimmingCharacters(in: .whitespacesAndNewlines)
-        let filtered = groupVnc.filter { profile in
-            search.isEmpty || [profile.name, profile.address, profile.user, manager.group(of: profile)?.name ?? ""]
-                .contains { $0.localizedCaseInsensitiveContains(search) }
-        }
-        return manager.currentSort.apply(filtered, name: \.name, host: \.host)
-    }
-
-    var statusText: String {
-        let (total, shown) = switch manager.catalogProtocol {
-        case .ssh: (groupProfiles.count, profiles.count)
-        case .rdp: (groupDesktops.count, desktops.count)
-        case .vnc: (groupVnc.count, vnc.count)
-        }
-        return shown == total ? "Подключений: \(total)" : "Найдено: \(shown) из \(total)"
-    }
-}
-
-private struct CatalogPage: View {
-    @ObservedObject var manager: Manager
-    @State private var selection: String?
-    @FocusState private var searchFocused: Bool
-    @Environment(\.colorScheme) private var scheme
-
-    var body: some View {
-        let query = manager.catalogQuery
-        let model = CatalogModel(manager: manager, query: query)
-        VStack(alignment: .leading, spacing: 0) {
-            HStack(spacing: 4) {
-                ForEach(ConnectionProtocol.allCases) { kind in
-                    Button {
-                        manager.catalogProtocol = kind
-                        manager.catalogQuery = ""
-                        selection = nil
-                    } label: { GlyphLabel(title: kind.rawValue, glyph: kind == .ssh ? .terminal : .server) }
-                        .winButton(manager.catalogProtocol == kind ? .selectedTab : .tab)
-                        .frame(minWidth: 86)
-                }
-                Spacer(minLength: 12)
-            }.padding(.bottom, 6)
-            TabStrip(manager: manager)
-            tools(model: model)
-            ServerTable(manager: manager, model: model, selection: $selection, query: query)
-        }
-        .padding(.bottom, 8)
-        // ⌘F, ⌘E and ⌘⌫ / Delete, like Ctrl+F, F2 and Delete in the Windows app.
-        .onReceive(NotificationCenter.default.publisher(for: .focusCatalogSearch)) { _ in searchFocused = true }
-        .onReceive(NotificationCenter.default.publisher(for: .editCatalogRow)) { _ in
-            editSelected(CatalogModel(manager: manager, query: manager.catalogQuery))
-        }
-        .onReceive(NotificationCenter.default.publisher(for: .deleteCatalogRow)) { _ in
-            deleteSelected(CatalogModel(manager: manager, query: manager.catalogQuery))
-        }
-    }
-
-    private func tools(model: CatalogModel) -> some View {
-        HStack(spacing: 4) {
-            SearchField(placeholder: "Найти сервер", text: $manager.catalogQuery, focus: $searchFocused).frame(width: 265)
-            Spacer()
-            Menu {
-                Button("Экспорт архива…") { manager.exportBackup() }
-                Button("Импорт архива…") { manager.importBackup() }
-                Divider()
-                Button("Импорт из других программ…") { manager.importing = true }
-            } label: { GlyphLabel(title: "Резервные копии", glyph: .folder) }
-                .menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize()
-                .padding(.horizontal, 10)
-            Button { manager.reloadAll() } label: { GlyphLabel(title: "Обновить", glyph: .refresh) }.winButton(.quiet)
-                .help("Перечитать SSH config и настройки (⌘R)")
-            Button { editSelected(model) } label: { GlyphLabel(title: "Изменить", glyph: .edit) }
-                .winButton(.quiet).disabled(selection == nil).help("Изменить выбранное подключение (⌘E)")
-            Button { deleteSelected(model) } label: { GlyphLabel(title: "Удалить", glyph: .delete, danger: true) }
-                .winButton(.quiet, danger: true).disabled(selection == nil).help("Удалить выбранное подключение (⌘⌫)")
-        }
-        .padding(.bottom, 8)
-    }
-
-    private func editSelected(_ model: CatalogModel) {
-        switch manager.catalogProtocol {
-        case .ssh:
-            if let profile = model.profiles.first(where: { $0.id == selection }) { manager.editor = ProfileEditorState(original: profile) }
-        case .rdp:
-            if let profile = model.desktops.first(where: { $0.id == selection }) {
-                manager.desktopEditor = DesktopEditorState(original: profile, group: profile.group)
-            }
-        case .vnc:
-            if let profile = model.vnc.first(where: { $0.id == selection }) { manager.editVnc(profile) }
-        }
-    }
-
-    private func deleteSelected(_ model: CatalogModel) {
-        switch manager.catalogProtocol {
-        case .ssh:
-            if let profile = model.profiles.first(where: { $0.id == selection }) { manager.remove(profile) }
-        case .rdp:
-            if let profile = model.desktops.first(where: { $0.id == selection }) { manager.removeDesktop(profile) }
-        case .vnc:
-            if let profile = model.vnc.first(where: { $0.id == selection }) { manager.removeVnc(profile) }
-        }
-    }
-}
-
-private struct TabStrip: View {
-    @ObservedObject var manager: Manager
-    @Environment(\.colorScheme) private var scheme
-
-    var body: some View {
-        HStack(spacing: 6) {
-            ScrollView(.horizontal, showsIndicators: false) {
-                HStack(spacing: 5) {
-                    if !manager.settings.favorites.isEmpty {
-                        Button { manager.destination = .favorites } label: {
-                            HStack(spacing: 8) {
-                                GlyphView(glyph: .star, color: manager.destination == .favorites ? Palette.of(scheme).teal : Palette.of(scheme).muted)
-                                Text("Избранное").lineLimit(1)
-                            }
-                        }.winButton(manager.destination == .favorites ? .selectedTab : .tab)
-                    }
-                    tab(name: "Все серверы", marker: nil, selected: manager.destination == .all) { manager.destination = .all }
-                        .contextMenu { startupItem(nil) }
-                    ForEach(manager.settings.groups) { group in
-                        tab(name: group.name, marker: group.marker, selected: manager.destination == .group(group.id)) {
-                            manager.destination = .group(group.id)
-                        }
-                        .contextMenu { groupMenu(group) }
-                        .draggable(group.id)
-                        .dropDestination(for: String.self) { items, _ in
-                            guard let moved = items.first else { return false }
-                            manager.placeGroup(moved, before: group.id)
-                            return true
-                        }
-                    }
-                }
-            }
-            Button { manager.groupEditor = GroupEditorState() } label: { GlyphLabel(title: "Новая вкладка", glyph: .plus) }
-                .winButton(.quiet).frame(minWidth: 140)
-        }
-        .frame(height: 41)
-        .padding(.bottom, 8)
-    }
-
-    private func tab(name: String, marker: GroupMarker?, selected: Bool, action: @escaping () -> Void) -> some View {
-        Button(action: action) {
-            HStack(spacing: 8) {
-                if let marker { Circle().fill(marker.color).frame(width: 11, height: 11) }
-                Text(name).lineLimit(1).frame(maxWidth: 230)
-            }
-        }
-        .winButton(selected ? .selectedTab : .tab)
-    }
-
-    @ViewBuilder
-    private func startupItem(_ id: String?) -> some View {
-        Button {
-            manager.updateSettings { $0.startup = id }
-        } label: {
-            if manager.settings.startup == id { Label("Открывать при запуске", systemImage: "checkmark") }
-            else { Text("Открывать при запуске") }
-        }
-    }
-
-    @ViewBuilder
-    private func groupMenu(_ group: ServerGroup) -> some View {
-        let groups = manager.settings.groups
-        let index = groups.firstIndex { $0.id == group.id } ?? 0
-        Button { manager.groupEditor = GroupEditorState(original: group) } label: { Label("Переименовать вкладку", systemImage: "pencil") }
-        Menu {
-            Button { manager.mark(group, nil) } label: {
-                if group.marker == nil { Label("Без метки", systemImage: "checkmark") } else { Text("Без метки") }
-            }
-            ForEach(GroupMarker.allCases) { marker in
-                Button { manager.mark(group, marker) } label: {
-                    if group.marker == marker { Label(marker.title, systemImage: "checkmark") } else { Text(marker.title) }
-                }
-            }
-        } label: { Label("Цветовая метка", systemImage: "circle.fill") }
-        Button { manager.shiftGroup(group, by: -1) } label: { Label("Переместить влево", systemImage: "arrow.left") }
-            .disabled(index == 0)
-        Button { manager.shiftGroup(group, by: 1) } label: { Label("Переместить вправо", systemImage: "arrow.right") }
-            .disabled(index == groups.count - 1)
-        startupItem(group.id)
-        Divider()
-        Button(role: .destructive) { manager.removeGroup(group) } label: { Label("Удалить вкладку", systemImage: "trash") }
-    }
-}
-
-/// The Windows server grid: header with three-state sorting, 45 pt rows, Files/Connect pills.
-private struct ServerTable: View {
-    @ObservedObject var manager: Manager
-    let model: CatalogModel
-    @Binding var selection: String?
-    let query: String
-    @FocusState private var focused: Bool
-    @Environment(\.colorScheme) private var scheme
-
-    private struct Row: Identifiable {
-        let id: String
-        let name, address, user, port, tab: String
-        let sessions: Int
-        let ssh: Profile?
-        let rdp: DesktopProfile?
-        let vnc: VncProfile?
-    }
-
-    private var rows: [Row] {
-        if manager.catalogProtocol == .rdp {
-            return model.desktops.map { desktop in
-                Row(id: desktop.id, name: desktop.name, address: desktop.host, user: desktop.account.isEmpty ? "—" : desktop.account,
-                    port: String(desktop.port), tab: manager.group(of: desktop)?.name ?? "—",
-                    sessions: manager.liveCount(for: desktop), ssh: nil, rdp: desktop, vnc: nil)
-            }
-        }
-        if manager.catalogProtocol == .vnc {
-            return model.vnc.map { profile in
-                Row(id: profile.id, name: profile.name, address: profile.host, user: profile.user.isEmpty ? "—" : profile.user,
-                    port: String(profile.port), tab: manager.group(of: profile)?.name ?? "—",
-                    sessions: manager.liveCount(for: profile), ssh: nil, rdp: nil, vnc: profile)
-            }
-        }
-        return model.profiles.map { profile in
-            Row(id: profile.id, name: profile.alias, address: profile.host.isEmpty ? "—" : profile.host,
-                user: profile.user.isEmpty ? "—" : profile.user, port: profile.port.isEmpty ? "—" : profile.port,
-                tab: manager.group(of: profile)?.name ?? "—", sessions: manager.liveCount(for: profile), ssh: profile, rdp: nil, vnc: nil)
-        }
-    }
-
-    var body: some View {
-        let palette = Palette.of(scheme)
-        let ssh = manager.catalogProtocol == .ssh
-        GeometryReader { geometry in
-            let widths = columnWidths(total: geometry.size.width, ssh: ssh)
-            VStack(spacing: 0) {
-                header(widths: widths, ssh: ssh, palette: palette)
-                ScrollView {
-                    LazyVStack(spacing: 0) {
-                        ForEach(rows) { row in rowView(row, widths: widths, ssh: ssh, palette: palette) }
-                    }
-                }
-                .overlay {
-                    if rows.isEmpty {
-                        Text(emptyText).foregroundStyle(palette.muted).multilineTextAlignment(.center).padding(16)
-                    }
-                }
-            }
-            .background(palette.surface)
-            .overlay(Rectangle().strokeBorder(palette.line, lineWidth: 1).allowsHitTesting(false))
-        }
-        // Delete removes the selected server only while the table has focus, never from a text field.
-        .focusable()
-        .focusEffectDisabled()
-        .focused($focused)
-        .onDeleteCommand { if selection != nil { NotificationCenter.default.post(name: .deleteCatalogRow, object: nil) } }
-    }
-
-    private var emptyText: String {
-        if !query.trimmingCharacters(in: .whitespaces).isEmpty { return "По вашему запросу ничего не найдено." }
-        if manager.destination == .favorites { return "Отметьте серверы звёздочкой: «В избранное» в меню строки." }
-        if manager.catalogProtocol == .rdp { return "Добавьте RDP-подключение или импортируйте профиль .rdp." }
-        if manager.catalogProtocol == .vnc { return "Добавьте VNC-подключение." }
-        if manager.currentGroup != nil { return "Добавьте сервер или перенесите сюда подключение из «Все серверы»." }
-        return "Добавьте сервер, чтобы создать первое подключение."
-    }
-
-    private func columnWidths(total: CGFloat, ssh: Bool) -> [CGFloat] {
-        let fixed: CGFloat = 64 + (ssh ? 100 : 0) + 159
-        let flexible = max(0, total - fixed)
-        let weights: [CGFloat] = [30, 34, 23, 22]
-        let sum = weights.reduce(0, +)
-        let flex = weights.map { flexible * $0 / sum }
-        return [flex[0], flex[1], flex[2], 64, flex[3], ssh ? 100 : 0, 159]
-    }
-
-    private func header(widths: [CGFloat], ssh: Bool, palette: Palette) -> some View {
-        let order = manager.currentSort
-        return HStack(spacing: 0) {
-            sortableHeader(ssh ? "Псевдоним" : "Название", width: widths[0], address: false, order: order)
-            sortableHeader("Адрес", width: widths[1], address: true, order: order)
-            headerCell("Пользователь", width: widths[2])
-            headerCell("Порт", width: widths[3])
-            headerCell("Вкладка", width: widths[4])
-            if ssh { headerCell("SFTP", width: widths[5]) }
-            headerCell(ssh ? "Терминал" : "Рабочий стол", width: widths[6])
-        }
-        .frame(height: 37)
-        .background(palette.canvas)
-        .overlay(alignment: .bottom) { Rectangle().fill(palette.line).frame(height: 1) }
-        .foregroundStyle(palette.muted)
-        .font(.system(size: 12, weight: .semibold))
-    }
-
-    private func headerCell(_ title: String, width: CGFloat) -> some View {
-        Text(title).lineLimit(1).padding(.leading, 8).frame(width: width, alignment: .leading)
-    }
-
-    private func sortableHeader(_ title: String, width: CGFloat, address: Bool, order: ServerSort) -> some View {
-        let ascending = order == (address ? .address : .name)
-        let descending = order == (address ? .addressDescending : .nameDescending)
-        return Button { manager.sortBy(address: address) } label: {
-            HStack(spacing: 4) {
-                Text(title).lineLimit(1)
-                if ascending || descending { Image(systemName: ascending ? "chevron.up" : "chevron.down").font(.system(size: 9, weight: .bold)) }
-                Spacer(minLength: 0)
-            }
-            .padding(.leading, 8)
-            .frame(width: width, height: 37, alignment: .leading)
-            .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-        .help("Нажмите для сортировки")
-    }
-
-    private func rowView(_ row: Row, widths: [CGFloat], ssh: Bool, palette: Palette) -> some View {
-        let selected = selection == row.id
-        return HStack(spacing: 0) {
-            HStack(spacing: 8) {
-                if manager.isFavorite(row.ssh.map { Manager.key($0) } ?? row.rdp.map { Manager.key($0) }
-                    ?? row.vnc.map { Manager.key($0) } ?? "") {
-                    GlyphView(glyph: .star, color: GroupMarker.amber.color)
-                } else {
-                    GlyphView(glyph: .server, color: palette.teal)
-                }
-                Text(row.name).font(.system(size: 13, weight: .semibold)).lineLimit(1)
-            }
-            .padding(.leading, 9).frame(width: widths[0], alignment: .leading)
-            cell(row.address, width: widths[1])
-            cell(row.user, width: widths[2])
-            cell(row.port, width: widths[3])
-            cell(row.tab, width: widths[4])
-            if ssh, let profile = row.ssh {
-                pill("Файлы", glyph: .folder, palette: palette) { manager.openFiles(profile) }.frame(width: widths[5])
-            }
-            pill(row.sessions > 0 ? "К сеансу · \(row.sessions)" : "Подключиться", glyph: .terminal, palette: palette) {
-                if let profile = row.ssh { manager.connect(profile) }
-                if let desktop = row.rdp { manager.connectDesktop(desktop) }
-                if let profile = row.vnc { manager.connectVnc(profile) }
-            }.frame(width: widths[6])
-        }
-        .frame(height: 45)
-        .background(selected ? palette.selection : palette.surface)
-        .overlay(alignment: .bottom) { Rectangle().fill(palette.line).frame(height: 1) }
-        .contentShape(Rectangle())
-        .onTapGesture(count: 2) { edit(row) }
-        .onTapGesture { selection = row.id; focused = true }
-        .contextMenu { CatalogRowMenu(manager: manager, ssh: row.ssh, rdp: row.rdp, vnc: row.vnc) }
-    }
-
-    private func cell(_ text: String, width: CGFloat) -> some View {
-        Text(text).font(.system(size: 13)).lineLimit(1).padding(.leading, 8).frame(width: width, alignment: .leading)
-    }
-
-    private func pill(_ title: String, glyph: Glyph, palette: Palette, action: @escaping () -> Void) -> some View {
-        Button(action: action) {
-            HStack(spacing: 6) {
-                GlyphView(glyph: glyph, color: palette.teal)
-                Text(title).font(.system(size: 13, weight: .semibold)).foregroundStyle(palette.teal).lineLimit(1)
-                Spacer(minLength: 0)
-            }
-            .padding(.leading, 7)
-            .frame(maxWidth: .infinity, minHeight: 30, maxHeight: 30)
-            .background(RoundedRectangle(cornerRadius: 7).fill(palette.mint))
-            .contentShape(RoundedRectangle(cornerRadius: 7))
-        }
-        .buttonStyle(.plain)
-        .padding(.horizontal, 5)
-    }
-
-    private func edit(_ row: Row) {
-        selection = row.id
-        if let profile = row.ssh { manager.editor = ProfileEditorState(original: profile) }
-        if let desktop = row.rdp { manager.desktopEditor = DesktopEditorState(original: desktop, group: desktop.group) }
-        if let profile = row.vnc { manager.editVnc(profile) }
     }
 }
 
@@ -1878,7 +1499,7 @@ private struct ServerPicker: View {
     private var visible: [Choice] {
         let search = query.trimmingCharacters(in: .whitespaces)
         let filtered = everything.filter { search.isEmpty || [$0.name, $0.address, $0.group].contains { $0.localizedCaseInsensitiveContains(search) } }
-        return ServerSort.name.apply(filtered, name: \.name, host: \.address)
+        return (embedded ? manager.columnSort : ServerSort.name).apply(filtered, name: \.name, host: \.address)
     }
 
     /// Up to five recent servers of this protocol while the search is empty (docs/ui-spec.md §7).
@@ -1909,13 +1530,16 @@ private struct ServerPicker: View {
         var result: [ColumnSection] = []
         let latest = recent
         if !latest.isEmpty { result.append(ColumnSection(id: "recent", title: "Недавние", color: nil, choices: latest)) }
+        let favorites = all.filter { manager.isFavorite($0.id) }
+        if !favorites.isEmpty { result.append(ColumnSection(id: "favorites", title: "Избранное", color: nil, choices: favorites)) }
+        let fixed = result.count
         for group in manager.settings.groups {
             let members = all.filter { $0.groupID == group.id }
             if !members.isEmpty { result.append(ColumnSection(id: group.id, title: group.name, color: group.marker?.color, choices: members)) }
         }
         let loose = all.filter { $0.groupID == nil }
         if !loose.isEmpty {
-            let grouped = result.count > (latest.isEmpty ? 0 : 1)
+            let grouped = result.count > fixed
             result.append(ColumnSection(id: "ungrouped", title: grouped ? "Без вкладки" : "Все серверы", color: nil, choices: loose))
         }
         return result
@@ -1935,10 +1559,61 @@ private struct ServerPicker: View {
         .onTapGesture { manager.toggleCollapsed(section.id) }
         .contextMenu {
             Button(folded ? "Развернуть" : "Свернуть") { manager.toggleCollapsed(section.id) }
+            if let group = manager.settings.groups.first(where: { $0.id == section.id }) { groupMenu(group) }
+            Divider()
+            Button { manager.groupEditor = GroupEditorState() } label: { Label("Новая вкладка…", systemImage: "plus") }
+            if let group = manager.settings.groups.first(where: { $0.id == section.id }) {
+                Button(role: .destructive) { manager.removeGroup(group) } label: { Label("Удалить вкладку", systemImage: "trash") }
+            }
         }
         .help(folded ? "Развернуть" : "Свернуть")
         .accessibilityAddTraits(.isButton)
         .accessibilityLabel(section.title + ", \(section.choices.count)" + (folded ? ", свёрнута" : ""))
+    }
+
+    @ViewBuilder
+    private func groupMenu(_ group: ServerGroup) -> some View {
+        let groups = manager.settings.groups
+        let index = groups.firstIndex { $0.id == group.id } ?? 0
+        Button { manager.groupEditor = GroupEditorState(original: group) } label: { Label("Переименовать вкладку", systemImage: "pencil") }
+        Menu {
+            Button { manager.mark(group, nil) } label: {
+                if group.marker == nil { Label("Без метки", systemImage: "checkmark") } else { Text("Без метки") }
+            }
+            ForEach(GroupMarker.allCases) { marker in
+                Button { manager.mark(group, marker) } label: {
+                    if group.marker == marker { Label(marker.title, systemImage: "checkmark") } else { Text(marker.title) }
+                }
+            }
+        } label: { Label("Цветовая метка", systemImage: "circle.fill") }
+        Button { manager.shiftGroup(group, by: -1) } label: { Label("Переместить выше", systemImage: "arrow.up") }.disabled(index == 0)
+        Button { manager.shiftGroup(group, by: 1) } label: { Label("Переместить ниже", systemImage: "arrow.down") }
+            .disabled(index == groups.count - 1)
+    }
+
+    /// The tab of the chosen server or group header: «Добавить сервер» puts a new server there.
+    private func target(for tag: String?) {
+        guard embedded else { return }
+        var group: String?
+        if let tag, let bar = tag.firstIndex(of: "|") {
+            let id = String(tag[tag.index(after: bar)...])
+            group = everything.first { $0.id == id }?.groupID
+        }
+        manager.destination = group.map { .group($0) } ?? .all
+    }
+
+    private func editChosen() {
+        guard embedded, let chosen else { return }
+        if let profile = chosen.ssh { manager.editor = ProfileEditorState(original: profile) }
+        if let desktop = chosen.rdp { manager.desktopEditor = DesktopEditorState(original: desktop, group: desktop.group) }
+        if let profile = chosen.vnc { manager.editVnc(profile) }
+    }
+
+    private func deleteChosen() {
+        guard embedded, let chosen else { return }
+        if let profile = chosen.ssh { manager.remove(profile) }
+        if let desktop = chosen.rdp { manager.removeDesktop(desktop) }
+        if let profile = chosen.vnc { manager.removeVnc(profile) }
     }
 
     private func choiceRow(_ choice: Choice, tag: String, palette: Palette, dot: Bool = true) -> some View {
@@ -1977,7 +1652,8 @@ private struct ServerPicker: View {
                         sectionHeader(section, palette: palette)
                         if !manager.settings.collapsed.contains(section.id) {
                             ForEach(section.choices) { choice in
-                                choiceRow(choice, tag: section.id + "|" + choice.id, palette: palette, dot: section.id == "recent")
+                                choiceRow(choice, tag: section.id + "|" + choice.id, palette: palette,
+                                          dot: section.id == "recent" || section.id == "favorites")
                             }
                         }
                     }
@@ -2002,6 +1678,12 @@ private struct ServerPicker: View {
         }
         .padding(embedded ? 0 : 20).frame(width: embedded ? nil : 495)
         .onAppear { kind = manager.catalogProtocol; focused = !embedded }
+        .onChange(of: kind) { _, value in if embedded { manager.catalogProtocol = value } }
+        .onChange(of: manager.catalogProtocol) { _, value in if embedded && kind != value { kind = value } }
+        .onChange(of: selection) { _, value in target(for: value) }
+        .onReceive(NotificationCenter.default.publisher(for: .editCatalogRow)) { _ in editChosen() }
+        .onReceive(NotificationCenter.default.publisher(for: .deleteCatalogRow)) { _ in deleteChosen() }
+        .onDeleteCommand { deleteChosen() }
         .onReceive(NotificationCenter.default.publisher(for: .focusServerSearch)) { _ in
             if embedded { focused = true }
         }

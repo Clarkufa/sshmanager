@@ -382,6 +382,23 @@ final class Manager: ObservableObject {
 
     func group(of profile: VncProfile) -> ServerGroup? { settings.groups.first { $0.id == profile.group } }
 
+    /// The order of the «Серверы» column for the chosen protocol (docs/ui-spec.md §2.2).
+    var columnSort: ServerSort {
+        switch catalogProtocol {
+        case .ssh: settings.sshSort
+        case .rdp: settings.rdpSort
+        case .vnc: settings.vncSort
+        }
+    }
+
+    var serverCount: Int {
+        switch catalogProtocol {
+        case .ssh: profiles.count
+        case .rdp: settings.desktops.count
+        case .vnc: settings.vnc.count
+        }
+    }
+
     var currentSort: ServerSort {
         switch catalogProtocol {
         case .ssh: currentGroup?.sshSort ?? settings.sshSort
