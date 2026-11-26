@@ -2,6 +2,7 @@ import argparse
 import os
 import subprocess
 import sys
+import time
 import uuid
 from dataclasses import asdict, replace
 from pathlib import Path
@@ -21,8 +22,9 @@ from gi.repository import Gdk, GdkPixbuf, Gio, GLib, Gtk, Pango, Vte  # noqa: F4
 from . import VERSION
 from .auth import Vault, account_for, ssh_args
 from .catalog import ALL_NAME, UNGROUPED_NAME, CatalogPage, next_order
-from .config import Config, parse_settings
-from .dialogs import IMPORT_RESPONSE, DesktopDialog, ProfileDialog, ServerPicker
+from .config import Config, Profile, parse_settings
+from .dialogs import IMPORT_RESPONSE, DesktopDialog, ImportDialog, ProfileDialog, ServerPicker, SettingsDialog
+from .extras import copy_key_command, parse_quick, putty_sessions, quick_alias
 from .files import FilesWindow
 from .launch import ssh_command_text, terminal_command
 from .rdp import DesktopProfile, ordered
@@ -55,6 +57,7 @@ class Window(Gtk.ApplicationWindow):
         self.document = None
         self.full_session = None
         self.quitting = False
+        self.transient = {}  # quick-connect aliases → (user, host, port), not saved in the SSH config
         try:
             self.settings = config.settings()
         except (ValueError, OSError):
@@ -82,8 +85,9 @@ class Window(Gtk.ApplicationWindow):
         self.sessions_button = action_button("Сеансы", self.show_sessions, icon="terminal", width=116)
         self.add_button = action_button("Добавить сервер", self.add_profile, "primary", icon="plus", width=158)
         catalog_page = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, margin_start=24, margin_end=24, margin_top=15)
-        catalog_page.pack_start(self.header(self.title, [self.theme_button(), self.sessions_button, self.add_button]),
-                                False, False, 0)
+        settings_button = action_button("Настройки", self.open_settings, "quiet", icon="edit")
+        catalog_page.pack_start(self.header(self.title, [settings_button, self.theme_button(), self.sessions_button,
+                                                         self.add_button]), False, False, 0)
         self.catalog = CatalogPage(self)
         catalog_page.pack_start(self.catalog, True, True, 0)
         self.pages.add_named(catalog_page, "catalog")
@@ -115,7 +119,8 @@ class Window(Gtk.ApplicationWindow):
         self.apply_theme()
         self.catalog.set_protocol(self.protocol)
         self.reload(show_error=False)
-        self.updates.check()
+        if self.settings["preferences"]["check_updates"]:
+            self.updates.check()
 
     # --- layout helpers ---------------------------------------------------------------------
     def header(self, title, buttons):
@@ -226,7 +231,43 @@ class Window(Gtk.ApplicationWindow):
             profiles = self.desktop_profiles()
         else:
             profiles = list(self.document.profiles) if self.document else []
+        if self.active_group == "*":
+            return [profile for profile in profiles if self.is_favorite(profile)]
         return [profile for profile in profiles if not self.active_group or self.group_of(profile) == self.active_group]
+
+    @property
+    def real_group(self):
+        """The selected tab when it is a user group (not «Все серверы» or «Избранное»)."""
+        return self.active_group if self.group_record(self.active_group) else ""
+
+    @staticmethod
+    def profile_key(profile):
+        return ("rdp:" + profile.id) if isinstance(profile, DesktopProfile) else "ssh:" + profile.alias.lower()
+
+    def is_favorite(self, profile):
+        return self.profile_key(profile) in self.settings["favorites"]
+
+    def toggle_favorite(self, profile):
+        key = self.profile_key(profile)
+        favorites = [item for item in self.settings["favorites"] if item != key]
+        if len(favorites) == len(self.settings["favorites"]):
+            favorites.append(key)
+        try:
+            self.update_catalog_settings(favorites=favorites)
+        except OSError as error:
+            message(self, error, Gtk.MessageType.ERROR)
+        if self.active_group == "*" and not favorites:
+            self.active_group = ""
+        self.catalog.render_groups()
+        self.catalog.render()
+
+    def record_recent(self, profile):
+        key = self.profile_key(profile)
+        recent = [{"key": key, "at": int(time.time())}] + [item for item in self.settings["recent"] if item["key"] != key]
+        try:
+            self.update_catalog_settings(recent=recent[:10])
+        except OSError:
+            pass
 
     def group_of(self, profile):
         if isinstance(profile, DesktopProfile):
@@ -238,7 +279,7 @@ class Window(Gtk.ApplicationWindow):
 
     @property
     def sort_key(self):
-        return self.protocol + ":" + self.active_group
+        return self.protocol + ":" + self.real_group
 
     def sort_by(self, column):
         changes = dict(self.settings["sort"])
@@ -348,10 +389,14 @@ class Window(Gtk.ApplicationWindow):
                 Item("Изменить", lambda: self.edit_desktop(profile), icon="edit"),
                 Item("Переместить во вкладку", icon="move", children=destinations),
                 Item("Экспорт .rdp…", lambda: self.transfer_desktop(profile), icon="copy"),
+                Item("Убрать из избранного" if self.is_favorite(profile) else "В избранное",
+                     lambda: self.toggle_favorite(profile), icon="plus"),
                 None,
                 Item("Удалить", lambda: self.delete_desktop(profile), icon="delete", danger=True),
             ])
         destinations += [None, Item("Новая вкладка…", lambda: self.move_to_new_group(profile), icon="plus")]
+        favorite = Item("Убрать из избранного" if self.is_favorite(profile) else "В избранное",
+                        lambda: self.toggle_favorite(profile), icon="plus")
         return menu_at(widget, event, [
             Item("Подключиться", lambda: self.connect_profile(profile), icon="terminal"),
             Item("Новый сеанс", lambda: self.connect_profile(profile, True), icon="plus"),
@@ -360,6 +405,8 @@ class Window(Gtk.ApplicationWindow):
             Item("Изменить", lambda: self.edit_profile(profile), icon="edit"),
             Item("Переместить во вкладку", icon="move", children=destinations),
             Item("Копировать команду SSH", lambda: self.copy_command(profile), icon="copy"),
+            Item("Скопировать ключ на сервер", lambda: self.copy_key(profile), icon="key"),
+            favorite,
             None,
             Item("Удалить", lambda: self.delete_profile(profile), icon="delete", danger=True),
         ])
@@ -420,7 +467,7 @@ class Window(Gtk.ApplicationWindow):
             has_password = before is not None and self.vault.lookup(before.secret) is not None
         except (OSError, RuntimeError, subprocess.TimeoutExpired):
             has_password = False
-        dialog = DesktopDialog(self, before, has_password, group=self.active_group)
+        dialog = DesktopDialog(self, before, has_password, group=self.real_group)
         while True:
             response = dialog.run()
             if response == IMPORT_RESPONSE:
@@ -489,7 +536,7 @@ class Window(Gtk.ApplicationWindow):
         if path:
             try:
                 if profile is None:
-                    imported = DesktopProfile.import_file(path, self.active_group)
+                    imported = DesktopProfile.import_file(path, self.real_group)
                     self.save_desktop(imported)
                     self.catalog.search.set_text("")
                     self.catalog.render(keep=imported)
@@ -509,7 +556,7 @@ class Window(Gtk.ApplicationWindow):
             has_password = before is not None and self.vault.lookup(account_for(before)) is not None
         except (OSError, RuntimeError, subprocess.TimeoutExpired):
             has_password = False
-        dialog = ProfileDialog(self, before, keys, has_password, key_error)
+        dialog = ProfileDialog(self, before, keys, has_password, key_error, self.settings["preferences"])
         while dialog.run() == Gtk.ResponseType.OK:
             after, password, forget = dialog.values()
             try:
@@ -538,8 +585,8 @@ class Window(Gtk.ApplicationWindow):
                     self.drop_password(previous, updated)
                 if before and before.alias.lower() != after.alias.lower():
                     self.settings["members"][after.alias.lower()] = self.settings["members"].pop(before.alias.lower(), "")
-                elif not before and self.active_group:
-                    self.settings["members"][after.alias.lower()] = self.active_group
+                elif not before and self.real_group:
+                    self.settings["members"][after.alias.lower()] = self.real_group
                 self.save_settings()
                 self.reload()
                 self.catalog.render(keep=after)
@@ -588,7 +635,134 @@ class Window(Gtk.ApplicationWindow):
 
     # --- sessions -----------------------------------------------------------------------------
     def ssh_arguments(self, profile, account):
+        quick = self.transient.get(profile.alias)
+        if quick is not None:
+            user, host, port = quick
+            base = ssh_args(Profile(host), self.config, None)
+            base[-1:-1] = ["-p", str(port)] + (["-l", user] if user else [])
+            return base
         return ssh_args(profile, self.config, account)
+
+    # --- stage 2 actions ------------------------------------------------------------------------
+    def quick_connect(self, text):
+        try:
+            protocol, user, host, port = parse_quick(text)
+        except ValueError as error:
+            message(self, error, Gtk.MessageType.ERROR)
+            return False
+        if protocol == "rdp":
+            profile = DesktopProfile(uuid.uuid4().hex, host, host, port, user).validate()
+            self.connect_profile(profile)
+            if confirm(self, f"Сохранить подключение «{host}»?"):
+                try:
+                    self.save_desktop(replace(profile, group=self.real_group))
+                except (OSError, ValueError) as error:
+                    message(self, error, Gtk.MessageType.ERROR)
+                self.catalog.render()
+            return True
+        existing = [item.alias for item in self.document.profiles] if self.document else []
+        alias = quick_alias(host, existing + list(self.transient))
+        self.transient[alias] = (user, host, port)
+        profile = Profile(alias, host, user, "" if port == 22 else str(port))
+        self.connect_profile(profile, True)
+        if self.document is not None and confirm(self, f"Сохранить подключение «{alias}»?"):
+            try:
+                updated = self.document.update(None, profile)
+                self.config.save(self.document, updated)
+                if self.real_group:
+                    self.settings["members"][alias.lower()] = self.real_group
+                    self.save_settings()
+                self.transient.pop(alias, None)
+                self.reload()
+            except (OSError, ValueError) as error:
+                message(self, error, Gtk.MessageType.ERROR)
+        return True
+
+    def copy_key(self, profile):
+        ssh_folder = Path.home() / ".ssh"
+        keys = sorted(ssh_folder.glob("*.pub")) if ssh_folder.is_dir() else []
+        path = chooser(self, "Публичный ключ для сервера", Gtk.FileChooserAction.OPEN, directory=ssh_folder,
+                       filters=(("Публичные ключи (*.pub)", "*.pub"),)) if len(keys) != 1 else str(keys[0])
+        if not path:
+            return
+        try:
+            command = copy_key_command(Path(path).read_text(encoding="utf-8", errors="replace"))
+        except (OSError, ValueError) as error:
+            message(self, error, Gtk.MessageType.ERROR)
+            return
+        number = max((session.number for session in self.related(profile)), default=0) + 1
+        session = SshSession(self, profile, number, command=command)
+        session.name = "ключ"
+        self.sessions.append(session)
+        self.show_sessions()
+        self.sessions_page.add(session)
+        self.sessions_changed()
+
+    def add_snippet(self):
+        name = prompt(self, "Новая команда", label="Название", commit="Далее", max_length=80)
+        if not name or not name.strip():
+            return
+        command = prompt(self, "Новая команда", label="Команда", commit="Сохранить", max_length=4000)
+        if not command or not command.strip():
+            return
+        try:
+            self.update_catalog_settings(snippets=self.settings["snippets"] + [{"name": name.strip(), "command": command}])
+        except OSError as error:
+            message(self, error, Gtk.MessageType.ERROR)
+
+    def remove_snippet(self, index):
+        snippets = list(self.settings["snippets"])
+        if 0 <= index < len(snippets) and confirm(self, f"Удалить команду «{snippets[index]['name']}»?"):
+            del snippets[index]
+            try:
+                self.update_catalog_settings(snippets=snippets)
+            except OSError as error:
+                message(self, error, Gtk.MessageType.ERROR)
+
+    def open_settings(self):
+        dialog = SettingsDialog(self, self.settings["preferences"])
+        while dialog.run() == Gtk.ResponseType.OK:
+            try:
+                preferences = dialog.values(self.settings["preferences"])
+                self.update_catalog_settings(preferences=preferences)
+            except (OSError, ValueError) as error:
+                dialog.error.set_text(str(error))
+                continue
+            for session in self.sessions:
+                session.apply_preferences(preferences)
+            break
+        dialog.destroy()
+
+    def import_other(self):
+        dialog = ImportDialog(self, putty_sessions)
+        chosen = dialog.chosen() if dialog.run() == Gtk.ResponseType.OK else []
+        dialog.destroy()
+        if not chosen:
+            return
+        added = 0
+        try:
+            desktops = list(self.settings["desktops"])
+            document = self.document
+            names = [item.alias for item in document.profiles] if document else []
+            for item in chosen:
+                if item.protocol == "rdp":
+                    desktops.append(asdict(DesktopProfile(uuid.uuid4().hex, item.name[:80] or item.host, item.host, item.port,
+                                                          item.user, item.domain, self.real_group).validate()))
+                elif document is not None:
+                    alias = quick_alias(item.name, names)
+                    names.append(alias)
+                    document = document.update(None, Profile(alias, item.host, item.user,
+                                                             "" if item.port == 22 else str(item.port)))
+                    if self.real_group:
+                        self.settings["members"][alias.lower()] = self.real_group
+                added += 1
+            if document is not self.document:
+                self.config.save(self.document, document)
+            self.update_catalog_settings(desktops=desktops)
+        except (OSError, ValueError) as error:
+            message(self, error, Gtk.MessageType.ERROR)
+        self.reload()
+        message(self, f"Импортировано подключений: {added}.")
 
     @staticmethod
     def server_key(profile):
@@ -610,6 +784,10 @@ class Window(Gtk.ApplicationWindow):
                 self.sessions_page.activate(existing, focus=True)
                 return
         number = max((session.number for session in related), default=0) + 1
+        if not isinstance(profile, DesktopProfile) and profile.alias in self.transient:
+            pass
+        else:
+            self.record_recent(profile)
         if isinstance(profile, DesktopProfile):
             if credential is None:
                 try:
@@ -719,7 +897,7 @@ class Window(Gtk.ApplicationWindow):
                                group["color"] if group and group["color"] else self.theme.color("teal")))
             return result
 
-        dialog = ServerPicker(self, self.protocol, entries)
+        dialog = ServerPicker(self, self.protocol, entries, [item["key"] for item in self.settings["recent"]])
         profile = dialog.chosen() if dialog.run() == Gtk.ResponseType.OK else None
         dialog.destroy()
         if profile is not None:
@@ -734,7 +912,7 @@ class Window(Gtk.ApplicationWindow):
     def on_delete(self, *_):
         if self.quitting:
             return False
-        if self.tray.available:
+        if self.tray.available and self.settings["preferences"]["close_to_tray"]:
             self.hide()
             return True
         if self.updates.installing:

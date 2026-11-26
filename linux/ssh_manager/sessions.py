@@ -61,10 +61,14 @@ def forwarding_failed(text):
     return bool(FORWARDING_ERROR.search(CONSOLE_SEQUENCE.sub("", text)))
 
 
-def style_terminal(terminal, scrollback=3000):
-    terminal.set_scrollback_lines(scrollback)
+def style_terminal(terminal, preferences=None):
+    preferences = preferences or {}
+    terminal.set_scrollback_lines(preferences.get("scrollback", 3000))
     terminal.set_mouse_autohide(True)
-    terminal.set_font(terminal_font())
+    font = terminal_font()
+    if preferences.get("terminal_font"):
+        font = Pango.FontDescription.from_string(f"{preferences['terminal_font']} {preferences.get('terminal_size', 11)}")
+    terminal.set_font(font)
     terminal.set_colors(rgba(TERMINAL["foreground"]), rgba(TERMINAL["background"]), [])
     terminal.set_color_cursor(rgba(TERMINAL["cursor"]))
     terminal.set_color_highlight(rgba(TERMINAL["selection"]))
@@ -119,6 +123,9 @@ class Session(Gtk.Box):
     def focus(self):
         pass
 
+    def apply_preferences(self, preferences):
+        pass
+
     def stop(self, *_):
         self.closed = True
         if self.pid:
@@ -126,15 +133,26 @@ class Session(Gtk.Box):
 
 
 class SshSession(Session):
-    def __init__(self, owner, profile, number, forwarding=True):
+    def __init__(self, owner, profile, number, forwarding=True, command=None):
         super().__init__(owner, profile, number)
         self.forwarding = forwarding
         self.without_forwarding = not forwarding
+        self.command = command  # a remote command, e.g. copying a public key
         self.broker = None
         self.inspected = 0
+        self.attempts = 0
         self.shift_paste_held = False
         self.terminal = Vte.Terminal()
-        style_terminal(self.terminal)
+        style_terminal(self.terminal, owner.settings.get("preferences"))
+        # Shown when SSH ends: the terminal output stays visible above it (docs/ui-spec.md §7).
+        self.ended_bar = Gtk.Box(spacing=8, margin=6)
+        self.ended_text = Gtk.Label(xalign=0, hexpand=True, ellipsize=Pango.EllipsizeMode.END)
+        mark(self.ended_text, "sshm-terminal-text")
+        self.ended_bar.pack_start(self.ended_text, True, True, 0)
+        self.ended_bar.pack_start(action_button("Переподключить", self.reconnect, "primary", icon="refresh"), False, False, 0)
+        self.ended_bar.pack_start(action_button("Закрыть сеанс", lambda: owner.close_session(self, confirm_close=False)),
+                                  False, False, 0)
+        self.pack_start(self.ended_bar, False, False, 0)
         self.terminal.connect("child-exited", self.exited)
         self.terminal.connect("key-press-event", self.shortcut)
         self.terminal.connect("paste-clipboard", self.on_paste_clipboard)
@@ -148,7 +166,29 @@ class SshSession(Session):
         self.pack_start(scroll, True, True, 0)
         self.connect("destroy", self.stop)
         self.show_all()
+        self.ended_bar.hide()
         threading.Thread(target=self.prepare, daemon=True).start()
+
+    def apply_preferences(self, preferences):
+        style_terminal(self.terminal, preferences)
+
+    def reconnect(self, automatic=False):
+        if self.live or self.closed:
+            return False
+        if not automatic:
+            self.attempts = 0
+        self.ended_bar.hide()
+        self.live = True
+        self.status = ""
+        self.terminal.set_input_enabled(True)
+        self.terminal.feed(b"\r\n")
+        self.changed()
+        threading.Thread(target=self.prepare, daemon=True).start()
+        return False
+
+    def send(self, text):
+        if self.live and not self.closed:
+            self.terminal.feed_child((text.replace("\r\n", "\r").replace("\n", "\r") + "\r").encode("utf-8"))
 
     @property
     def address(self):
@@ -249,6 +289,8 @@ class SshSession(Session):
             arguments = self.owner.ssh_arguments(self.profile, account)
             if not self.forwarding:
                 arguments[1:1] = ["-o", "ClearAllForwardings=yes"]
+            if self.command:
+                arguments += [self.command]
             environment = None
             if password:
                 self.broker = AskPass(account, password)
@@ -281,9 +323,18 @@ class SshSession(Session):
         if self.broker:
             self.broker.close()
             self.broker = None
+        code = exit_code(status)
         if not self.closed:
-            terminal.feed(f"\r\n\x1b[0mSSH завершился (код {exit_code(status)}).\r\n".encode())
+            terminal.feed(f"\r\n\x1b[0mSSH завершился (код {code}).\r\n".encode())
         terminal.set_input_enabled(False)
+        self.ended_text.set_text(f"Сеанс SSH завершён · {self.address} · код {code}")
+        self.ended_bar.show()
+        preferences = self.owner.settings.get("preferences", {})
+        if (not self.closed and code not in (0, 130) and not self.command and preferences.get("auto_reconnect")
+                and self.attempts < 3):
+            self.attempts += 1
+            self.ended_text.set_text(f"Соединение прервано · переподключение через 5 с (попытка {self.attempts} из 3)")
+            GLib.timeout_add_seconds(5, self.reconnect, True)
         self.changed()
 
     def stop(self, *_):
@@ -602,11 +653,13 @@ class SessionsPage(Gtk.Box):
                                     tooltip="Переоткрыть RDP-сеанс в отдельном окне")
         self.full_screen = action_button("Весь экран", lambda: self.active and owner.enter_full_screen(self.active),
                                          icon="server", width=116)
+        self.snippets = action_button("Команды", lambda: self.active and self.snippet_menu(self.snippets), icon="terminal",
+                                      width=110, tooltip="Сохранённые команды")
         self.duplicate = action_button("Новый сеанс этого сервера", lambda: self.active and owner.duplicate_session(self.active),
                                        "quiet", icon="plus", width=220)
         self.close = action_button("Закрыть", lambda: self.active and owner.close_session(self.active), "quiet",
                                    danger=True, width=81)
-        for widget in (self.files, self.reconnect, self.detach, self.full_screen, self.duplicate, self.close):
+        for widget in (self.files, self.snippets, self.reconnect, self.detach, self.full_screen, self.duplicate, self.close):
             buttons.pack_start(widget, False, False, 0)
         self.info = info
         workspace.pack_start(info, False, False, 0)
@@ -688,6 +741,7 @@ class SessionsPage(Gtk.Box):
             self.detail.set_text("  ·  ".join(parts))
         rdp = isinstance(session, RdpSession)
         self.files.set_visible(session is not None and not rdp)
+        self.snippets.set_visible(session is not None and not rdp)
         for widget in (self.reconnect, self.detach, self.full_screen):
             widget.set_visible(rdp)
         self.full_screen.set_sensitive(rdp and session.live and session.embedded and session.status == "подключён")
@@ -742,6 +796,42 @@ class SessionsPage(Gtk.Box):
                               icon="terminal"))
         items.append(Item("Закрыть сеанс", lambda: owner.close_session(session), icon="delete", danger=True))
         return menu_at(widget, event, items)
+
+    def snippet_menu(self, widget):
+        """«Команды»: saved commands with «Отправить», «Во все открытые сеансы», «Добавить…», «Удалить»."""
+        owner = self.owner
+        popover = Gtk.Popover(relative_to=widget)
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6, margin=10)
+        everywhere = Gtk.CheckButton(label="Во все открытые сеансы")
+        snippets = owner.settings.get("snippets", [])
+        if not snippets:
+            empty = Gtk.Label(label="Сохранённых команд пока нет.", xalign=0)
+            mark(empty, "sshm-muted")
+            box.pack_start(empty, False, False, 0)
+        for index, item in enumerate(snippets):
+            row = Gtk.Box(spacing=6)
+            title = Gtk.Label(label=item["name"], xalign=0, hexpand=True, ellipsize=Pango.EllipsizeMode.END)
+            title.set_tooltip_text(item["command"])
+            row.pack_start(title, True, True, 0)
+
+            def send(command=item["command"]):
+                targets = [session for session in owner.sessions if isinstance(session, SshSession) and session.live] \
+                    if everywhere.get_active() else [self.active]
+                for target in targets:
+                    if isinstance(target, SshSession):
+                        target.send(command)
+                popover.popdown()
+            row.pack_start(action_button("Отправить", send, "outline"), False, False, 0)
+            row.pack_start(action_button("", lambda index=index: (owner.remove_snippet(index), popover.popdown()), "quiet",
+                                         icon="delete", danger=True, tooltip="Удалить"), False, False, 0)
+            box.pack_start(row, False, False, 0)
+        box.pack_start(everywhere, False, False, 0)
+        box.pack_start(action_button("Добавить…", lambda: (popover.popdown(), owner.add_snippet()), "quiet", icon="plus"),
+                       False, False, 0)
+        popover.add(box)
+        box.set_size_request(360, -1)
+        popover.show_all()
+        popover.popup()
 
     def set_chrome(self, visible):
         self.sidebar.set_visible(visible)

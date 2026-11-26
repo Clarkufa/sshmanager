@@ -92,10 +92,10 @@ class EmbeddedRdpCommandTest(unittest.TestCase):
 class SettingsCompatibilityTest(unittest.TestCase):
     def test_unknown_desktop_fields_from_newer_versions_are_ignored(self):
         desktop = {"id": "a" * 32, "name": "x", "host": "10.0.0.1", "port": 3389, "user": "", "domain": "", "group": "",
-                   "width": 0, "height": 0, "clipboard": False, "fullscreen": False, "gateway": "gw.example.com"}
+                   "width": 0, "height": 0, "clipboard": False, "fullscreen": False, "future_option": "x"}
         settings = parse_settings(json.dumps({"desktops": [desktop], "future": True}).encode())
         self.assertEqual(settings["desktops"][0]["host"], "10.0.0.1")
-        self.assertNotIn("gateway", settings["desktops"][0])
+        self.assertNotIn("future_option", settings["desktops"][0])
 
 
 if __name__ == "__main__":

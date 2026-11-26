@@ -6,8 +6,12 @@ from pathlib import Path
 
 from gi.repository import Gdk, Gtk, Pango
 
+import os
+import socket
+
 from .auth import account_for
-from .config import Profile
+from .config import FORWARD_KINDS, Profile
+from .extras import generate_key
 from .rdp import DesktopProfile
 from .theme import mark
 from .widgets import action_button, chooser, dialog_buttons, themed
@@ -48,14 +52,16 @@ def _field(grid, row, caption, value="", hidden=False, limit=0):
 class ProfileDialog(Gtk.Dialog):
     """SSH connection: same fields, hints and key controls as src/ConnectionDialog.cs."""
 
-    def __init__(self, owner, profile, keys, has_password=False, key_error=None):
+    def __init__(self, owner, profile, keys, has_password=False, key_error=None, defaults=None):
         super().__init__(title="Изменить подключение" if profile else "Новое подключение", transient_for=owner, modal=True)
         themed(self)
-        self.set_default_size(724, 540)
+        self.set_default_size(724, 700)
         dialog_buttons(self, "Сохранить")
         self.original = profile
         self.has_password = has_password
-        profile = profile or Profile("")
+        if profile is None:
+            defaults = defaults or {}
+            profile = Profile("", user=defaults.get("default_user", ""), port=defaults.get("default_port", ""))
         grid = _grid(self, 138)
         self.entries = {}
         for row, (name, caption) in enumerate((("alias", "Псевдоним"), ("host", "Хост"), ("user", "Пользователь"),
@@ -98,10 +104,39 @@ class ProfileDialog(Gtk.Dialog):
         keys_row.pack_start(action_button("Добавить ключ", self.add_selected, icon="key", width=142), False, False, 0)
         keys_row.pack_start(action_button("Заменить", self.replace_selected, icon="edit", width=106), False, False, 0)
         keys_row.pack_start(action_button("Убрать", self.remove_selected, icon="delete", width=88), False, False, 0)
+        keys_row.pack_start(action_button("Создать ключ…", self.create_key, icon="plus"), False, False, 0)
         grid.attach(keys_row, 1, 10, 2, 1)
+
+        grid.attach(_label("Через сервер (ProxyJump)"), 0, 11, 1, 1)
+        self.proxy_jump = Gtk.Entry(text=profile.proxy_jump, hexpand=True, placeholder_text="bastion или user@host:port")
+        grid.attach(self.proxy_jump, 1, 11, 2, 1)
+        grid.attach(_label("Пробросы портов"), 0, 12, 1, 1)
+        self.forwards = Gtk.ListStore(str, str)
+        names = {name: kind for kind, name in FORWARD_KINDS.items()}
+        for name, value in profile.forwards:
+            self.forwards.append((names[name], value))
+        forward_view = Gtk.TreeView(model=self.forwards, headers_visible=False)
+        forward_view.append_column(Gtk.TreeViewColumn("", Gtk.CellRendererText(), text=0))
+        forward_view.append_column(Gtk.TreeViewColumn("", Gtk.CellRendererText(), text=1))
+        self.forward_view = forward_view
+        forward_scroll = Gtk.ScrolledWindow(min_content_height=60)
+        forward_scroll.add(forward_view)
+        mark(forward_scroll, "sshm-frame")
+        grid.attach(forward_scroll, 1, 12, 2, 1)
+        forward_row = Gtk.Box(spacing=6)
+        self.forward_kind = Gtk.ComboBoxText()
+        for kind, title in (("L", "L — локальный"), ("R", "R — удалённый"), ("D", "D — SOCKS")):
+            self.forward_kind.append(kind, title)
+        self.forward_kind.set_active_id("L")
+        self.forward_value = Gtk.Entry(hexpand=True, placeholder_text="8080 localhost:80")
+        forward_row.pack_start(self.forward_kind, False, False, 0)
+        forward_row.pack_start(self.forward_value, True, True, 0)
+        forward_row.pack_start(action_button("Добавить", self.add_forward, icon="plus"), False, False, 0)
+        forward_row.pack_start(action_button("Убрать", self.remove_forward, icon="delete"), False, False, 0)
+        grid.attach(forward_row, 1, 13, 2, 1)
         self.hint = _label("", wrap=True)
         mark(self.hint, "sshm-danger")
-        grid.attach(self.hint, 1, 11, 2, 1)
+        grid.attach(self.hint, 1, 14, 2, 1)
         for name in ("alias", "host", "user", "port"):
             self.entries[name].connect("changed", lambda *_: self.update_password_hint())
         self.show_all()
@@ -152,8 +187,43 @@ class ProfileDialog(Gtk.Dialog):
             self.available.prepend_text(path)
             self.available.set_active(0)
 
+    def add_forward(self):
+        value = " ".join(self.forward_value.get_text().split())
+        if value:
+            self.forwards.append((self.forward_kind.get_active_id(), value))
+            self.forward_value.set_text("")
+
+    def remove_forward(self):
+        model, item = self.forward_view.get_selection().get_selected()
+        if item is not None:
+            model.remove(item)
+
+    def create_key(self):
+        from .widgets import message, prompt
+        alias = self.entries["alias"].get_text().strip()
+        name = prompt(self, "Создать ключ", f"id_ed25519_{alias}" if alias else "id_ed25519",
+                      label="Имя файла в ~/.ssh", commit="Создать")
+        if not name:
+            return
+        if "/" in name or name.startswith("."):
+            message(self, "Укажите имя файла без папок.", Gtk.MessageType.ERROR)
+            return
+        try:
+            public = generate_key(Path.home() / ".ssh" / name, f"{os.environ.get('USER', 'user')}@{socket.gethostname()}")
+        except (OSError, ValueError) as error:
+            message(self, error, Gtk.MessageType.ERROR)
+            return
+        private = str(public.with_suffix(""))
+        self.available.prepend_text(private)
+        self.available.set_active(0)
+        if private not in self.keys():
+            self.selected.append((private,))
+        message(self, f"Ключ создан: {private}\nПубличную часть можно скопировать на сервер через меню строки «Скопировать ключ на сервер».")
+
     def values(self):
-        profile = Profile(*(self.entries[name].get_text().strip() for name in ("alias", "host", "user", "port")), self.keys())
+        forwards = tuple((FORWARD_KINDS[kind], value) for kind, value in self.forwards)
+        profile = Profile(*(self.entries[name].get_text().strip() for name in ("alias", "host", "user", "port")), self.keys(),
+                          proxy_jump=self.proxy_jump.get_text().strip(), forwards=forwards)
         return profile, self.entries["password"].get_text(), self.forget.get_active()
 
 
@@ -195,11 +265,47 @@ class DesktopDialog(Gtk.Dialog):
         self.fullscreen = Gtk.CheckButton(label="Открывать на весь экран", active=self.profile.fullscreen)
         grid.attach(self.clipboard, 1, 9, 2, 1)
         grid.attach(self.fullscreen, 1, 10, 2, 1)
+        extra = Gtk.Expander(label="Дополнительно")
+        extra.set_expanded(bool(self.profile.drives or self.profile.printers or self.profile.multimon or self.profile.gateway))
+        inner = Gtk.Grid(column_spacing=12, row_spacing=8, margin_top=8)
+        inner.label_width = 120
+        inner.attach(_label("Подключать папки"), 0, 0, 1, 1)
+        self.drives = Gtk.ListStore(str)
+        for path in self.profile.drives:
+            self.drives.append((path,))
+        self.drive_view = Gtk.TreeView(model=self.drives, headers_visible=False)
+        self.drive_view.append_column(Gtk.TreeViewColumn("", Gtk.CellRendererText(ellipsize=Pango.EllipsizeMode.MIDDLE), text=0))
+        drive_scroll = Gtk.ScrolledWindow(min_content_height=52, hexpand=True)
+        drive_scroll.add(self.drive_view)
+        mark(drive_scroll, "sshm-frame")
+        inner.attach(drive_scroll, 1, 0, 1, 1)
+        drive_buttons = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
+        drive_buttons.pack_start(action_button("Добавить…", self.add_drive, icon="plus"), False, False, 0)
+        drive_buttons.pack_start(action_button("Убрать", self.remove_drive, icon="delete"), False, False, 0)
+        inner.attach(drive_buttons, 2, 0, 1, 1)
+        self.printers = Gtk.CheckButton(label="Принтеры", active=self.profile.printers)
+        self.multimon = Gtk.CheckButton(label="Все мониторы (в отдельном окне)", active=self.profile.multimon)
+        inner.attach(self.printers, 1, 1, 2, 1)
+        inner.attach(self.multimon, 1, 2, 2, 1)
+        self.gateway = _field(inner, 3, "Шлюз RD Gateway", self.profile.gateway, limit=253)
+        self.gateway_user = _field(inner, 4, "Пользователь шлюза", self.profile.gateway_user, limit=128)
+        extra.add(inner)
+        grid.attach(extra, 0, 11, 3, 1)
         self.error = _label("", wrap=True)
         mark(self.error, "sshm-danger")
-        grid.attach(self.error, 1, 11, 2, 1)
+        grid.attach(self.error, 1, 12, 2, 1)
         self.show_all()
         self.forget.set_visible(has_password)
+
+    def add_drive(self):
+        path = chooser(self, "Папка для удалённого рабочего стола", Gtk.FileChooserAction.SELECT_FOLDER, directory=Path.home())
+        if path and path not in (row[0] for row in self.drives):
+            self.drives.append((path,))
+
+    def remove_drive(self):
+        model, item = self.drive_view.get_selection().get_selected()
+        if item is not None:
+            model.remove(item)
 
     def values(self):
         fields = {key: entry.get_text().strip() for key, entry in self.entries.items()}
@@ -214,7 +320,9 @@ class DesktopDialog(Gtk.Dialog):
             host = host.encode("idna").decode("ascii")
         fields["host"] = host
         profile = replace(self.profile, **fields, clipboard=self.clipboard.get_active(),
-                          fullscreen=self.fullscreen.get_active()).validate()
+                          fullscreen=self.fullscreen.get_active(), drives=tuple(row[0] for row in self.drives),
+                          printers=self.printers.get_active(), multimon=self.multimon.get_active(),
+                          gateway=self.gateway.get_text().strip(), gateway_user=self.gateway_user.get_text().strip()).validate()
         password = "" if self.forget.get_active() else self.password.get_text()
         if password and not profile.user:
             raise ValueError("Укажите пользователя, чтобы сохранить пароль RDP.")
@@ -250,8 +358,9 @@ class LogonDialog(Gtk.Dialog):
 class ServerPicker(Gtk.Dialog):
     """«Новый сеанс»: protocol switch, search, list with group dots and a status line (src/ServerPickerDialog.cs)."""
 
-    def __init__(self, owner, protocol, entries):
-        """entries(protocol) -> [(profile, group_name, group_color)] sorted by name."""
+    def __init__(self, owner, protocol, entries, recent=()):
+        """entries(protocol) -> [(profile, group_name, group_color)] sorted by name; recent: keys like "ssh:alias"."""
+        self.recent = list(recent)
         super().__init__(title="Новый сеанс", transient_for=owner, modal=True)
         themed(self)
         self.set_default_size(495, 389)
@@ -297,31 +406,59 @@ class ServerPicker(Gtk.Dialog):
         everything = self.entries(self.protocol)
         query = self.search.get_text().strip().casefold()
         shown = [entry for entry in everything if query in (entry[0].alias + " " + entry[0].address + " " + entry[1]).casefold()]
-        for profile, group, color in shown:
-            row = Gtk.ListBoxRow()
-            row.profile = profile
-            line = Gtk.Box(spacing=9, margin=7)
-            dot = Gtk.Label()
-            dot.set_markup(f'<span foreground="{color}">●</span>')
-            line.pack_start(dot, False, False, 0)
-            texts = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
-            texts.pack_start(_label(profile.alias, bold=True), False, False, 0)
-            texts.pack_start(_label(profile.address + (f"  ·  {group}" if group else ""), muted=True), False, False, 0)
-            line.pack_start(texts, True, True, 0)
-            row.add(line)
-            self.listing.add(row)
+        recent = []
+        if not query:
+            keys = [key for key in self.recent if key.startswith(self.protocol + ":")][:5]
+            by_key = {self.key(entry[0]): entry for entry in shown}
+            recent = [by_key[key] for key in keys if key in by_key]
+        sections = [("Недавние", recent), ("Все серверы", shown)] if recent else [(None, shown)]
+        for title, items in sections:
+            if title:
+                header = Gtk.ListBoxRow(selectable=False, activatable=False)
+                header.profile = None
+                caption = _label(title, muted=True)
+                caption.set_margin_start(8)
+                caption.set_margin_top(4)
+                header.add(caption)
+                self.listing.add(header)
+            for profile, group, color in items:
+                self.listing.add(self.row(profile, group, color))
         self.listing.show_all()
-        self.listing.select_row(self.listing.get_row_at_index(0))
+        first = next((row for row in self.listing.get_children() if row.get_selectable()), None)
+        if first is not None:
+            self.listing.select_row(first)
         self.status.set_text(f"Серверов: {len(shown)}" if shown else
                              "Серверы не найдены." if everything else "Сохранённых серверов пока нет.")
         self.set_response_sensitive(Gtk.ResponseType.OK, bool(shown))
+
+    @staticmethod
+    def key(profile):
+        return ("rdp:" + profile.id) if hasattr(profile, "id") and hasattr(profile, "fullscreen") else "ssh:" + profile.alias
+
+    def row(self, profile, group, color):
+        row = Gtk.ListBoxRow()
+        row.profile = profile
+        line = Gtk.Box(spacing=9, margin=7)
+        dot = Gtk.Label()
+        dot.set_markup(f'<span foreground="{color}">●</span>')
+        line.pack_start(dot, False, False, 0)
+        texts = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        texts.pack_start(_label(profile.alias, bold=True), False, False, 0)
+        texts.pack_start(_label(profile.address + (f"  ·  {group}" if group else ""), muted=True), False, False, 0)
+        line.pack_start(texts, True, True, 0)
+        row.add(line)
+        return row
 
     def navigate(self, entry, event):
         if event.keyval not in (Gdk.KEY_Up, Gdk.KEY_Down):
             return False
         row = self.listing.get_selected_row()
         index = row.get_index() if row else -1
-        target = self.listing.get_row_at_index(max(0, index + (1 if event.keyval == Gdk.KEY_Down else -1)))
+        step = 1 if event.keyval == Gdk.KEY_Down else -1
+        target = self.listing.get_row_at_index(max(0, index + step))
+        while target is not None and not target.get_selectable():
+            index += step
+            target = self.listing.get_row_at_index(index + step) if index + step >= 0 else None
         if target is not None:
             self.listing.select_row(target)
         return True
@@ -329,3 +466,104 @@ class ServerPicker(Gtk.Dialog):
     def chosen(self):
         row = self.listing.get_selected_row()
         return row.profile if row else None
+
+
+class SettingsDialog(Gtk.Dialog):
+    """«Настройки» (docs/ui-spec.md §7)."""
+
+    def __init__(self, owner, preferences):
+        super().__init__(title="Настройки", transient_for=owner, modal=True)
+        themed(self)
+        self.set_default_size(520, -1)
+        dialog_buttons(self, "Сохранить")
+        grid = _grid(self, 190)
+        grid.attach(_label("Шрифт терминала"), 0, 0, 1, 1)
+        self.font = Gtk.FontButton(use_font=True, hexpand=True)
+        self.font.set_filter_func(lambda family, face: family.is_monospace())
+        self.font_chosen = bool(preferences["terminal_font"])
+        self.font.set_font(f"{preferences['terminal_font'] or 'Monospace'} {preferences['terminal_size']}")
+        self.font.connect("font-set", lambda *_: setattr(self, "font_chosen", True))
+        grid.attach(self.font, 1, 0, 2, 1)
+        grid.attach(_label("Строк прокрутки"), 0, 1, 1, 1)
+        self.scrollback = Gtk.SpinButton.new_with_range(100, 100000, 500)
+        self.scrollback.set_value(preferences["scrollback"])
+        grid.attach(self.scrollback, 1, 1, 2, 1)
+        self.user = _field(grid, 2, "Пользователь по умолчанию", preferences["default_user"], limit=128)
+        self.port = _field(grid, 3, "Порт по умолчанию", preferences["default_port"], limit=5)
+        self.reconnect = Gtk.CheckButton(label="Переподключать SSH автоматически", active=preferences["auto_reconnect"])
+        self.tray = Gtk.CheckButton(label="Сворачивать в трей при закрытии окна", active=preferences["close_to_tray"])
+        self.updates = Gtk.CheckButton(label="Проверять обновления при запуске", active=preferences["check_updates"])
+        for row, check in enumerate((self.reconnect, self.tray, self.updates), start=4):
+            grid.attach(check, 1, row, 2, 1)
+        self.error = _label("", wrap=True)
+        mark(self.error, "sshm-danger")
+        grid.attach(self.error, 1, 7, 2, 1)
+        self.show_all()
+
+    def values(self, preferences):
+        port = self.port.get_text().strip()
+        if port and (not port.isdigit() or not 1 <= int(port) <= 65535):
+            raise ValueError("Порт должен быть числом от 1 до 65535.")
+        user = self.user.get_text().strip()
+        if any(char.isspace() or char in "#'\"" for char in user):
+            raise ValueError("Укажите имя пользователя без пробелов и кавычек.")
+        font = Pango.FontDescription.from_string(self.font.get_font() or "")
+        size = font.get_size() // Pango.SCALE if font.get_size() else preferences["terminal_size"]
+        family = (font.get_family() or "") if self.font_chosen else preferences["terminal_font"]
+        return {**preferences, "terminal_font": family, "terminal_size": max(6, min(48, size)),
+                "scrollback": int(self.scrollback.get_value()), "default_user": user, "default_port": port,
+                "auto_reconnect": self.reconnect.get_active(), "close_to_tray": self.tray.get_active(),
+                "check_updates": self.updates.get_active()}
+
+
+class ImportDialog(Gtk.Dialog):
+    """«Импорт из других программ»: PuTTY sessions or a mRemoteNG / MobaXterm file, with checkboxes."""
+
+    def __init__(self, owner, putty):
+        super().__init__(title="Импорт из других программ", transient_for=owner, modal=True)
+        themed(self)
+        self.set_default_size(620, 440)
+        dialog_buttons(self, "Импортировать")
+        area = self.get_content_area()
+        area.set_border_width(14)
+        area.set_spacing(8)
+        sources = Gtk.Box(spacing=6)
+        sources.pack_start(action_button("PuTTY", lambda: self.show(putty()), icon="terminal"), False, False, 0)
+        sources.pack_start(action_button("Файл mRemoteNG или MobaXterm…", self.choose_file, icon="folder"), False, False, 0)
+        area.pack_start(sources, False, False, 0)
+        self.model = Gtk.ListStore(bool, str, str, str, str, object)
+        view = Gtk.TreeView(model=self.model)
+        toggle = Gtk.CellRendererToggle()
+        toggle.connect("toggled", lambda _, path: self.model.set_value(self.model.get_iter(path), 0, not self.model[path][0]))
+        view.append_column(Gtk.TreeViewColumn("", toggle, active=0))
+        for index, title in enumerate(("Протокол", "Название", "Адрес", "Источник"), start=1):
+            view.append_column(Gtk.TreeViewColumn(title, Gtk.CellRendererText(ellipsize=Pango.EllipsizeMode.END), text=index))
+        scroll = Gtk.ScrolledWindow(vexpand=True)
+        scroll.add(view)
+        mark(scroll, "sshm-frame")
+        area.pack_start(scroll, True, True, 0)
+        self.status = _label("Выберите источник. Пароли из других программ не переносятся.", muted=True, wrap=True)
+        area.pack_start(self.status, False, False, 0)
+        self.show_all()
+
+    def choose_file(self):
+        from .extras import read_import
+        from .widgets import message
+        path = chooser(self, "Файл подключений", Gtk.FileChooserAction.OPEN,
+                       filters=(("mRemoteNG (*.xml)", "*.xml"), ("MobaXterm (*.mxtsessions, *.ini)", "*.mxtsessions"),
+                                ("MobaXterm.ini", "*.ini")))
+        if path:
+            try:
+                self.show(read_import(path))
+            except (OSError, ValueError, SyntaxError) as error:
+                message(self, f"Не удалось прочитать файл. {error}", Gtk.MessageType.ERROR)
+
+    def show(self, found):
+        self.model.clear()
+        for item in found:
+            address = (item.user + "@" if item.user else "") + item.host + f":{item.port}"
+            self.model.append((True, item.protocol.upper(), item.name, address, item.source, item))
+        self.status.set_text(f"Найдено подключений: {len(found)}" if found else "Подключения не найдены.")
+
+    def chosen(self):
+        return [row[5] for row in self.model if row[0]]

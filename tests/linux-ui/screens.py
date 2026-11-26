@@ -36,8 +36,9 @@ class MemoryVault:
 
 app.Vault = MemoryVault
 update_ui.UpdateController.check = lambda self, manual=False: None
-app.Window.ssh_arguments = lambda self, profile, account: [
-    "/bin/sh", "-c", f"printf 'Welcome to {profile.alias}\\r\\nLast login: today\\r\\n'; exec /bin/sh"]
+app.Window.ssh_arguments = lambda self, profile, account: (
+    ["/bin/sh", "-c", "printf 'Connection reset by peer\\r\\n'; exit 255"] if profile.alias == "lab" else
+    ["/bin/sh", "-c", f"printf 'Welcome to {profile.alias}\\r\\nLast login: today\\r\\n'; exec /bin/sh"])
 
 home = Path(tempfile.mkdtemp())
 (home / "ssh").mkdir()
@@ -45,6 +46,8 @@ home = Path(tempfile.mkdtemp())
     HostName 10.0.0.12
     User deploy
     Port 2222
+    ProxyJump bastion
+    LocalForward 8080 localhost:80
 
 Host db-1
     HostName 10.0.0.20
@@ -60,9 +63,12 @@ Host lab
 groups = [{"id": "a" * 32, "name": "Продакшен", "color": "#20804E"},
           {"id": "b" * 32, "name": "Лаборатория", "color": "#2563EB"}]
 settings = {"groups": groups, "members": {"web-prod": "a" * 32, "db-1": "a" * 32, "lab": "b" * 32}, "default": "",
-            "dark": False, "sort": {},
+            "dark": False, "sort": {}, "favorites": ["ssh:web-prod", "rdp:" + "c" * 32],
+            "recent": [{"key": "ssh:db-1", "at": 1}],
+            "snippets": [{"name": "Свободное место", "command": "df -h"}, {"name": "Журнал", "command": "journalctl -n 50"}],
             "desktops": [{"id": "c" * 32, "name": "vm-ad", "host": "192.168.2.10", "port": 3389, "user": "Администратор",
-                          "domain": "", "group": "a" * 32, "width": 0, "height": 0, "clipboard": True, "fullscreen": False},
+                          "domain": "", "group": "a" * 32, "width": 0, "height": 0, "clipboard": True, "fullscreen": False,
+                          "drives": ["/home/me/Share"], "gateway": "gw.example.com"},
                          {"id": "d" * 32, "name": "terminal-srv", "host": "10.0.5.4", "port": 3390, "user": "ops",
                           "domain": "CORP", "group": "", "width": 1280, "height": 800, "clipboard": False, "fullscreen": False}]}
 (home / "state").mkdir()
@@ -136,6 +142,20 @@ step(lambda: in_dialog("10-dialog-ssh", lambda: window.edit_profile(window.docum
 step(lambda: in_dialog("11-dialog-rdp", lambda: window.edit_desktop(window.desktop_profiles()[0])))
 step(lambda: in_dialog("12-dialog-picker", window.pick_server))
 step(lambda: in_dialog("13-dialog-new-tab", window.new_group))
+step(lambda: window.select_group("*"))
+step(lambda: shot("14-favorites"))
+step(lambda: window.select_group(""))
+step(lambda: in_dialog("15-dialog-settings", window.open_settings))
+step(lambda: in_dialog("16-dialog-import", window.import_other))
+step(lambda: window.connect_profile(next(item for item in window.document.profiles if item.alias == "lab")))
+step(lambda: None)
+step(lambda: window.connect_profile(window.document.profiles[1]))
+step(lambda: window.sessions_page.snippet_menu(window.sessions_page.snippets))
+step(lambda: shot("17-snippets"))
+step(close_popups)
+step(lambda: window.sessions_page.activate(next(item for item in window.sessions if item.profile.alias == "lab")))
+step(lambda: shot("18-ssh-ended"))
+step(lambda: window.show_catalog())
 step(lambda: application.quit())
 
 

@@ -13,6 +13,13 @@ from pathlib import Path
 from .rdp import DesktopProfile, ORDERS
 
 ALIAS = re.compile(r"[A-Za-z0-9_.][A-Za-z0-9_.-]*\Z")
+# Port forwarding directives: values are several tokens (LocalForward 8080 localhost:80).
+PREFERENCES = {"terminal_font": "", "terminal_size": 11, "scrollback": 3000, "default_user": "", "default_port": "",
+               "auto_reconnect": False, "close_to_tray": True, "check_updates": True}
+FORWARDS = {"localforward": "LocalForward", "remoteforward": "RemoteForward", "dynamicforward": "DynamicForward"}
+FORWARD_KINDS = {"L": "LocalForward", "R": "RemoteForward", "D": "DynamicForward"}
+ENDPOINT = r"(?:[A-Za-z0-9_.*-]+:|\[[0-9A-Fa-f:.]+\]:)?[0-9]{1,5}"
+TARGET = r"(?:[A-Za-z0-9_.-]+|\[[0-9A-Fa-f:.]+\]):[0-9]{1,5}"
 DIRECTIVE = re.compile(r"(?P<indent>[ \t]*)(?P<key>[A-Za-z][A-Za-z0-9]*)(?:[ \t]*=[ \t]*|[ \t]+)(?P<value>.*)")
 
 
@@ -62,6 +69,8 @@ class Profile:
     keys: tuple = ()
     line: int = -1
     end: int = -1
+    proxy_jump: str = ""
+    forwards: tuple = ()  # ("LocalForward", "8080 localhost:80"), …
 
     @property
     def address(self):
@@ -81,6 +90,16 @@ class Profile:
             raise ValueError("Порт должен быть числом от 1 до 65535.")
         for path in self.keys:
             quote(path)
+        if self.proxy_jump and not re.fullmatch(r"[A-Za-z0-9_.@:%,\[\]-]+", self.proxy_jump):
+            raise ValueError("Укажите переходной сервер как псевдоним или user@host:port, несколько — через запятую.")
+        for name, value in self.forwards:
+            parts = value.split()
+            valid = name in FORWARDS.values() and (
+                (name == "DynamicForward" and len(parts) == 1 and re.fullmatch(ENDPOINT, parts[0])) or
+                (name != "DynamicForward" and len(parts) == 2 and re.fullmatch(ENDPOINT, parts[0])
+                 and re.fullmatch(TARGET, parts[1])))
+            if not valid:
+                raise ValueError("Проброс порта: укажите «порт хост:порт» (L, R) или «порт» (D).")
 
 
 class Document:
@@ -100,12 +119,16 @@ class Document:
             if key != "host" or len(names) != 1 or not ALIAS.fullmatch(names[0]):
                 continue
             settings = {}
+            forwards = []
             for key, values in self.directives[begin + 1:end]:
-                if len(values) == 1:
+                if key in FORWARDS and values:
+                    forwards.append((FORWARDS[key], " ".join(values)))
+                elif len(values) == 1:
                     settings.setdefault(key, []).append(values[0])
             self.profiles.append(Profile(
                 names[0], *(settings.get(key, [""])[0] for key in ("hostname", "user", "port")),
                 tuple(settings.get("identityfile", ())), begin, end,
+                proxy_jump=settings.get("proxyjump", [""])[0], forwards=tuple(forwards),
             ))
 
     def update(self, before, after):
@@ -133,6 +156,9 @@ class Document:
                 ("User", (before.user,) if before.user else (), (after.user,) if after.user else ()),
                 ("Port", (before.port,) if before.port else (), (after.port,) if after.port else ()),
                 ("IdentityFile", before.keys, after.keys),
+                ("ProxyJump", (before.proxy_jump,) if before.proxy_jump else (), (after.proxy_jump,) if after.proxy_jump else ()),
+                *((name, tuple(v for n, v in before.forwards if n == name), tuple(v for n, v in after.forwards if n == name))
+                  for name in FORWARDS.values()),
             )
             changes = {key.lower(): (key, new) for key, old, new in fields if old != new}
             replacements = []
@@ -140,7 +166,7 @@ class Document:
             for index in range(before.line + 1, before.end):
                 line = lines[index]
                 key, values = self.directives[index]
-                if key not in changes or len(values) != 1:
+                if key not in changes or (len(values) != 1 and key not in FORWARDS):
                     replacements.append(line)
                     continue
                 name, new_values = changes[key]
@@ -149,14 +175,14 @@ class Document:
                     comment = inline_comment(line)
                     for position, value in enumerate(new_values):
                         suffix = ("  " + comment) if comment and position == 0 else ""
-                        replacements.append(f"{indent}{name} {quote(value)}{suffix}{self.newline}")
+                        replacements.append(f"{indent}{name} {render(name, value)}{suffix}{self.newline}")
                     used.add(key)
                     if new_values:
                         continue
                 comment = inline_comment(line)
                 if comment:
                     replacements.append("    " + comment + self.newline)
-            missing = [f"    {name} {quote(value)}{self.newline}" for key, (name, values) in changes.items()
+            missing = [f"    {name} {render(name, value)}{self.newline}" for key, (name, values) in changes.items()
                        if key not in used for value in values]
             lines[before.line + 1:before.end] = missing + replacements
             if before.alias != after.alias or (missing and not lines[before.line].endswith(("\n", "\r"))):
@@ -166,9 +192,17 @@ class Document:
 
     def format_fields(self, profile):
         for name, value in (("HostName", profile.host), ("User", profile.user), ("Port", profile.port),
-                            *(("IdentityFile", key) for key in profile.keys)):
+                            *(("IdentityFile", key) for key in profile.keys), ("ProxyJump", profile.proxy_jump),
+                            *profile.forwards):
             if value:
-                yield f"    {name} {quote(value)}{self.newline}"
+                yield f"    {name} {render(name, value)}{self.newline}"
+
+
+def render(name, value):
+    """A directive value: forwards keep their tokens separate, everything else is one quoted value."""
+    if name in FORWARDS.values():
+        return " ".join(quote(part) for part in value.split())
+    return quote(value)
 
 
 def read(path):
@@ -194,7 +228,8 @@ def write(path, contents, mode=0o600):
 
 
 def parse_settings(contents):
-    initial = {"groups": [], "members": {}, "default": "", "dark": True, "desktops": [], "sort": {}}
+    initial = {"groups": [], "members": {}, "default": "", "dark": True, "desktops": [], "sort": {},
+               "favorites": [], "recent": [], "snippets": [], "preferences": dict(PREFERENCES)}
     if not contents:
         return initial
     data = json.loads(contents)
@@ -223,6 +258,28 @@ def parse_settings(contents):
             key not in sort_keys or not isinstance(order, str) or order not in orders
             for key, order in initial["sort"].items()):
         raise ValueError("Некорректная сортировка серверов.")
+    favorites = initial["favorites"]
+    if not isinstance(favorites, list) or len(favorites) > 10000 or any(
+            not isinstance(key, str) or not re.fullmatch(r"(ssh|rdp):[^\s]{1,253}", key) for key in favorites):
+        raise ValueError("Некорректный список избранного.")
+    recent = [item for item in initial["recent"] if isinstance(item, dict) and isinstance(item.get("key"), str)
+              and isinstance(item.get("at"), (int, float))][:10] if isinstance(initial["recent"], list) else []
+    initial["recent"] = recent
+    snippets = initial["snippets"]
+    if not isinstance(snippets, list) or len(snippets) > 500 or any(
+            not isinstance(item, dict) or not isinstance(item.get("name"), str) or not isinstance(item.get("command"), str)
+            or not 0 < len(item["name"]) <= 80 or len(item["command"]) > 4000 for item in snippets):
+        raise ValueError("Некорректный список сохранённых команд.")
+    initial["snippets"] = [{"name": item["name"], "command": item["command"]} for item in snippets]
+    preferences = dict(PREFERENCES)
+    if isinstance(initial["preferences"], dict):
+        for key, default in PREFERENCES.items():
+            value = initial["preferences"].get(key, default)
+            if type(value) is type(default):
+                preferences[key] = value
+    preferences["terminal_size"] = min(max(preferences["terminal_size"], 6), 48)
+    preferences["scrollback"] = min(max(preferences["scrollback"], 100), 100000)
+    initial["preferences"] = preferences
     desktop_ids = set()
     desktops = []
     if not isinstance(initial["desktops"], list) or len(initial["desktops"]) > 10000:

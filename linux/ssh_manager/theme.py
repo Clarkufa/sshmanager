@@ -94,6 +94,7 @@ menu.sshm-menu menuitem.danger, menu.sshm-menu menuitem.danger label,
 menu.sshm-menu menuitem.danger .sshm-glyph {{ color: {c['danger']}; }}
 menu.sshm-menu separator {{ background-color: {c['line']}; }}
 
+.sshm popover, .sshm popover.background {{ background-color: {c['surface']}; color: {c['ink']}; border-color: {c['line']}; }}
 .sshm .sshm-terminal-area {{ background-color: {t['background']}; }}
 .sshm label.sshm-terminal-text {{ color: {t['empty']}; }}
 .sshm .sshm-overlay {{ background-color: {t['background']}; }}

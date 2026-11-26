@@ -75,6 +75,12 @@ class DesktopProfile:
     height: int = 0
     clipboard: bool = False
     fullscreen: bool = False
+    # «Дополнительно» (docs/ui-spec.md §7)
+    drives: tuple = ()
+    printers: bool = False
+    multimon: bool = False
+    gateway: str = ""
+    gateway_user: str = ""
 
     @property
     def alias(self):
@@ -94,7 +100,17 @@ class DesktopProfile:
         return f"[{self.host}]:{self.port}" if ":" in self.host else f"{self.host}:{self.port}"
 
     def validate(self):
-        for value, limit in ((self.name, 80), (self.host, 253), (self.user, 128), (self.domain, 128)):
+        if isinstance(self.drives, list):
+            object.__setattr__(self, "drives", tuple(self.drives))
+        if (not isinstance(self.drives, tuple) or len(self.drives) > 16 or
+                any(not isinstance(path, str) or not path.startswith("/") or "," in path or len(path) > 1024 for path in self.drives)):
+            raise ValueError("Укажите папки для подключения полными путями без запятых.")
+        if not isinstance(self.printers, bool) or not isinstance(self.multimon, bool):
+            raise ValueError("Некорректные параметры RDP-подключения.")
+        if self.gateway and not re.fullmatch(r"[A-Za-z0-9_.:\[\]-]+", self.gateway):
+            raise ValueError("Укажите адрес шлюза RD Gateway без пробелов.")
+        for value, limit in ((self.name, 80), (self.host, 253), (self.user, 128), (self.domain, 128),
+                             (self.gateway_user, 128)):
             if not isinstance(value, str) or len(value) > limit or any(unicodedata.category(c) == "Cc" for c in value):
                 raise ValueError("Некорректный текст в настройках RDP-подключения.")
         if not self.name.strip() or not self.host or not isinstance(self.id, str) or not re.fullmatch("[0-9a-f]{32}", self.id):
@@ -150,6 +166,22 @@ class DesktopProfile:
             args += ["/size:80%", "/dynamic-resolution"]
         if self.fullscreen and not parent:
             args.append("/f")
+        for index, path in enumerate(self.drives):
+            args.append(f"/drive:{Path(path).name or 'drive'}{index + 1},{path}")
+        if self.printers:
+            args.append("/printer")
+        if self.multimon and not parent:
+            args.append("/multimon")
+        if self.gateway:
+            if freerdp_major(client) >= 3:
+                gateway = f"/gateway:g:{self.gateway}" + (f",u:{self.gateway_user}" if self.gateway_user else "")
+                args.append(gateway + (f",p:{password}" if password and self.gateway_user else ""))
+            else:
+                args.append("/g:" + self.gateway)
+                if self.gateway_user:
+                    args.append("/gu:" + self.gateway_user)
+                    if password:
+                        args.append("/gp:" + password)
         if password and freerdp_major(client) >= 3:
             return [client, "/args-from:env:" + ARGS_VARIABLE], {ARGS_VARIABLE: "\n".join(args)}
         # FreeRDP 2 overwrites /p: in its argv with asterisks right after parsing.
@@ -179,13 +211,23 @@ class DesktopProfile:
         if not width or not height:
             width = height = 0
         return cls(uuid.uuid4().hex, Path(filename).stem, host.strip("[]"), int(port), user, domain,
-                   group, width, height, fields.get("redirectclipboard") == "1", fields.get("screen mode id") == "2").validate()
+                   group, width, height, fields.get("redirectclipboard") == "1", fields.get("screen mode id") == "2",
+                   printers=fields.get("redirectprinters") == "1", multimon=fields.get("use multimon") == "1",
+                   gateway=fields.get("gatewayhostname", "") if fields.get("gatewayusagemethod", "1") != "0" else "",
+                   gateway_user=fields.get("gatewayusername", "")).validate()
 
     def export_file(self, filename):
         account = self.domain + "\\" + self.user if self.domain and self.user else self.user
         lines = [f"full address:s:{self.address}", f"username:s:{account}",
                  f"screen mode id:i:{2 if self.fullscreen else 1}", f"redirectclipboard:i:{int(self.clipboard)}",
-                 "enablecredsspsupport:i:1", "authentication level:i:2", "drivestoredirect:s:", "redirectprinters:i:0"]
+                 "enablecredsspsupport:i:1", "authentication level:i:2",
+                 f"redirectprinters:i:{int(self.printers)}", f"use multimon:i:{int(self.multimon)}",
+                 # Local folders are specific to this computer; an exported profile does not carry them.
+                 "drivestoredirect:s:"]
+        if self.gateway:
+            lines += [f"gatewayhostname:s:{self.gateway}", "gatewayusagemethod:i:1", "gatewayprofileusagemethod:i:1"]
+            if self.gateway_user:
+                lines.append(f"gatewayusername:s:{self.gateway_user}")
         if self.width:
             lines.extend((f"desktopwidth:i:{self.width}", f"desktopheight:i:{self.height}"))
         Path(filename).write_bytes(("\r\n".join(lines) + "\r\n").encode("utf-16"))

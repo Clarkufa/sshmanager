@@ -114,13 +114,20 @@ class CatalogPage(Gtk.Box):
         self.search.set_size_request(265, -1)
         self.search.connect("search-changed", lambda *_: self.render())
         tools.pack_start(self.search, False, False, 0)
+        self.quick = Gtk.Entry(placeholder_text="Быстрое подключение: user@host:port или rdp://host")
+        self.quick.set_size_request(250, -1)
+        self.quick.set_tooltip_text("Подключиться без сохранения профиля. Enter — подключиться.")
+        self.quick.connect("activate", lambda entry: owner.quick_connect(entry.get_text()) and entry.set_text(""))
+        tools.pack_start(self.quick, False, False, 6)
         self.delete = action_button("Удалить", lambda: owner.delete_entry(self.selected()), "quiet", icon="delete",
                                     danger=True, width=95)
         self.edit = action_button("Изменить", lambda: owner.edit_catalog_entry(self.selected()), "quiet", icon="edit", width=105)
         backups = action_button("Резервные копии", None, "quiet", icon="folder", width=154)
         backups.connect("clicked", lambda widget: menu_at(widget, None, [
             Item("Экспорт архива…", owner.export_backup, icon="copy"),
-            Item("Импорт архива…", owner.import_backup, icon="folder")]))
+            Item("Импорт архива…", owner.import_backup, icon="folder"),
+            None,
+            Item("Импорт из других программ…", owner.import_other, icon="folder")]))
         for widget in (self.delete, self.edit, action_button("Обновить", owner.reload, "quiet", icon="refresh", width=106),
                        backups):
             tools.pack_end(widget, False, False, 0)
@@ -192,7 +199,8 @@ class CatalogPage(Gtk.Box):
         owner = self.owner
         for widget in self.group_strip.get_children():
             self.group_strip.remove(widget)
-        for group in [{"id": "", "name": ALL_NAME, "color": ""}, *owner.settings["groups"]]:
+        favorites = [{"id": "*", "name": "Избранное", "color": ""}] if owner.settings["favorites"] else []
+        for group in [*favorites, {"id": "", "name": ALL_NAME, "color": ""}, *owner.settings["groups"]]:
             tab = Gtk.Button()
             label = Gtk.Label()
             dot = f'<span foreground="{group["color"]}">●</span>  ' if group["color"] else ""
@@ -204,10 +212,11 @@ class CatalogPage(Gtk.Box):
             if group["id"] == owner.active_group:
                 mark(tab, "selected")
             tab.connect("clicked", lambda _, g=group: owner.select_group(g["id"]))
-            tab.connect("button-press-event", lambda widget, event, g=group:
-                        self.group_menu(widget, event, g) if event.button == 3 else False)
-            tab.connect("popup-menu", lambda widget, g=group: self.group_menu(widget, None, g))
-            if group["id"]:
+            if group["id"] != "*":
+                tab.connect("button-press-event", lambda widget, event, g=group:
+                            self.group_menu(widget, event, g) if event.button == 3 else False)
+                tab.connect("popup-menu", lambda widget, g=group: self.group_menu(widget, None, g))
+            if group["id"] and group["id"] != "*":
                 self.enable_group_drag(tab, group)
             self.group_strip.pack_start(tab, False, False, 0)
         self.group_strip.show_all()
@@ -287,11 +296,12 @@ class CatalogPage(Gtk.Box):
         for profile, tab in ordered_with_tabs(matches, order):
             sessions = owner.session_count(profile)
             action = f"К сеансу · {sessions}" if sessions else "Подключиться"
+            star = "★ " if owner.is_favorite(profile) else ""
             if ssh:
-                values = (profile, profile.alias, profile.host or "—", profile.user or "—", profile.port or "—",
+                values = (profile, star + profile.alias, profile.host or "—", profile.user or "—", profile.port or "—",
                           tab or "—", "Файлы", action, "server")
             else:
-                values = (profile, profile.name, profile.host, profile.account or "—", str(profile.port), tab or "—",
+                values = (profile, star + profile.name, profile.host, profile.account or "—", str(profile.port), tab or "—",
                           "", action, "server")
             iterator = self.model.append(values)
             if keep is not None and same_profile(profile, keep):
@@ -302,6 +312,8 @@ class CatalogPage(Gtk.Box):
             self.empty.hide()
         elif query:
             self.show_empty("По вашему запросу ничего не найдено.")
+        elif owner.active_group == "*":
+            self.show_empty("Добавьте серверы в избранное через меню строки.")
         elif not ssh:
             self.show_empty("Добавьте RDP-подключение или импортируйте профиль .rdp.")
         elif owner.active_group:
