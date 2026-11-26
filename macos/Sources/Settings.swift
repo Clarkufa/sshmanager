@@ -240,7 +240,7 @@ struct ManagerSettings {
         }
         let inUse = groups.contains { $0.id != id && $0.name.caseInsensitiveCompare(name) == .orderedSame }
         guard !inUse, !["Все серверы", "Без вкладки"].contains(where: { $0.caseInsensitiveCompare(name) == .orderedSame }) else {
-            throw ManagerError("Это название уже используется.")
+            throw ManagerError("Это название уже используется. Выберите другое.")
         }
     }
 
