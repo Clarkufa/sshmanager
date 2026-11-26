@@ -115,11 +115,6 @@ class CatalogPage(Gtk.Box):
         self.search.set_size_request(265, -1)
         self.search.connect("search-changed", lambda *_: self.render())
         tools.pack_start(self.search, False, False, 0)
-        self.quick = Gtk.Entry(placeholder_text="Быстрое подключение: user@host, rdp:// или vnc://")
-        self.quick.set_size_request(250, -1)
-        self.quick.set_tooltip_text("Подключиться без сохранения профиля. Enter — подключиться.")
-        self.quick.connect("activate", lambda entry: owner.quick_connect(entry.get_text()) and entry.set_text(""))
-        tools.pack_start(self.quick, False, False, 6)
         self.delete = action_button("Удалить", lambda: owner.delete_entry(self.selected()), "quiet", icon="delete",
                                     danger=True, width=95)
         self.edit = action_button("Изменить", lambda: owner.edit_catalog_entry(self.selected()), "quiet", icon="edit", width=105)
@@ -266,6 +261,8 @@ class CatalogPage(Gtk.Box):
 
     def render(self, keep=None):
         owner = self.owner
+        if getattr(owner, "sessions_page", None) is not None:
+            owner.sessions_page.server_panel.render()
         keep = keep if keep is not None else self.selected()
         self.model.clear()
         self.rows = []

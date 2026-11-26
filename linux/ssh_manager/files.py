@@ -8,7 +8,7 @@ from gi.repository import Gdk, Gio, GLib, Gtk
 
 from .transfer import Cancelled, Copies, Remote, local_items, remote_items
 from .theme import mark
-from .widgets import action_button, chooser, confirm, menu_at, message, prompt, themed
+from .widgets import action_button, chooser, confirm, menu_at, message, prompt, themed  # noqa: F401
 
 
 class Pane(Gtk.Box):
@@ -73,29 +73,26 @@ class Pane(Gtk.Box):
         return [self.model[path][4] for path in paths]
 
 
-class FilesWindow(Gtk.ApplicationWindow):
-    def __init__(self, owner, profile, config, vault):
-        super().__init__(application=owner.get_application(), transient_for=owner,
-                         title=f"Файлы — {profile.alias} · {profile.address}")
-        themed(self)
+class FilesPanel(Gtk.Box):
+    """«Файлы · сервер» in the workspace of the main window (docs/ui-spec.md §3.2.1, §4.8)."""
+
+    def __init__(self, owner, profile, config, vault, on_close):
+        super().__init__(orientation=Gtk.Orientation.VERTICAL, spacing=10, margin_bottom=8)
+        self.owner, self.on_close = owner, on_close
+        self.on_change = None
+        self.transport = "Файлы"
         self.profile, self.config, self.vault = profile, config, vault
-        self.set_default_size(1090, 620)
-        self.set_size_request(800, 440)
-        self.set_destroy_with_parent(True)
         self.remote = None
         self.operation = None
         self.destroyed = False
         self.connect("destroy", self.closed)
-        self.connect("delete-event", self.can_close)
 
-        outer = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10, margin_start=20, margin_end=20,
-                        margin_top=14, margin_bottom=12)
-        mark(outer, "sshm-page")
-        self.add(outer)
+        outer = self
         head = Gtk.Box(spacing=8)
-        heading = Gtk.Label(label=f"Файлы · {profile.alias}", xalign=0)
-        mark(heading, "sshm-title")
+        heading = Gtk.Label(label=f"Файлы · {profile.alias}", xalign=0, ellipsize=3)
+        mark(heading, "sshm-emphasis")
         head.pack_start(heading, True, True, 0)
+        head.pack_end(action_button("Закрыть", self.request_close, "quiet", danger=True, width=81), False, False, 0)
         self.reconnect = action_button("Переподключить", self.connect_server, icon="refresh", width=156)
         head.pack_end(self.reconnect, False, False, 0)
         outer.pack_start(head, False, False, 0)
@@ -129,8 +126,10 @@ class FilesWindow(Gtk.ApplicationWindow):
         self.browse_local(str(Path.home()))
         self.connect_server()
 
-    def can_close(self, *_):
-        return self.operation is not None and not confirm(self, "Прервать операцию и закрыть окно файлов?")
+    def request_close(self):
+        if self.operation is not None and not confirm(self.owner, "Прервать операцию и закрыть файлы?"):
+            return
+        self.on_close(self)
 
     def closed(self, *_):
         self.destroyed = True
@@ -180,7 +179,7 @@ class FilesWindow(Gtk.ApplicationWindow):
                 self.status.set_text("Операция отменена.")
             elif error:
                 self.status.set_text(str(error))
-                message(self, error, Gtk.MessageType.ERROR)
+                message(self.owner, error, Gtk.MessageType.ERROR)
             else:
                 complete(result)
             self.update_actions()
@@ -230,7 +229,7 @@ class FilesWindow(Gtk.ApplicationWindow):
         GLib.timeout_add(1500, interrupt)
 
     def choose_local(self):
-        path = chooser(self, "Локальная папка", Gtk.FileChooserAction.SELECT_FOLDER, directory=self.left.path)
+        path = chooser(self.owner, "Локальная папка", Gtk.FileChooserAction.SELECT_FOLDER, directory=self.left.path)
         if path:
             self.browse_local(path)
 
@@ -244,7 +243,7 @@ class FilesWindow(Gtk.ApplicationWindow):
             path = path.resolve(strict=True)
             self.left.display(path, local_items(path))
         except OSError as error:
-            message(self, error, Gtk.MessageType.ERROR)
+            message(self.owner, error, Gtk.MessageType.ERROR)
             self.left.entry.set_text(self.left.path)
         self.update_actions()
 
@@ -252,6 +251,10 @@ class FilesWindow(Gtk.ApplicationWindow):
         path, data = result
         self.right.display(path, data)
         self.status.set_text("SFTP подключён · " + self.profile.alias)
+        if self.transport != "Файлы · SFTP":
+            self.transport = "Файлы · SFTP"
+            if self.on_change:
+                self.on_change()
 
     def browse_remote(self, value):
         if self.remote is None or not value or self.operation:
@@ -297,7 +300,7 @@ class FilesWindow(Gtk.ApplicationWindow):
         self.run("Обновление папки…", work, self.show_remote)
 
     def mkdir(self):
-        name = prompt(self, "Новая папка на сервере")
+        name = prompt(self.owner, "Новая папка на сервере")
         if name is not None:
             def create(client, path):
                 self.check_name(name)
@@ -306,7 +309,7 @@ class FilesWindow(Gtk.ApplicationWindow):
 
     def rename(self):
         [selected] = self.right.selected()
-        name = prompt(self, "Переименовать на сервере", selected.name)
+        name = prompt(self.owner, "Переименовать на сервере", selected.name)
         if name is not None and selected.name != name:
             def move(client, path):
                 self.check_name(name)
@@ -315,7 +318,7 @@ class FilesWindow(Gtk.ApplicationWindow):
 
     def remove(self):
         selected = self.right.selected()
-        if not selected or not confirm(self, f"Удалить выбранные элементы ({len(selected)})?\n"
+        if not selected or not confirm(self.owner, f"Удалить выбранные элементы ({len(selected)})?\n"
                                              f"{self.profile.alias} · {self.right.path}"):
             return
 
@@ -388,7 +391,7 @@ class FilesWindow(Gtk.ApplicationWindow):
 
         def show():
             if not cancelled.is_set() and not self.destroyed:
-                dialog = themed(Gtk.MessageDialog(transient_for=self, modal=True, message_type=Gtk.MessageType.QUESTION,
+                dialog = themed(Gtk.MessageDialog(transient_for=self.owner, modal=True, message_type=Gtk.MessageType.QUESTION,
                                                   text="Элемент с таким именем уже есть:"))
                 dialog.set_title("Файл уже существует")
                 dialog.format_secondary_text(path)

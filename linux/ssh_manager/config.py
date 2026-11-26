@@ -230,7 +230,7 @@ def write(path, contents, mode=0o600):
 
 def parse_settings(contents):
     initial = {"groups": [], "members": {}, "default": "", "dark": True, "desktops": [], "vnc": [], "sort": {},
-               "favorites": [], "recent": [], "snippets": [], "preferences": dict(PREFERENCES)}
+               "favorites": [], "recent": [], "snippets": [], "collapsed": [], "preferences": dict(PREFERENCES)}
     if not contents:
         return initial
     data = json.loads(contents)
@@ -263,6 +263,9 @@ def parse_settings(contents):
     if not isinstance(favorites, list) or len(favorites) > 10000 or any(
             not isinstance(key, str) or not re.fullmatch(r"(ssh|rdp|vnc):[^\s]{1,253}", key) for key in favorites):
         raise ValueError("Некорректный список избранного.")
+    collapsed = initial["collapsed"]
+    initial["collapsed"] = sorted({item for item in collapsed if isinstance(item, str) and
+                                   (item in ("recent", "ungrouped") or item in ids)}) if isinstance(collapsed, list) else []
     recent = [item for item in initial["recent"] if isinstance(item, dict) and isinstance(item.get("key"), str)
               and isinstance(item.get("at"), (int, float))][:10] if isinstance(initial["recent"], list) else []
     initial["recent"] = recent

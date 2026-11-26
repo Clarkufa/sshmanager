@@ -13,7 +13,7 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "linux"))
 os.environ.setdefault("GSETTINGS_BACKEND", "memory")
 
-from ssh_manager import app, update_ui  # noqa: E402
+from ssh_manager import app, files, update_ui  # noqa: E402
 from ssh_manager.app import Application, Config, Gtk  # noqa: E402
 from gi.repository import Gdk, GLib  # noqa: E402
 
@@ -35,6 +35,28 @@ class MemoryVault:
 
 
 app.Vault = MemoryVault
+
+
+class FakeRemote:
+    """SFTP stand-in: an empty remote folder, no network."""
+
+    def __init__(self, *_):
+        self.client = self
+
+    def open(self):
+        return "/srv"
+
+    def listdir_attr(self, path):
+        return []
+
+    def normalize(self, path):
+        return path
+
+    def close(self):
+        pass
+
+
+files.Remote = FakeRemote
 update_ui.UpdateController.check = lambda self, manual=False: None
 app.Window.ssh_arguments = lambda self, profile, account: (
     ["/bin/sh", "-c", "printf 'Connection reset by peer\\r\\n'; exit 255"] if profile.alias == "lab" else
@@ -138,9 +160,33 @@ step(lambda: window.connect_profile(window.document.profiles[0], True))
 step(lambda: window.connect_profile(window.document.profiles[2]))
 step(lambda: None)
 step(lambda: shot("08-sessions"))
+step(lambda: window.sessions_page.server_panel.toggle("b" * 32))
+step(lambda: shot("26-server-column-folded"))
+step(lambda: window.sessions_page.server_panel.listing.select_row(next(row for row in window.sessions_page.server_panel.listing.get_children() if row.profile is not None)))
+step(lambda: window.sessions_page.server_panel.menu(None))
+step(lambda: shot("27-server-column-menu"))
+step(close_popups)
+step(lambda: print("collapsed saved:", json.loads((home / "state/settings.json").read_text())["collapsed"], flush=True))
+step(lambda: window.sessions_page.server_panel.toggle("b" * 32))
 step(lambda: window.switch_theme())
 step(lambda: shot("09-sessions-dark"))
 step(lambda: window.switch_theme())
+step(lambda: window.open_files(window.document.profiles[1]))
+step(lambda: None)
+step(lambda: shot("21-files-panel"))
+step(lambda: window.resize(820, 600))
+step(lambda: None)
+step(lambda: shot("22-narrow-files"))
+step(lambda: window.sessions_page.activate(window.sessions[0]))
+step(lambda: shot("23-narrow-session"))
+step(lambda: window.show_catalog())
+step(lambda: shot("24-narrow-catalog"))
+step(lambda: window.sessions_page.toggle_servers())
+step(lambda: None)
+step(lambda: shot("25-narrow-servers-shown"))
+step(lambda: (window.sessions_page.toggle_servers(), window.resize(1280, 720))[1])
+step(lambda: window.files[next(iter(window.files))].request_close())
+step(lambda: None)
 step(lambda: window.show_catalog())
 step(lambda: in_dialog("10-dialog-ssh", lambda: window.edit_profile(window.document.profiles[0])))
 step(lambda: in_dialog("11-dialog-rdp", lambda: window.edit_desktop(window.desktop_profiles()[0])))

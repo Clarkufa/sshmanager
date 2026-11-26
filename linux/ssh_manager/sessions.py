@@ -11,7 +11,7 @@ import gi
 from gi.repository import Gdk, Gio, GLib, GObject, Gtk, Pango, Vte
 
 from .auth import AskPass, account_for, ssh_args
-from .dialogs import LogonDialog, ServerPickerPanel, VncLogonDialog
+from .dialogs import LogonDialog, VncLogonDialog
 from .theme import TERMINAL, mark, rgba
 from .widgets import Item, action_button, confirm, menu_at, message
 from .vnc import MISSING_CLIENT, SshTunnel, TunnelError
@@ -1013,35 +1013,302 @@ class SessionRow(Gtk.ListBoxRow):
         self.subtitle.set_text(f"{session.protocol} · " + (session.address if session.live else "Сеанс завершён"))
 
 
+SERVER_WIDTH, SESSION_WIDTH, COLUMN_GAP = 248, 203, 12
+
+
+def column_title(text, action):
+    """Column caption with one action on the right («Каталог», «+»)."""
+    row = Gtk.Box(spacing=6)
+    row.set_size_request(-1, 36)
+    label = Gtk.Label(label=text, xalign=0)
+    mark(label, "sshm-emphasis")
+    row.pack_start(label, True, True, 0)
+    action.set_valign(Gtk.Align.CENTER)
+    row.pack_end(action, False, False, 0)
+    return row
+
+
+class FilesRow(Gtk.ListBoxRow):
+    """«Открытые файлы»: the server and «Файлы · SFTP» once connected."""
+
+    def __init__(self, panel, color, selected=False):
+        super().__init__()
+        self.panel = panel
+        line = Gtk.Box(spacing=8, margin_start=9, margin_end=6, margin_top=4, margin_bottom=4)
+        dot = Gtk.Label(valign=Gtk.Align.START, margin_top=2)
+        dot.set_markup(f'<span foreground="{color}" size="small">●</span>')
+        line.pack_start(dot, False, False, 0)
+        texts = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        title = Gtk.Label(label=panel.profile.alias, xalign=0, ellipsize=Pango.EllipsizeMode.END)
+        mark(title, "sshm-emphasis")
+        subtitle = Gtk.Label(label=panel.transport, xalign=0, ellipsize=Pango.EllipsizeMode.END)
+        mark(subtitle, "sshm-muted")
+        texts.pack_start(title, False, False, 0)
+        texts.pack_start(subtitle, False, False, 0)
+        line.pack_start(texts, True, True, 0)
+        self.add(line)
+
+
+RECENT_SECTION, UNGROUPED_SECTION = "recent", "ungrouped"
+
+
+class ServerColumn(Gtk.Box):
+    """«Серверы»: SSH / RDP / VNC, search and the servers grouped by catalog tab. A tab folds and unfolds with a click;
+    the folded tabs are kept in the settings ("collapsed"). Right click opens the row menu of the catalog
+    (docs/ui-spec.md §2.2)."""
+
+    def __init__(self, owner):
+        super().__init__(orientation=Gtk.Orientation.VERTICAL, spacing=8, vexpand=True)
+        self.owner = owner
+        self.protocol = owner.protocol
+        switch = Gtk.Box(spacing=4)
+        self.tabs = {}
+        for kind, caption in (("ssh", "SSH"), ("rdp", "RDP"), ("vnc", "VNC")):
+            tab = action_button(caption, lambda kind=kind: self.select(kind), "tab", width=62)
+            self.tabs[kind] = tab
+            switch.pack_start(tab, False, False, 0)
+        self.pack_start(switch, False, False, 0)
+        self.search = Gtk.SearchEntry(placeholder_text="Найти сервер")
+        self.search.connect("search-changed", lambda *_: self.render())
+        self.search.connect("activate", lambda *_: self.connect_selected())
+        self.search.connect("key-press-event", self.search_keys)
+        self.pack_start(self.search, False, False, 0)
+        self.listing = Gtk.ListBox(activate_on_single_click=False)
+        self.listing.connect("row-activated", lambda listing, row: self.row_activated(row))
+        self.listing.connect("button-press-event", self.pressed)
+        self.listing.connect("key-press-event", self.keys)
+        self.listing.connect("popup-menu", lambda widget: self.menu(None))
+        self.listing.connect("row-selected", lambda *_: self.connect_button.set_sensitive(self.chosen() is not None))
+        scroll = Gtk.ScrolledWindow(vexpand=True, hscrollbar_policy=Gtk.PolicyType.NEVER)
+        scroll.add(self.listing)
+        mark(scroll, "sshm-frame")
+        self.pack_start(scroll, True, True, 0)
+        self.status = Gtk.Label(xalign=0)
+        mark(self.status, "sshm-muted")
+        self.pack_start(self.status, False, False, 0)
+        self.connect_button = action_button("Подключиться", self.connect_selected, "primary", width=128)
+        self.connect_button.set_halign(Gtk.Align.END)
+        self.pack_end(self.connect_button, False, False, 0)
+        self.select(self.protocol)
+
+    # --- rows --------------------------------------------------------------------------------
+    def select(self, protocol):
+        self.protocol = protocol
+        for kind, tab in self.tabs.items():
+            context = tab.get_style_context()
+            (context.add_class if kind == protocol else context.remove_class)("selected")
+        self.render()
+
+    def collapsed(self):
+        return set(self.owner.settings.get("collapsed", []))
+
+    def toggle(self, section):
+        collapsed = self.collapsed()
+        collapsed ^= {section}
+        try:
+            self.owner.update_catalog_settings(collapsed=sorted(collapsed))
+        except OSError as error:
+            message(self.owner, error, Gtk.MessageType.ERROR)
+        self.render(keep_section=section)
+
+    def render(self, keep_section=None):
+        owner = self.owner
+        chosen = self.chosen()
+        keep = owner.profile_key(chosen) if chosen is not None else None
+        for row in self.listing.get_children():
+            self.listing.remove(row)
+        everything = owner.server_entries(self.protocol)
+        query = self.search.get_text().strip().casefold()
+        shown = [entry for entry in everything if query in (entry[0].alias + " " + entry[0].address + " " + entry[1]).casefold()]
+        collapsed = self.collapsed()
+        sections = []
+        if query:
+            sections.append((None, None, "", shown))
+        else:
+            by_key = {owner.profile_key(entry[0]): entry for entry in shown}
+            keys = [item["key"] for item in owner.settings["recent"] if item["key"].startswith(self.protocol + ":")][:5]
+            recent = [by_key[key] for key in keys if key in by_key]
+            if recent:
+                sections.append((RECENT_SECTION, "Недавние", "", recent))
+            groups = owner.settings["groups"]
+            grouped = {group["id"]: [] for group in groups}
+            ungrouped = []
+            for entry in shown:
+                grouped.get(owner.group_of(entry[0]), ungrouped).append(entry)
+            for group in groups:
+                if grouped[group["id"]]:
+                    sections.append((group["id"], group["name"], group["color"] or owner.theme.color("teal"), grouped[group["id"]]))
+            if ungrouped:
+                sections.append((UNGROUPED_SECTION, "Без вкладки" if len(sections) > (1 if recent else 0) else "Все серверы",
+                                 "", ungrouped))
+        select = None
+        for section, title, color, items in sections:
+            folded = section in collapsed
+            if title:
+                header = self.header(section, title, color, len(items), folded)
+                self.listing.add(header)
+                if section == keep_section:
+                    select = header
+            if folded:
+                continue
+            for profile, group, dot in items:
+                row = self.row(profile, dot if section in (None, RECENT_SECTION) else None)
+                self.listing.add(row)
+                if select is None and keep is not None and owner.profile_key(profile) == keep:
+                    select = row
+        self.listing.show_all()
+        if select is None:
+            select = next((row for row in self.listing.get_children() if row.profile is not None), None)
+        if select is not None:
+            self.listing.select_row(select)
+        self.connect_button.set_sensitive(self.chosen() is not None)
+        self.status.set_text(f"Серверов: {len(shown)}" if shown else
+                             "Серверы не найдены." if everything else "Сохранённых серверов пока нет.")
+
+    def header(self, section, title, color, count, folded):
+        row = Gtk.ListBoxRow()
+        row.profile, row.section = None, section
+        line = Gtk.Box(spacing=6, margin_start=6, margin_end=8, margin_top=6, margin_bottom=4)
+        arrow = Gtk.Label(label="▸" if folded else "▾")
+        mark(arrow, "sshm-muted")
+        line.pack_start(arrow, False, False, 0)
+        if color:
+            dot = Gtk.Label()
+            dot.set_markup(f'<span foreground="{color}" size="small">●</span>')
+            line.pack_start(dot, False, False, 0)
+        caption = Gtk.Label(label=title, xalign=0, ellipsize=Pango.EllipsizeMode.END)
+        mark(caption, "sshm-emphasis")
+        line.pack_start(caption, True, True, 0)
+        number = Gtk.Label(label=str(count))
+        mark(number, "sshm-muted")
+        line.pack_end(number, False, False, 0)
+        row.add(line)
+        row.set_tooltip_text("Развернуть" if folded else "Свернуть")
+        return row
+
+    def row(self, profile, dot):
+        owner = self.owner
+        row = Gtk.ListBoxRow()
+        row.profile, row.section = profile, None
+        line = Gtk.Box(spacing=8, margin_start=22 if dot is None else 9, margin_end=6, margin_top=4, margin_bottom=4)
+        if dot is not None:
+            marker = Gtk.Label(valign=Gtk.Align.START, margin_top=2)
+            marker.set_markup(f'<span foreground="{dot}" size="small">●</span>')
+            line.pack_start(marker, False, False, 0)
+        texts = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        live = owner.session_count(profile)
+        title = Gtk.Label(label=("★ " if owner.is_favorite(profile) else "") + profile.alias, xalign=0,
+                          ellipsize=Pango.EllipsizeMode.END)
+        mark(title, "sshm-emphasis")
+        detail = Gtk.Label(label=profile.address + (f"  ·  сеансов: {live}" if live else ""), xalign=0,
+                           ellipsize=Pango.EllipsizeMode.END)
+        mark(detail, "sshm-muted")
+        texts.pack_start(title, False, False, 0)
+        texts.pack_start(detail, False, False, 0)
+        line.pack_start(texts, True, True, 0)
+        row.add(line)
+        return row
+
+    def chosen(self):
+        row = self.listing.get_selected_row()
+        return row.profile if row is not None else None
+
+    # --- input -------------------------------------------------------------------------------
+    def row_activated(self, row):
+        if row.profile is not None:
+            self.owner.connect_profile(row.profile)
+        elif row.section is not None:
+            self.toggle(row.section)
+
+    def connect_selected(self):
+        row = self.listing.get_selected_row()
+        if row is not None:
+            self.row_activated(row)
+
+    def pressed(self, listing, event):
+        row = listing.get_row_at_y(int(event.y))
+        if row is None:
+            return False
+        if event.button == 1 and event.type == Gdk.EventType.BUTTON_PRESS and row.profile is None:
+            listing.select_row(row)
+            self.toggle(row.section)
+            return True
+        if event.button == 3 and event.type == Gdk.EventType.BUTTON_PRESS:
+            listing.select_row(row)
+            return self.menu(event)
+        return False
+
+    def menu(self, event):
+        row = self.listing.get_selected_row()
+        if row is None:
+            return False
+        if row.profile is None:
+            folded = row.section in self.collapsed()
+            return menu_at(self.listing, event, [Item("Развернуть" if folded else "Свернуть",
+                                                      lambda: self.toggle(row.section), icon="move")])
+        self.owner.profile_menu(self.listing, event, row.profile)
+        return True
+
+    def keys(self, listing, event):
+        row = listing.get_selected_row()
+        if row is None:
+            return False
+        if event.keyval in (Gdk.KEY_Left, Gdk.KEY_Right) and row.profile is None:
+            folded = row.section in self.collapsed()
+            if folded == (event.keyval == Gdk.KEY_Right):
+                self.toggle(row.section)
+            return True
+        if event.keyval == Gdk.KEY_space and row.profile is None:
+            self.toggle(row.section)
+            return True
+        if event.keyval == Gdk.KEY_F10 and event.state & Gdk.ModifierType.SHIFT_MASK:
+            return self.menu(None)
+        if event.keyval == Gdk.KEY_Delete and row.profile is not None:
+            self.owner.delete_entry(row.profile)
+            return True
+        return False
+
+    def search_keys(self, entry, event):
+        if event.keyval not in (Gdk.KEY_Up, Gdk.KEY_Down):
+            return False
+        rows = self.listing.get_children()
+        if not rows:
+            return True
+        current = self.listing.get_selected_row()
+        index = rows.index(current) if current in rows else -1
+        index = max(0, min(len(rows) - 1, index + (1 if event.keyval == Gdk.KEY_Down else -1)))
+        self.listing.select_row(rows[index])
+        return True
+
+
 class SessionsPage(Gtk.Box):
-    def __init__(self, owner, header):
-        super().__init__(orientation=Gtk.Orientation.VERTICAL)
+    """«Серверы» and «Сеансы» columns and the workspace: catalog table, a session or «Файлы» (docs/ui-spec.md §2.2, §3)."""
+
+    def __init__(self, owner, catalog):
+        super().__init__(spacing=COLUMN_GAP)
         self.owner = owner
         self.active = None
         self.order = 0
         self.refreshing = False
-        self.pack_start(header, False, False, 0)
-        body = Gtk.Box(spacing=12)
-        self.pack_start(body, True, True, 0)
+        self.files_panels = []
+        self.servers_wanted = self.sessions_wanted = True
+        self.servers_forced = self.sessions_forced = False
+        self.chrome = True
+        self.width = 0
 
-        sidebar = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
-        sidebar.set_size_request(234, -1)
-        mode = Gtk.Box(spacing=4)
-        self.session_tab = action_button("Сеансы", lambda: self.select_sidebar(False), "tab", width=98)
-        self.server_tab = action_button("Серверы", lambda: self.select_sidebar(True), "tab", width=98)
-        mode.pack_start(self.session_tab, False, False, 0)
-        mode.pack_start(self.server_tab, False, False, 0)
-        sidebar.pack_start(mode, False, False, 0)
-        self.sidebar_views = Gtk.Stack(vhomogeneous=False, hhomogeneous=False)
-        sidebar.pack_start(self.sidebar_views, True, True, 0)
-        session_list = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
-        self.sidebar_views.add_named(session_list, "sessions")
-        self.server_panel = ServerPickerPanel(owner.protocol, owner.server_entries,
-                                               lambda: [item["key"] for item in owner.settings["recent"]],
-                                               self.open_saved_server, compact=True)
-        self.sidebar_views.add_named(self.server_panel, "servers")
-        self.session_tab.get_style_context().add_class("selected")
-        self.sidebar_views.set_visible_child_name("sessions")
+        self.server_column = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6, margin_bottom=8)
+        self.server_column.set_size_request(SERVER_WIDTH, -1)
+        self.server_column.pack_start(column_title("Серверы", action_button(
+            "Каталог", owner.show_catalog, "quiet", icon="server", width=104, tooltip="Таблица подключений")), False, False, 0)
+        self.server_panel = ServerColumn(owner)
+        self.server_column.pack_start(self.server_panel, True, True, 0)
+        self.pack_start(self.server_column, False, False, 0)
+
+        session_list = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6, margin_bottom=8)
+        session_list.set_size_request(SESSION_WIDTH, -1)
+        self.session_column = session_list
+        session_list.pack_start(column_title("Сеансы", action_button("", owner.pick_server, "quiet", icon="plus", width=34,
+                                                                     tooltip="Новый сеанс")), False, False, 0)
         self.search = Gtk.SearchEntry(placeholder_text="Найти сеанс")
         self.search.connect("search-changed", lambda *_: self.refresh())
         self.search.connect("activate", lambda *_: self.open_first())
@@ -1053,13 +1320,28 @@ class SessionsPage(Gtk.Box):
         self.list.connect("row-selected", self.row_selected)
         self.list.connect("button-press-event", self.list_pressed)
         self.list.connect("popup-menu", lambda widget: self.menu(widget, None))
-        self.list.connect("row-activated", lambda *_: self.active and self.active.focus())
+        self.list.connect("row-activated", lambda listing, row: self.activate(row.session, focus=True))
         scroll = Gtk.ScrolledWindow(vexpand=True, hscrollbar_policy=Gtk.PolicyType.NEVER)
         scroll.add(self.list)
         mark(scroll, "sshm-frame")
         session_list.pack_start(scroll, True, True, 0)
-        body.pack_start(sidebar, False, False, 0)
-        self.sidebar = sidebar
+        self.files_caption = Gtk.Label(label="Открытые файлы", xalign=0, margin_top=6, no_show_all=True)
+        mark(self.files_caption, "sshm-emphasis")
+        session_list.pack_start(self.files_caption, False, False, 0)
+        self.files_list = Gtk.ListBox()
+        self.files_list.connect("row-activated", lambda listing, row: self.show_files(row.panel))
+        self.files_list.connect("button-press-event", self.files_pressed)
+        self.files_list.connect("key-press-event", self.files_key)
+        self.files_scroll = Gtk.ScrolledWindow(hscrollbar_policy=Gtk.PolicyType.NEVER, no_show_all=True)
+        self.files_scroll.add(self.files_list)
+        mark(self.files_scroll, "sshm-frame")
+        session_list.pack_start(self.files_scroll, False, False, 0)
+        self.pack_start(session_list, False, False, 0)
+
+        self.area = Gtk.Stack(hhomogeneous=False, vhomogeneous=False)
+        catalog.show_all()
+        self.area.add_named(catalog, "catalog")
+        self.pack_start(self.area, True, True, 0)
 
         workspace = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=7)
         # Title and buttons share the first row; the detail line spans the whole width (src/SessionsPage.cs:264-291).
@@ -1097,7 +1379,8 @@ class SessionsPage(Gtk.Box):
         holder.pack_start(empty, True, True, 0)
         self.views.add_named(holder, "empty")
         workspace.pack_start(self.views, True, True, 0)
-        body.pack_start(workspace, True, True, 0)
+        workspace.show_all()
+        self.area.add_named(workspace, "session")
         self.workspace_info = info
 
     # --- list --------------------------------------------------------------------------------
@@ -1114,7 +1397,136 @@ class SessionsPage(Gtk.Box):
         else:
             self.refresh()
 
+    # --- workspace ------------------------------------------------------------------------------
+    @property
+    def showing(self):
+        """"catalog", "session" or "files"."""
+        child = self.area.get_visible_child()
+        return "files" if child in self.files_panels else self.area.get_visible_child_name()
+
+    def show_catalog(self):
+        self.area.set_visible_child_name("catalog")
+        self.workspace_changed()
+
+    def show_session(self):
+        self.area.set_visible_child_name("session")
+        self.workspace_changed()
+
+    def workspace_changed(self):
+        self.fit_columns()
+        self.refresh()
+        self.refresh_files()
+        self.owner.workspace_changed()
+
+    def add_files(self, panel):
+        panel.on_change = self.refresh_files
+        panel.show_all()
+        self.area.add_named(panel, f"files-{id(panel)}")
+        self.files_panels.append(panel)
+        self.show_files(panel)
+
+    def show_files(self, panel):
+        if panel in self.files_panels:
+            self.area.set_visible_child(panel)
+            self.workspace_changed()
+
+    def remove_files(self, panel):
+        shown = self.area.get_visible_child() is panel
+        if panel in self.files_panels:
+            self.files_panels.remove(panel)
+            self.area.remove(panel)
+        panel.destroy()
+        if shown:
+            if self.active is not None:
+                self.activate(self.active, focus=True)
+            else:
+                self.owner.show_catalog()
+        else:
+            self.refresh_files()
+
+    def refresh_files(self):
+        owner = self.owner
+        for row in self.files_list.get_children():
+            self.files_list.remove(row)
+        shown = self.area.get_visible_child()
+        for panel in self.files_panels:
+            group = owner.group_record(owner.group_of(panel.profile))
+            row = FilesRow(panel, group["color"] if group and group["color"] else owner.theme.color("teal"))
+            self.files_list.add(row)
+            if panel is shown:
+                self.files_list.select_row(row)
+        visible = bool(self.files_panels)
+        self.files_caption.set_visible(visible)
+        self.files_scroll.set_visible(visible)
+        if visible:
+            self.files_scroll.set_size_request(-1, min(len(self.files_panels), 4) * 46 + 4)
+            # no_show_all keeps the window's show_all away; the rows are shown here.
+            self.files_scroll.get_child().show()
+            self.files_list.show_all()
+
+    def files_pressed(self, listing, event):
+        row = listing.get_row_at_y(int(event.y))
+        if row is None:
+            return False
+        if event.button == 3 and event.type == Gdk.EventType.BUTTON_PRESS:
+            menu_at(listing, event, [Item("Открыть", lambda: self.show_files(row.panel), icon="folder"),
+                                     Item("Закрыть файлы", row.panel.request_close, icon="delete", danger=True)])
+            return True
+        if event.button == 1:
+            self.show_files(row.panel)
+        return False
+
+    def files_key(self, listing, event):
+        row = listing.get_selected_row()
+        if row is not None and event.keyval == Gdk.KEY_Delete:
+            row.panel.request_close()
+            return True
+        return False
+
+    # --- columns --------------------------------------------------------------------------------
+    def fit_columns(self, width=None):
+        """A narrow window folds «Серверы», then «Сеансы», so the workspace keeps 620 for the catalog table or 460
+        for a session and files. The header buttons show a column even then (docs/ui-spec.md §2.2)."""
+        if width is not None:
+            self.width = width
+        if not self.width:
+            return
+        # What the workspace shows needs at least its own minimum width (its button rows).
+        child = self.area.get_visible_child()
+        need = max(620 if self.showing == "catalog" else 460, child.get_preferred_width()[0] if child else 0)
+        servers, sessions = self.servers_wanted and self.chrome, self.sessions_wanted and self.chrome
+
+        def room():
+            return (self.width - (SERVER_WIDTH + COLUMN_GAP if servers else 0)
+                    - (SESSION_WIDTH + COLUMN_GAP if sessions else 0))
+        if servers and not self.servers_forced and room() < need:
+            servers = False
+        if sessions and not self.sessions_forced and room() < need:
+            sessions = False
+        if self.server_column.get_visible() != servers or self.session_column.get_visible() != sessions:
+            GLib.idle_add(self.apply_columns, servers, sessions)
+
+    def apply_columns(self, servers, sessions):
+        if servers and not self.server_column.get_visible():
+            self.server_panel.render()
+        self.server_column.set_visible(servers)
+        self.session_column.set_visible(sessions)
+        return False
+
+    def toggle_servers(self):
+        shown = self.server_column.get_visible()
+        self.servers_wanted = self.servers_forced = not shown
+        self.fit_columns()
+
+    def toggle_sessions(self):
+        shown = self.session_column.get_visible()
+        self.sessions_wanted = self.sessions_forced = not shown
+        self.fit_columns()
+
     def activate(self, session, focus=False):
+        if session is not None and self.showing != "session":
+            self.area.set_visible_child_name("session")
+            GLib.idle_add(self.workspace_changed)
         if session is not self.active:
             self.active = session
             if session is not None:
@@ -1140,7 +1552,7 @@ class SessionsPage(Gtk.Box):
                         else owner.theme.color("line")
                     row = SessionRow(session, color)
                     self.list.add(row)
-                    if session is self.active:
+                    if session is self.active and self.showing == "session":
                         self.list.select_row(row)
             self.list.show_all()
         finally:
@@ -1190,6 +1602,7 @@ class SessionsPage(Gtk.Box):
             self.menu(listing, event)
             return True
         if event.button == 1:
+            self.activate(row.session)
             GLib.idle_add(row.session.focus)
         return False
 
@@ -1199,22 +1612,20 @@ class SessionsPage(Gtk.Box):
             self.activate(row.session, focus=True)
 
     def open_saved_server(self, profile):
-        self.select_sidebar(False, focus=False)
         self.owner.connect_profile(profile)
 
-    def select_sidebar(self, servers, focus=True):
-        self.sidebar_views.set_visible_child_name("servers" if servers else "sessions")
-        for tab, selected in ((self.session_tab, not servers), (self.server_tab, servers)):
-            context = tab.get_style_context()
-            (context.add_class if selected else context.remove_class)("selected")
-        if servers:
-            self.server_panel.render()
-        if focus:
-            self.focus_search()
-
     def focus_search(self):
-        search = self.server_panel.search if self.sidebar_views.get_visible_child_name() == "servers" else self.search
-        search.grab_focus()
+        """Ctrl+Shift+P: the session search, showing its column on a narrow window."""
+        if not self.session_column.get_visible():
+            self.sessions_wanted = self.sessions_forced = True
+            self.apply_columns(self.server_column.get_visible(), True)
+        self.search.grab_focus()
+
+    def focus_server_search(self):
+        if not self.server_column.get_visible():
+            self.servers_wanted = self.servers_forced = True
+            self.apply_columns(True, self.session_column.get_visible())
+        self.server_panel.search.grab_focus()
 
     def cycle(self):
         others = [item for item in self.owner.sessions if item is not self.active and item.live]
@@ -1279,5 +1690,9 @@ class SessionsPage(Gtk.Box):
         popover.popup()
 
     def set_chrome(self, visible):
-        self.sidebar.set_visible(visible)
+        self.chrome = visible
         self.info.set_visible(visible)
+        if not visible:
+            self.apply_columns(False, False)
+        else:
+            self.fit_columns()

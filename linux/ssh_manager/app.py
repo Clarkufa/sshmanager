@@ -25,7 +25,7 @@ from .catalog import ALL_NAME, UNGROUPED_NAME, CatalogPage, next_order
 from .config import Config, Profile, parse_settings
 from .dialogs import IMPORT_RESPONSE, DesktopDialog, ImportDialog, ProfileDialog, ServerPicker, SettingsDialog, VncDialog
 from .extras import copy_key_command, parse_quick, putty_sessions, quick_alias
-from .files import FilesWindow
+from .files import FilesPanel
 from .launch import ssh_command_text, terminal_command
 from .rdp import DesktopProfile, ordered
 from .sessions import (RdpSession, SessionsPage, SshSession, VncSession, VncWindow, ask_credential, embedding_supported,
@@ -67,7 +67,7 @@ class Window(Gtk.ApplicationWindow):
         self.theme.apply(self.settings["dark"])
         self.active_group = self.settings["default"] if self.group_record(self.settings["default"]) else ""
         self.protocol = "ssh"
-        self.set_default_size(980, 570)
+        self.set_default_size(1280, 720)
         self.set_size_request(800, 480)
         self.set_position(Gtk.WindowPosition.CENTER)
         self.connect("delete-event", self.on_delete)
@@ -77,33 +77,38 @@ class Window(Gtk.ApplicationWindow):
         outer = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
         mark(outer, "sshm-page")
         self.add(outer)
-        # Each page sizes the window on its own; the hidden sessions page must not widen the catalog.
-        self.pages = Gtk.Stack(transition_type=Gtk.StackTransitionType.CROSSFADE, transition_duration=120,
-                               hhomogeneous=False, vhomogeneous=False)
-        outer.pack_start(self.pages, True, True, 0)
-
-        self.title = Gtk.Label(label="SSH-подключения", xalign=0)
-        self.sessions_button = action_button("Сеансы", self.show_sessions, icon="terminal", width=116)
+        # One window: header, then «Серверы» | «Сеансы» | workspace (docs/ui-spec.md §2).
+        self.servers_button = action_button("Серверы", lambda: self.sessions_page.toggle_servers(), icon="server", width=104,
+                                            tooltip="Показать или скрыть колонку «Серверы»")
+        self.sessions_button = action_button("Сеансы", lambda: self.sessions_page.toggle_sessions(), icon="terminal",
+                                             width=116, tooltip="Показать или скрыть колонку «Сеансы»")
+        self.settings_button = action_button("Настройки", self.open_settings, "quiet", icon="edit", tooltip="Настройки")
         self.add_button = action_button("Добавить сервер", self.add_profile, "primary", icon="plus", width=158)
-        catalog_page = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, margin_start=24, margin_end=24, margin_top=15)
-        settings_button = action_button("Настройки", self.open_settings, "quiet", icon="edit")
-        catalog_page.pack_start(self.header(self.title, [settings_button, self.theme_button(), self.sessions_button,
-                                                         self.add_button]), False, False, 0)
+        self.quick = Gtk.Entry(placeholder_text="Быстрое подключение: user@host, rdp:// или vnc://", width_chars=18,
+                               max_width_chars=52, halign=Gtk.Align.CENTER, valign=Gtk.Align.CENTER, hexpand=True)
+        self.quick.set_tooltip_text("Подключиться без сохранения профиля. Enter — подключиться.")
+        self.quick.connect("activate", lambda entry: self.quick_connect(entry.get_text()) and entry.set_text(""))
+        # The header never sets the window's minimum width: on a narrow window its buttons shrink to icons instead.
+        self.header_row = Gtk.ScrolledWindow(hscrollbar_policy=Gtk.PolicyType.EXTERNAL,
+                                             vscrollbar_policy=Gtk.PolicyType.NEVER)
+        self.header_row.add(self.header())
+        self.header_row.get_child().set_shadow_type(Gtk.ShadowType.NONE)
+        mark(self.header_row.get_child(), "sshm-page")
+        self.header_row.connect("size-allocate", lambda widget, allocation: self.fit_header(allocation.width))
+        outer.pack_start(self.header_row, False, False, 0)
         self.catalog = CatalogPage(self)
-        catalog_page.pack_start(self.catalog, True, True, 0)
-        self.pages.add_named(catalog_page, "catalog")
+        self.sessions_page = SessionsPage(self, self.catalog)
+        # The columns fold on a narrow window: the body never asks for more width than the window has.
+        self.body = Gtk.ScrolledWindow(hscrollbar_policy=Gtk.PolicyType.EXTERNAL, vscrollbar_policy=Gtk.PolicyType.NEVER,
+                                       margin_start=12, margin_end=12)
+        self.body.add(self.sessions_page)
+        viewport = self.body.get_child()
+        viewport.set_shadow_type(Gtk.ShadowType.NONE)
+        mark(viewport, "sshm-page")
+        self.body.connect("size-allocate", lambda widget, allocation: self.sessions_page.fit_columns(allocation.width))
+        outer.pack_start(self.body, True, True, 0)
 
-        new_session = action_button("Новый сеанс", self.pick_server, "primary", icon="plus", width=132)
-        servers = action_button("К серверам", self.show_catalog, icon="move_left", width=126)
-        sessions_header = self.header(Gtk.Label(label="Сеансы", xalign=0), [self.theme_button(), servers, new_session])
-        self.sessions_header = sessions_header
-        self.sessions_page = SessionsPage(self, sessions_header)
-        holder = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, margin_start=24, margin_end=24, margin_top=15, margin_bottom=21)
-        holder.pack_start(self.sessions_page, True, True, 0)
-        self.sessions_holder = holder
-        self.pages.add_named(holder, "sessions")
-
-        self.footer = Gtk.Box(spacing=12, margin_start=24, margin_end=24, margin_top=6, margin_bottom=8)
+        self.footer = Gtk.Box(spacing=12, margin_start=16, margin_end=16, margin_top=6, margin_bottom=8)
         self.source = Gtk.Label(xalign=0, ellipsize=Pango.EllipsizeMode.MIDDLE)
         self.status = Gtk.Label(xalign=0)
         for label in (self.source, self.status):
@@ -124,22 +129,40 @@ class Window(Gtk.ApplicationWindow):
             self.updates.check()
 
     # --- layout helpers ---------------------------------------------------------------------
-    def header(self, title, buttons):
-        row = Gtk.Box(spacing=8, margin_bottom=7)
-        row.set_size_request(-1, 55)
+    def header(self):
+        """Logo, «SSH Manager», quick connect and the window buttons (docs/ui-spec.md §2.1)."""
+        row = Gtk.Box(spacing=8, margin_start=16, margin_end=16, margin_top=8, margin_bottom=8)
+        row.set_size_request(-1, 54)
         icon = app_icon()
         if icon:
             try:
-                row.pack_start(Gtk.Image.new_from_pixbuf(GdkPixbuf.Pixbuf.new_from_file_at_scale(str(icon), 42, 42, True)),
+                row.pack_start(Gtk.Image.new_from_pixbuf(GdkPixbuf.Pixbuf.new_from_file_at_scale(str(icon), 32, 32, True)),
                                False, False, 0)
             except GLib.Error:
                 pass
-        mark(title, "sshm-title")
-        row.pack_start(title, True, True, 4)
-        for widget in buttons:
+        title = Gtk.Label(label="SSH Manager", xalign=0)
+        mark(title, "sshm-emphasis")
+        row.pack_start(title, False, False, 4)
+        row.pack_start(self.quick, True, True, 6)
+        for widget in (self.servers_button, self.sessions_button, self.settings_button, self.theme_button(), self.add_button):
             widget.set_valign(Gtk.Align.CENTER)
             row.pack_start(widget, False, False, 0)
         return row
+
+    def fit_header(self, width):
+        """Narrow windows keep only the icons of «Настройки» and the theme, then of «Серверы» and «Сеансы»."""
+        compact = {self.settings_button: width < 1100, self.theme_buttons[0]: width < 1100,
+                   self.servers_button: width < 960, self.sessions_button: width < 960}
+        widths = {self.settings_button: -1, self.theme_buttons[0]: 130, self.servers_button: 104, self.sessions_button: 116}
+        for button, small in compact.items():
+            if button.label.get_visible() == small:
+                GLib.idle_add(self.compact_button, button, small, widths[button])
+
+    @staticmethod
+    def compact_button(button, small, width):
+        button.label.set_visible(not small)
+        button.set_size_request(38 if small else width, -1)
+        return False
 
     def theme_button(self):
         widget = action_button("", self.switch_theme, icon="moon", width=130)
@@ -172,26 +195,25 @@ class Window(Gtk.ApplicationWindow):
 
     # --- navigation -------------------------------------------------------------------------
     def show_sessions(self):
-        self.pages.set_visible_child_name("sessions")
-        self.source.hide()
-        self.status.hide()
-        self.sessions_page.refresh()
-        if self.sessions_page.sidebar_views.get_visible_child_name() == "servers":
-            self.sessions_page.server_panel.render()
+        self.sessions_page.show_session()
         if self.sessions_page.active:
             GLib.idle_add(self.sessions_page.active.focus)
 
     def show_catalog(self):
         if self.full_session:
             self.leave_full_screen()
-        self.pages.set_visible_child_name("catalog")
-        self.source.show()
-        self.status.show()
+        self.sessions_page.show_catalog()
         self.catalog.render()
         self.catalog.search.grab_focus()
 
+    def workspace_changed(self):
+        """The footer path and counter belong to the catalog table."""
+        catalog = self.sessions_page.showing == "catalog"
+        self.source.set_visible(catalog)
+        self.status.set_visible(catalog)
+
     def shortcuts(self, window, event):
-        if self.pages.get_visible_child_name() != "sessions":
+        if self.sessions_page.showing == "catalog":
             return False
         modifiers = event.state & Gtk.accelerator_get_default_mod_mask()
         control, shift = Gdk.ModifierType.CONTROL_MASK, Gdk.ModifierType.SHIFT_MASK
@@ -207,7 +229,6 @@ class Window(Gtk.ApplicationWindow):
 
     def select_protocol(self, protocol):
         self.protocol = protocol
-        self.title.set_text({"ssh": "SSH-подключения", "rdp": "RDP-подключения", "vnc": "VNC-подключения"}[protocol])
         self.catalog.set_protocol(protocol)
         self.add_button.set_sensitive(protocol != "ssh" or self.document is not None)
         self.catalog.render()
@@ -223,6 +244,7 @@ class Window(Gtk.ApplicationWindow):
         self.add_button.set_sensitive(self.protocol != "ssh" or self.document is not None)
         self.catalog.render_groups()
         self.catalog.render()
+        self.sessions_page.server_panel.render()
 
     def desktop_profiles(self):
         fields = DesktopProfile.__dataclass_fields__
@@ -720,11 +742,13 @@ class Window(Gtk.ApplicationWindow):
                 message(self, "Выберите SSH-профиль для файлов в настройках VNC-подключения.", Gtk.MessageType.ERROR)
                 return
         key = (profile.alias, profile.address)
-        if key not in self.files:
-            window = FilesWindow(self, profile, self.config, self.vault)
-            self.files[key] = window
-            window.connect("destroy", lambda unused: self.files.pop(key, None))
-        self.files[key].present()
+        if key in self.files:
+            self.sessions_page.show_files(self.files[key])
+            return
+        panel = FilesPanel(self, profile, self.config, self.vault, self.sessions_page.remove_files)
+        self.files[key] = panel
+        panel.connect("destroy", lambda unused: self.files.pop(key, None))
+        self.sessions_page.add_files(panel)
 
     def export_backup(self):
         from .backup import choose_export
@@ -948,7 +972,7 @@ class Window(Gtk.ApplicationWindow):
     def sessions_changed(self):
         live = sum(session.live for session in self.sessions)
         set_button_text(self.sessions_button, f"Сеансы · {live}" if live else "Сеансы")
-        if self.pages.get_visible_child_name() == "catalog":
+        if self.sessions_page.showing == "catalog":
             self.catalog.render()
 
     def close_session(self, session, confirm_close=True):
@@ -985,12 +1009,10 @@ class Window(Gtk.ApplicationWindow):
         self.full_session = session
         self.sessions_page.activate(session)
         self.sessions_page.set_chrome(False)
-        self.sessions_header.hide()
+        self.header_row.hide()
         self.footer.hide()
-        self.sessions_holder.set_margin_start(0)
-        self.sessions_holder.set_margin_end(0)
-        self.sessions_holder.set_margin_top(0)
-        self.sessions_holder.set_margin_bottom(0)
+        self.body.set_margin_start(0)
+        self.body.set_margin_end(0)
         session.set_full_screen(True)
         self.fullscreen()
 
@@ -998,12 +1020,10 @@ class Window(Gtk.ApplicationWindow):
         session, self.full_session = self.full_session, None
         self.unfullscreen()
         self.sessions_page.set_chrome(True)
-        self.sessions_header.show()
+        self.header_row.show()
         self.footer.show()
-        self.sessions_holder.set_margin_start(24)
-        self.sessions_holder.set_margin_end(24)
-        self.sessions_holder.set_margin_top(15)
-        self.sessions_holder.set_margin_bottom(21)
+        self.body.set_margin_start(12)
+        self.body.set_margin_end(12)
         if session is not None:
             session.set_full_screen(False)
 
