@@ -10,6 +10,9 @@ namespace SshManager
 {
     internal static class TrayApplication
     {
+        /// <summary>«Сворачивать в трей при закрытии окна» from the settings.</summary>
+        public static bool CloseToTray = true;
+
         public static void Run(string instanceName, Func<Form> createWindow)
         {
             using (var lifetime = new Mutex(false, @"Local\" + instanceName))
@@ -140,6 +143,11 @@ namespace SshManager
         {
             if (args.CloseReason != CloseReason.UserClosing) return;
             args.Cancel = true;
+            if (!TrayApplication.CloseToTray)
+            {
+                window.BeginInvoke(new Action(Application.Exit));
+                return;
+            }
             if (notification.EnsureRegistered()) window.Hide();
             else window.WindowState = FormWindowState.Minimized;
         }

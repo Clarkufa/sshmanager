@@ -433,7 +433,7 @@ class ServerPicker(Gtk.Dialog):
 
     @staticmethod
     def key(profile):
-        return ("rdp:" + profile.id) if hasattr(profile, "id") and hasattr(profile, "fullscreen") else "ssh:" + profile.alias
+        return ("rdp:" + profile.id) if hasattr(profile, "id") and hasattr(profile, "fullscreen") else "ssh:" + profile.alias.lower()
 
     def row(self, profile, group, color):
         row = Gtk.ListBoxRow()

@@ -14,7 +14,9 @@ namespace SshManager
 {
     internal sealed class TerminalScreen
     {
-        public readonly VirtualTerminalController Engine = new VirtualTerminalController { MaximumHistoryLines = 3000 };
+        /// <summary>«Строк прокрутки» from the settings; applies to sessions opened afterwards.</summary>
+        public static int HistoryLines = 3000;
+        public readonly VirtualTerminalController Engine = new VirtualTerminalController { MaximumHistoryLines = HistoryLines };
         private readonly TerminalParser parser;
         public int HistoryOffset;
 
@@ -56,7 +58,7 @@ namespace SshManager
         private const int Inset = 10;
         private const int WmContextMenu = 0x007B;
 
-        private readonly Font normalFont, boldFont;
+        private Font normalFont, boldFont;
         private readonly StringFormat textFormat;
         private readonly ContextMenuStrip clipboardMenu;
         private float characterWidth;
@@ -134,6 +136,26 @@ namespace SshManager
         {
             base.OnDpiChangedAfterParent(args);
             UpdateCellMetrics();
+            Invalidate();
+        }
+
+        /// <summary>Terminal font from the settings: a missing family falls back to Consolas.</summary>
+        public void SetFont(string family, int size)
+        {
+            string name = "Consolas";
+            if (!String.IsNullOrWhiteSpace(family))
+            {
+                try { using (var probe = new FontFamily(family)) name = probe.Name; }
+                catch (ArgumentException) { }
+            }
+            var points = Math.Max(6, Math.Min(48, size));
+            if (normalFont.Name == name && Math.Abs(normalFont.Size - points) < 0.01f) return;
+            Font previous = normalFont, previousBold = boldFont;
+            normalFont = new Font(name, points);
+            boldFont = new Font(normalFont, FontStyle.Bold);
+            previous.Dispose();
+            previousBold.Dispose();
+            if (IsHandleCreated) UpdateCellMetrics();
             Invalidate();
         }
 

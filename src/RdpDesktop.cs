@@ -151,7 +151,9 @@ namespace SshManager
             Set(settings, "AuthenticationLevel", ServerAuthentication);
             Set(settings, "RedirectClipboard", profile.Clipboard);
             Set(settings, "RedirectDrives", false);
-            Set(settings, "RedirectPrinters", false);
+            Set(settings, "RedirectPrinters", profile.Options.Printers);
+            RedirectDrives(client, profile.Options);
+            UseGateway(client, profile.Options);
             TrySet(settings, "EnableAutoReconnect", true);
             TrySet(settings, "GrabFocusOnConnect", true);
             TrySet(settings, "BitmapPersistence", 1);
@@ -370,6 +372,43 @@ namespace SshManager
             catch (Exception error) when (IsComError(error) || error is InvalidCastException) { }
         }
 
+        /// <summary>Shares the drives that hold the chosen folders: the client redirects whole drives, never single folders.</summary>
+        private static void RedirectDrives(object client, RdpOptions options)
+        {
+            if (options.Drives.Length == 0) return;
+            var letters = new HashSet<char>(options.DriveLetters);
+            try
+            {
+                var settings = (IMsRdpClientNonScriptable3)client;
+                Marshal.ThrowExceptionForHR(settings.GetDriveCollection(out var drives));
+                Marshal.ThrowExceptionForHR(drives.GetDriveCount(out uint count));
+                for (uint index = 0; index < count; index++)
+                {
+                    if (drives.GetDriveByIndex(index, out var drive) != 0 || drive == null) continue;
+                    if (drive.GetName(out var name) != 0 || name == null) continue;
+                    var letter = System.Text.RegularExpressions.Regex.Match(name, @"([A-Za-z]):");
+                    if (letter.Success && letters.Contains(char.ToUpperInvariant(letter.Groups[1].Value[0])))
+                        drive.PutRedirectionState(-1);
+                }
+            }
+            catch (Exception error) when (IsComError(error) || error is InvalidCastException) { }
+        }
+
+        /// <summary>RD Gateway with the session's own credentials.</summary>
+        private static void UseGateway(object client, RdpOptions options)
+        {
+            if (options.Gateway.Length == 0) return;
+            object transport;
+            try { transport = Get(client, "TransportSettings2"); }
+            catch (Exception error) when (IsComError(error)) { transport = Get(client, "TransportSettings"); }
+            Set(transport, "GatewayHostname", options.Gateway);
+            Set(transport, "GatewayUsageMethod", 1u);         // TSC_PROXY_MODE_DIRECT
+            Set(transport, "GatewayProfileUsageMethod", 1u);  // use these settings
+            TrySet(transport, "GatewayCredsSource", 0u);      // TSC_PROXY_CREDS_MODE_USERPASS
+            TrySet(transport, "GatewayCredSharing", 1u);
+            if (options.GatewayUser.Length > 0) TrySet(transport, "GatewayUsername", options.GatewayUser);
+        }
+
         private static void SetPassword(object client, object settings, string password)
         {
             try { Set(settings, "ClearTextPassword", password); return; }
@@ -449,6 +488,56 @@ namespace SshManager
         private interface IMsTscNonScriptable
         {
             void PutClearTextPassword([MarshalAs(UnmanagedType.BStr)] string password);
+        }
+
+        // Vtable order read from the mstscax.dll type library (slots 3-30); later members are not used.
+        [ComImport, Guid("B3378D90-0728-45C7-8ED7-B6159FB92219"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+        private interface IMsRdpClientNonScriptable3
+        {
+            [PreserveSig] int PutClearTextPassword(IntPtr value);
+            [PreserveSig] int PutPortablePassword(IntPtr value);
+            [PreserveSig] int GetPortablePassword(out IntPtr value);
+            [PreserveSig] int PutPortableSalt(IntPtr value);
+            [PreserveSig] int GetPortableSalt(out IntPtr value);
+            [PreserveSig] int PutBinaryPassword(IntPtr value);
+            [PreserveSig] int GetBinaryPassword(out IntPtr value);
+            [PreserveSig] int PutBinarySalt(IntPtr value);
+            [PreserveSig] int GetBinarySalt(out IntPtr value);
+            [PreserveSig] int ResetPassword();
+            [PreserveSig] int NotifyRedirectDeviceChange(UIntPtr wParam, IntPtr lParam);
+            [PreserveSig] int SendKeys(int count, IntPtr keyUp, IntPtr keyData);
+            [PreserveSig] int PutUIParentWindowHandle(IntPtr value);
+            [PreserveSig] int GetUIParentWindowHandle(out IntPtr value);
+            [PreserveSig] int PutShowRedirectionWarningDialog(short value);
+            [PreserveSig] int GetShowRedirectionWarningDialog(out short value);
+            [PreserveSig] int PutPromptForCredentials(short value);
+            [PreserveSig] int GetPromptForCredentials(out short value);
+            [PreserveSig] int PutNegotiateSecurityLayer(short value);
+            [PreserveSig] int GetNegotiateSecurityLayer(out short value);
+            [PreserveSig] int PutEnableCredSspSupport(short value);
+            [PreserveSig] int GetEnableCredSspSupport(out short value);
+            [PreserveSig] int PutRedirectDynamicDrives(short value);
+            [PreserveSig] int GetRedirectDynamicDrives(out short value);
+            [PreserveSig] int PutRedirectDynamicDevices(short value);
+            [PreserveSig] int GetRedirectDynamicDevices(out short value);
+            [PreserveSig] int GetDeviceCollection(out IntPtr value);
+            [PreserveSig] int GetDriveCollection([MarshalAs(UnmanagedType.Interface)] out IMsRdpDriveCollection value);
+        }
+
+        [ComImport, Guid("7FF17599-DA2C-4677-AD35-F60C04FE1585"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+        private interface IMsRdpDriveCollection
+        {
+            [PreserveSig] int RescanDrives(short dynamicOnly);
+            [PreserveSig] int GetDriveByIndex(uint index, [MarshalAs(UnmanagedType.Interface)] out IMsRdpDrive drive);
+            [PreserveSig] int GetDriveCount(out uint count);
+        }
+
+        [ComImport, Guid("D28B5458-F694-47A8-8E61-40356A767E46"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+        private interface IMsRdpDrive
+        {
+            [PreserveSig] int GetName([MarshalAs(UnmanagedType.BStr)] out string name);
+            [PreserveSig] int PutRedirectionState(short state);
+            [PreserveSig] int GetRedirectionState(out short state);
         }
 
         [ComImport, Guid("302D8188-0052-4807-806A-362B628F9AC5"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]

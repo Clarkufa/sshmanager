@@ -18,7 +18,7 @@ $desktopType = $asm.GetType('SshManager.RdpDesktop')
 $desktopType.GetField('ServerAuthentication', [Reflection.BindingFlags]'Static,NonPublic,Public').SetValue($null, [uint32]0)
 $profileType = $asm.GetType('SshManager.RdpProfile'); $credType = $asm.GetType('SshManager.RdpCredential')
 $profile = [Activator]::CreateInstance($profileType, [object[]]@([Guid]::NewGuid().ToString('N'), 'xrdp', '127.0.0.1', $Port,
-    'tester', '', $null, $FixedWidth, $FixedHeight, $false, $false))
+    'tester', '', $null, $FixedWidth, $FixedHeight, $false, $false, $null))
 $cred = [Activator]::CreateInstance($credType, [object[]]@('tester', '', 'Rdp-Test-2026'))
 
 function Pump([double]$seconds) {

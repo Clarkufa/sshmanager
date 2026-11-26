@@ -19,6 +19,44 @@ namespace SshManager
         public ServerGroup(string id, string name) { Id = id; Name = name; }
     }
 
+    /// <summary>«Настройки» (docs/ui-spec.md §7), stored as attributes of the tabs.xml root like on macOS.</summary>
+    internal sealed class Preferences
+    {
+        public const int DefaultTerminalSize = 11;
+        public string TerminalFont = "";
+        public int TerminalSize = DefaultTerminalSize;
+        public int Scrollback = 3000;
+        public string DefaultUser = "";
+        public string DefaultPort = "";
+        public bool AutoReconnect;
+        public bool CloseToTray = true;
+        public bool CheckUpdates = true;
+
+        public Preferences Copy() => (Preferences)MemberwiseClone();
+    }
+
+    internal sealed class Snippet
+    {
+        public readonly string Name, Command;
+
+        public Snippet(string name, string command)
+        {
+            Name = (name ?? "").Trim();
+            Command = command ?? "";
+            if (Name.Length == 0 || Name.Length > 80 || Name.Any(char.IsControl))
+                throw new ArgumentException("Укажите название команды длиной до 80 символов.");
+            if (Command.Trim().Length == 0 || Command.Length > 4000 || Command.Any(ch => char.IsControl(ch) && ch != '\n' && ch != '\r' && ch != '\t'))
+                throw new ArgumentException("Укажите команду длиной до 4000 символов.");
+        }
+    }
+
+    internal sealed class RecentEntry
+    {
+        public readonly string Key;
+        public readonly long At;
+        public RecentEntry(string key, long at) { Key = key; At = at; }
+    }
+
     internal sealed class Groups
     {
         public const string AllName = "Все серверы";
@@ -28,6 +66,42 @@ namespace SshManager
         public ServerSort SshSort, RdpSort;
         public string StartupTabId { get; private set; }
         public bool DarkTheme { get; set; }
+        public readonly List<string> Favorites = new List<string>();
+        public readonly List<RecentEntry> Recent = new List<RecentEntry>();
+        public readonly List<Snippet> Snippets = new List<Snippet>();
+        public Preferences Preferences = new Preferences();
+
+        /// <summary>"ssh:alias" (lower case, as on macOS and Linux) or "rdp:id".</summary>
+        public static string Key(string alias) => "ssh:" + alias.ToLowerInvariant();
+        public static string Key(RdpProfile profile) => "rdp:" + profile.Id;
+
+        public bool IsFavorite(string key) => Favorites.Contains(key, StringComparer.OrdinalIgnoreCase);
+
+        public void ToggleFavorite(string key)
+        {
+            if (Favorites.RemoveAll(item => String.Equals(item, key, StringComparison.OrdinalIgnoreCase)) == 0) Favorites.Add(key);
+        }
+
+        public void RecordRecent(string key)
+        {
+            Recent.RemoveAll(item => String.Equals(item.Key, key, StringComparison.OrdinalIgnoreCase));
+            Recent.Insert(0, new RecentEntry(key, DateTimeOffset.UtcNow.ToUnixTimeSeconds()));
+            if (Recent.Count > 10) Recent.RemoveRange(10, Recent.Count - 10);
+        }
+
+        /// <summary>Keeps favorites and recent entries pointing at the renamed or removed connection.</summary>
+        public void RenameKey(string previous, string next)
+        {
+            for (int i = 0; i < Favorites.Count; i++)
+                if (String.Equals(Favorites[i], previous, StringComparison.OrdinalIgnoreCase)) Favorites[i] = next;
+            for (int i = 0; i < Recent.Count; i++)
+                if (String.Equals(Recent[i].Key, previous, StringComparison.OrdinalIgnoreCase)) Recent[i] = new RecentEntry(next, Recent[i].At);
+            if (next == null)
+            {
+                Favorites.RemoveAll(item => item == null);
+                Recent.RemoveAll(item => item.Key == null);
+            }
+        }
 
         public ServerGroup Find(string id) { return Items.FirstOrDefault(group => group.Id == id); }
         public ServerGroup ForAlias(string alias) { return Items.FirstOrDefault(group => group.Aliases.Contains(alias)); }
@@ -165,6 +239,7 @@ namespace SshManager
             groups.DarkTheme = (string)root.Attribute("theme") == "dark";
             groups.SshSort = ServerOrder.Parse((string)root.Attribute("sshSort"));
             groups.RdpSort = ServerOrder.Parse((string)root.Attribute("rdpSort"));
+            ParseExtras(root, groups);
             var known = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             foreach (var node in root.Elements("tab"))
             {
@@ -197,6 +272,64 @@ namespace SshManager
             return groups;
         }
 
+        /// <summary>Stage 2 data (docs/ui-spec.md §7). Unknown or damaged values are skipped, never fatal.</summary>
+        private static void ParseExtras(XElement root, Groups groups)
+        {
+            string Text(string name) => (string)root.Attribute(name);
+            int Number(string name, int fallback, int min, int max) =>
+                Int32.TryParse(Text(name), System.Globalization.NumberStyles.None, System.Globalization.CultureInfo.InvariantCulture, out var value)
+                    ? Math.Min(max, Math.Max(min, value)) : fallback;
+            var preferences = groups.Preferences;
+            var font = Text("terminalFont") ?? "";
+            preferences.TerminalFont = font.Length <= 80 && !font.Any(char.IsControl) ? font : "";
+            preferences.TerminalSize = Number("terminalSize", Preferences.DefaultTerminalSize, 6, 48);
+            preferences.Scrollback = Number("scrollback", 3000, 100, 100000);
+            var user = Text("defaultUser") ?? "";
+            preferences.DefaultUser = user.Length <= 128 && !user.Any(ch => char.IsControl(ch) || char.IsWhiteSpace(ch)) ? user : "";
+            int port = Number("defaultPort", 0, 0, 65535);
+            preferences.DefaultPort = port == 0 ? "" : port.ToString(System.Globalization.CultureInfo.InvariantCulture);
+            preferences.AutoReconnect = Text("autoReconnect") == "1";
+            preferences.CloseToTray = Text("closeToTray") != "0";
+            preferences.CheckUpdates = Text("checkUpdates") != "0";
+            foreach (var node in root.Elements("favorite"))
+            {
+                var key = (string)node.Attribute("key");
+                if (key != null && key.Length <= 300 && (key.StartsWith("ssh:", StringComparison.Ordinal) || key.StartsWith("rdp:", StringComparison.Ordinal)) &&
+                    !groups.IsFavorite(key)) groups.Favorites.Add(key);
+            }
+            foreach (var node in root.Elements("recent"))
+            {
+                var key = (string)node.Attribute("key");
+                if (key == null || key.Length > 300 || groups.Recent.Count >= 10) continue;
+                long.TryParse((string)node.Attribute("at"), System.Globalization.NumberStyles.None, System.Globalization.CultureInfo.InvariantCulture, out var at);
+                groups.Recent.Add(new RecentEntry(key, at));
+            }
+            foreach (var node in root.Elements("snippet"))
+            {
+                try { groups.Snippets.Add(new Snippet((string)node.Attribute("name"), (string)node.Attribute("command"))); }
+                catch (ArgumentException) { }
+            }
+        }
+
+        private static IEnumerable<XObject> WriteExtras(Groups latest)
+        {
+            var preferences = latest.Preferences;
+            var invariant = System.Globalization.CultureInfo.InvariantCulture;
+            if (preferences.TerminalFont.Length > 0) yield return new XAttribute("terminalFont", preferences.TerminalFont);
+            yield return new XAttribute("terminalSize", preferences.TerminalSize.ToString(invariant));
+            yield return new XAttribute("scrollback", preferences.Scrollback.ToString(invariant));
+            if (preferences.DefaultUser.Length > 0) yield return new XAttribute("defaultUser", preferences.DefaultUser);
+            if (preferences.DefaultPort.Length > 0) yield return new XAttribute("defaultPort", preferences.DefaultPort);
+            yield return new XAttribute("autoReconnect", preferences.AutoReconnect ? "1" : "0");
+            yield return new XAttribute("closeToTray", preferences.CloseToTray ? "1" : "0");
+            yield return new XAttribute("checkUpdates", preferences.CheckUpdates ? "1" : "0");
+            foreach (var key in latest.Favorites) yield return new XElement("favorite", new XAttribute("key", key));
+            foreach (var entry in latest.Recent.Take(10))
+                yield return new XElement("recent", new XAttribute("key", entry.Key), new XAttribute("at", entry.At.ToString(invariant)));
+            foreach (var snippet in latest.Snippets)
+                yield return new XElement("snippet", new XAttribute("name", snippet.Name), new XAttribute("command", snippet.Command));
+        }
+
         public Groups Update(Action<Groups> modify)
         {
             using (var mutex = new Mutex(false, WriteLock))
@@ -216,6 +349,7 @@ namespace SshManager
                         latest.StartupTabId == null ? null : new XAttribute("startupTab", latest.StartupTabId),
                         latest.DarkTheme ? new XAttribute("theme", "dark") : null,
                         SortAttribute("sshSort", latest.SshSort), SortAttribute("rdpSort", latest.RdpSort),
+                        WriteExtras(latest),
                         latest.Items.Select(group =>
                         new XElement("tab", new XAttribute("id", group.Id), new XAttribute("name", group.Name),
                             group.ColorId == null ? null : new XAttribute("color", group.ColorId),

@@ -20,8 +20,14 @@ namespace SshManager
         private readonly Button addKey;
         private readonly Button replaceKey;
         private readonly Button removeKey;
+        private readonly TextBox proxyJump;
+        private readonly ListBox forwards;
+        private readonly ComboBox forwardKind;
+        private readonly TextBox forwardValue;
+        private static readonly string[] ForwardTitles = { "L — локальный", "R — удалённый", "D — SOCKS" };
 
-        public ConnectionDialog(string sshDirectory, Connection connection, bool hasPassword, Action<ConnectionValues, string, bool> save)
+        public ConnectionDialog(string sshDirectory, Connection connection, bool hasPassword, Action<ConnectionValues, string, bool> save,
+            Preferences defaults = null)
         {
             this.sshDirectory = sshDirectory;
             Text = connection == null ? "Новое подключение" : "Изменить подключение";
@@ -35,15 +41,18 @@ namespace SshManager
             MaximizeBox = false;
             SuspendLayout();
             AutoScaleMode = AutoScaleMode.None;
-            ClientSize = new Size(724, 526);
-            MinimumSize = new Size(720, 549);
+            ClientSize = new Size(724, 680);
+            MinimumSize = new Size(720, 703);
 
-            var layout = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2, RowCount = 12, Padding = new Padding(22, 14, 22, 14) };
+            var layout = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2, RowCount = 15, Padding = new Padding(22, 14, 22, 14) };
             layout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 138));
             layout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
             for (int i = 0; i < 5; i++) layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 36));
             layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 30));
             layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 31));
+            layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 36));
+            layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 70));
+            layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 40));
             layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 41));
             layout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
             layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 37));
@@ -53,8 +62,8 @@ namespace SshManager
 
             alias = Field(layout, 0, "&Псевдоним", connection == null ? "" : connection.Alias);
             host = Field(layout, 1, "&Хост", connection == null ? "" : connection.Get("hostname"));
-            user = Field(layout, 2, "По&льзователь", connection == null ? "" : connection.Get("user"));
-            port = Field(layout, 3, "П&орт", connection == null ? "" : connection.Get("port"));
+            user = Field(layout, 2, "По&льзователь", connection == null ? defaults?.DefaultUser ?? "" : connection.Get("user"));
+            port = Field(layout, 3, "П&орт", connection == null ? defaults?.DefaultPort ?? "" : connection.Get("port"));
             password = Field(layout, 4, "Па&роль", "");
             password.UseSystemPasswordChar = true;
             password.MaxLength = SshPasswords.MaxBytes;
@@ -85,11 +94,52 @@ namespace SshManager
             };
             layout.Controls.Add(hint, 1, 6);
 
-            LabelFor(layout, 7, "&Доступные ключи");
+            proxyJump = Field(layout, 7, "Через сервер", connection == null ? "" : connection.Get("proxyjump"));
+            proxyJump.AccessibleName = "Через сервер (ProxyJump)";
+            Theme.SetCue(proxyJump, "ProxyJump: bastion или user@host:port");
+            LabelFor(layout, 8, "Пробросы портов");
+            forwards = new ListBox { AccessibleName = "Пробросы портов", Dock = DockStyle.Fill, IntegralHeight = false, ForeColor = Theme.Ink };
+            if (connection != null) forwards.Items.AddRange(connection.Forwards.Cast<object>().ToArray());
+            layout.Controls.Add(Theme.Frame(forwards, new Padding(0, 1, 0, 3)), 1, 8);
+            var forwardRow = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 4, Margin = new Padding(0) };
+            forwardRow.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 150));
+            forwardRow.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+            forwardRow.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+            forwardRow.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+            forwardKind = new ComboBox { AccessibleName = "Тип проброса", Dock = DockStyle.Fill, DropDownStyle = ComboBoxStyle.DropDownList,
+                DrawMode = DrawMode.OwnerDrawFixed, ItemHeight = Theme.Scaled(this, 19), Margin = new Padding(0, 5, 6, 0) };
+            forwardKind.DrawItem += Theme.DrawChoice;
+            forwardKind.Items.AddRange(ForwardTitles);
+            forwardKind.SelectedIndex = 0;
+            forwardValue = new TextBox { AccessibleName = "Адрес проброса" };
+            Theme.SetCue(forwardValue, "8080 localhost:80");
+            forwardKind.SelectedIndexChanged += (sender, args) => Theme.SetCue(forwardValue, forwardKind.SelectedIndex == 2 ? "1080" : "8080 localhost:80");
+            var addForward = Theme.Button("Добавить", 104, glyph: Glyph.Plus);
+            var removeForward = Theme.Button("Убрать", 88, glyph: Glyph.Delete);
+            addForward.Click += (sender, args) => AddForward();
+            removeForward.Click += (sender, args) =>
+            {
+                int index = forwards.SelectedIndex;
+                if (index >= 0) forwards.Items.RemoveAt(index);
+                if (forwards.Items.Count > 0) forwards.SelectedIndex = Math.Min(index, forwards.Items.Count - 1);
+            };
+            forwardValue.KeyDown += (sender, args) =>
+            {
+                if (args.KeyCode != Keys.Enter) return;
+                args.SuppressKeyPress = true;
+                AddForward();
+            };
+            forwardRow.Controls.Add(forwardKind, 0, 0);
+            forwardRow.Controls.Add(Theme.Frame(forwardValue, new Padding(0, 4, 0, 4)), 1, 0);
+            forwardRow.Controls.Add(addForward, 2, 0);
+            forwardRow.Controls.Add(removeForward, 3, 0);
+            layout.Controls.Add(forwardRow, 1, 9);
+
+            LabelFor(layout, 10, "&Доступные ключи");
             var picker = new TableLayoutPanel { ColumnCount = 2, Dock = DockStyle.Fill, Margin = new Padding(0) };
             picker.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
             picker.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
-            layout.Controls.Add(picker, 1, 7);
+            layout.Controls.Add(picker, 1, 10);
             available = new ComboBox
             {
                 AccessibleName = "Доступные ключи", Dock = DockStyle.Fill, DropDownStyle = ComboBoxStyle.DropDownList,
@@ -102,14 +152,14 @@ namespace SshManager
             browse.Click += (sender, args) => Browse();
             picker.Controls.Add(browse, 1, 0);
 
-            LabelFor(layout, 8, "&Выбранные ключи");
+            LabelFor(layout, 11, "&Выбранные ключи");
             assigned = new ListBox
             {
                 AccessibleName = "Выбранные ключи", Dock = DockStyle.Fill, IntegralHeight = false,
                 HorizontalScrollbar = true, ForeColor = Theme.Ink
             };
             if (connection != null) assigned.Items.AddRange(connection.Keys.Cast<object>().ToArray());
-            layout.Controls.Add(Theme.Frame(assigned, new Padding(0, 1, 0, 3)), 1, 8);
+            layout.Controls.Add(Theme.Frame(assigned, new Padding(0, 1, 0, 3)), 1, 11);
 
             var keyActions = new FlowLayoutPanel { WrapContents = false, Dock = DockStyle.Fill, Margin = new Padding(0) };
             addKey = Theme.Button("Добавить ключ", 142, glyph: Glyph.Key);
@@ -128,11 +178,13 @@ namespace SshManager
             };
             assigned.SelectedIndexChanged += (sender, args) => UpdateKeyActions();
             available.SelectedIndexChanged += (sender, args) => UpdateKeyActions();
-            keyActions.Controls.AddRange(new Control[] { addKey, replaceKey, removeKey });
-            layout.Controls.Add(keyActions, 1, 9);
+            var createKey = Theme.Button("Создать ключ…", 140, glyph: Glyph.Plus);
+            createKey.Click += (sender, args) => CreateKey();
+            keyActions.Controls.AddRange(new Control[] { addKey, replaceKey, removeKey, createKey });
+            layout.Controls.Add(keyActions, 1, 12);
 
             var keyHint = new Label { AutoSize = true, ForeColor = Theme.Muted, Anchor = AnchorStyles.Left, Margin = new Padding(0) };
-            layout.Controls.Add(keyHint, 1, 10);
+            layout.Controls.Add(keyHint, 1, 13);
             try
             {
                 foreach (string path in KeyFiles.Find(sshDirectory)) available.Items.Add(path);
@@ -157,7 +209,8 @@ namespace SshManager
                     save(new ConnectionValues
                     {
                         Alias = Alias, HostName = host.Text.Trim(), User = user.Text.Trim(), Port = port.Text.Trim(),
-                        Keys = assigned.Items.Cast<Identity>().ToList()
+                        Keys = assigned.Items.Cast<Identity>().ToList(), ProxyJump = proxyJump.Text.Trim(),
+                        Forwards = forwards.Items.Cast<string>().ToList()
                     }, forgetPassword.Checked ? "" : password.Text, forgetPassword.Checked);
                     password.Clear();
                     DialogResult = DialogResult.OK;
@@ -165,7 +218,7 @@ namespace SshManager
                 catch (Exception ex) when (Theme.IsFileError(ex) || ex is ArgumentException) { Theme.ShowError(this, ex); }
             };
             actions.Controls.AddRange(new Control[] { commit, cancel });
-            layout.Controls.Add(actions, 1, 11);
+            layout.Controls.Add(actions, 1, 14);
             AcceptButton = commit;
             CancelButton = cancel;
             ActiveControl = alias;
@@ -174,6 +227,42 @@ namespace SshManager
         }
 
         public string Alias { get { return alias.Text.Trim(); } }
+
+        private void AddForward()
+        {
+            var value = System.Text.RegularExpressions.Regex.Replace(forwardValue.Text.Trim(), @"\s+", " ");
+            if (value.Length == 0) return;
+            var forward = ConfigDocument.ForwardNames[Math.Max(0, forwardKind.SelectedIndex)] + " " + value;
+            if (!ConfigDocument.IsForward(forward))
+            {
+                Theme.ShowError(this, new ArgumentException(forwardKind.SelectedIndex == 2
+                    ? "Для SOCKS-проброса укажите локальный порт, например 1080."
+                    : "Укажите проброс как «локальный_порт хост:порт», например 8080 localhost:80."));
+                return;
+            }
+            if (!forwards.Items.Contains(forward)) forwards.Items.Add(forward);
+            forwards.SelectedItem = forward;
+            forwardValue.Clear();
+        }
+
+        /// <summary>«Создать ключ…»: ssh-keygen ed25519 into the .ssh folder, then selects the new key.</summary>
+        private void CreateKey()
+        {
+            string created = null;
+            string suggested = Alias.Length > 0 && ConfigDocument.IsAlias(Alias) ? "id_ed25519_" + Alias : "id_ed25519";
+            using (var dialog = new NameDialog("Создать ключ", "Имя файла в папке .ssh", suggested, "Создать",
+                name => created = SshKeys.Generate(sshDirectory, name), 64))
+            {
+                if (dialog.ShowDialog(this) != DialogResult.OK || created == null) return;
+            }
+            string path = KeyFiles.ConfigPath(sshDirectory, created);
+            int index = available.Items.IndexOf(path);
+            if (index < 0) index = available.Items.Add(path);
+            available.SelectedIndex = index;
+            ApplyKey(false);
+            MessageBox.Show(this, "Ключ создан: " + created + "\n\nПубличную часть можно скопировать на сервер через меню строки «Скопировать ключ на сервер».",
+                "Создать ключ", MessageBoxButtons.OK, MessageBoxIcon.Information);
+        }
 
         private void Browse()
         {

@@ -1,5 +1,6 @@
 using System;
 using System.Drawing;
+using System.Linq;
 using System.Windows.Forms;
 
 namespace SshManager
@@ -19,13 +20,15 @@ namespace SshManager
             ShowInTaskbar = MinimizeBox = MaximizeBox = false;
             SuspendLayout();
             AutoScaleMode = AutoScaleMode.None;
-            ClientSize = new Size(545, 450);
+            ClientSize = new Size(565, 484);
             string id = profile?.Id ?? Guid.NewGuid().ToString("N");
 
-            var layout = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2, RowCount = 12, Padding = new Padding(18, 14, 18, 12) };
-            layout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 132));
+            var layout = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2, RowCount = 15, Padding = new Padding(18, 14, 18, 12) };
+            layout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 150));
             layout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-            for (int i = 0; i < 10; i++) layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 32));
+            for (int i = 0; i < 11; i++) layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 32));
+            layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 34));
+            layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
             layout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
             layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 40));
             Controls.Add(layout);
@@ -58,8 +61,66 @@ namespace SshManager
             }
             var clipboard = new CheckBox { Text = "Общий буфер обмена", Checked = profile?.Clipboard == true, AutoSize = true, Anchor = AnchorStyles.Left };
             layout.Controls.Add(clipboard, 1, 9);
-            var fullScreen = new CheckBox { Text = "Открывать на весь экран", Checked = profile?.FullScreen == true, AutoSize = true, Anchor = AnchorStyles.Top | AnchorStyles.Left };
+            var fullScreen = new CheckBox { Text = "Открывать на весь экран", Checked = profile?.FullScreen == true, AutoSize = true, Anchor = AnchorStyles.Left };
             layout.Controls.Add(fullScreen, 1, 10);
+
+            // «Дополнительно» (docs/ui-spec.md §7), collapsed unless the profile already uses it.
+            var options = profile?.Options ?? RdpOptions.None;
+            const int AdvancedHeight = 246;
+            var toggle = Theme.Button("Дополнительно", 150, glyph: Glyph.Move, quiet: true);
+            toggle.Anchor = AnchorStyles.Left;
+            toggle.Margin = new Padding(0, 1, 0, 0);
+            layout.Controls.Add(toggle, 0, 11);
+            layout.SetColumnSpan(toggle, 2);
+            var advanced = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2, RowCount = 7, Margin = Padding.Empty,
+                Padding = new Padding(0, 8, 0, 0), Visible = false, Height = AdvancedHeight };
+            advanced.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 150));
+            advanced.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+            foreach (int rowHeight in new[] { 60, 36, 22, 28, 28, 32, 32 }) advanced.RowStyles.Add(new RowStyle(SizeType.Absolute, rowHeight));
+            advanced.Controls.Add(new Label { Text = "Подключать папки", AutoSize = true, Anchor = AnchorStyles.Top | AnchorStyles.Left,
+                Margin = new Padding(0, 4, 0, 0) }, 0, 0);
+            var drives = new ListBox { AccessibleName = "Подключать папки", Dock = DockStyle.Fill, IntegralHeight = false, ForeColor = Theme.Ink,
+                HorizontalScrollbar = true };
+            drives.Items.AddRange(options.Drives.Cast<object>().ToArray());
+            advanced.Controls.Add(Theme.Frame(drives, new Padding(0, 1, 0, 3)), 1, 0);
+            var driveButtons = new FlowLayoutPanel { Dock = DockStyle.Fill, WrapContents = false, Margin = Padding.Empty };
+            var addDrive = Theme.Button("Добавить…", 116, glyph: Glyph.Plus);
+            addDrive.Margin = new Padding(0, 1, 6, 0);
+            var removeDrive = Theme.Button("Убрать", 88, glyph: Glyph.Delete);
+            addDrive.Click += (sender, args) =>
+            {
+                using (var folder = new FolderBrowserDialog { Description = "Папка, которая будет доступна в удалённом сеансе" })
+                {
+                    if (folder.ShowDialog(this) != DialogResult.OK) return;
+                    var path = folder.SelectedPath;
+                    if (!RdpOptions.IsLocalFolder(path)) { Theme.ShowError(this, new ArgumentException("Выберите папку на локальном диске.")); return; }
+                    if (!drives.Items.Cast<string>().Any(item => String.Equals(item, path, StringComparison.OrdinalIgnoreCase))) drives.Items.Add(path);
+                }
+            };
+            removeDrive.Click += (sender, args) => { if (drives.SelectedIndex >= 0) drives.Items.RemoveAt(drives.SelectedIndex); };
+            driveButtons.Controls.AddRange(new Control[] { addDrive, removeDrive });
+            advanced.Controls.Add(driveButtons, 1, 1);
+            advanced.Controls.Add(new Label { Text = "Windows подключает весь диск, на котором лежит папка.", AutoSize = true,
+                ForeColor = Theme.Muted, Anchor = AnchorStyles.Left, Margin = Padding.Empty }, 1, 2);
+            var printers = new CheckBox { Text = "Принтеры", Checked = options.Printers, AutoSize = true, Anchor = AnchorStyles.Left };
+            advanced.Controls.Add(printers, 1, 3);
+            var multimon = new CheckBox { Text = "Все мониторы (в клиенте Windows)", Checked = options.Multimon, AutoSize = true, Anchor = AnchorStyles.Left };
+            tips.SetToolTip(multimon, "Встроенный сеанс занимает одно окно, поэтому такое подключение открывается в клиенте Windows.");
+            advanced.Controls.Add(multimon, 1, 4);
+            var gateway = Field(advanced, 5, "Шлюз RD Gateway", options.Gateway, 253);
+            var gatewayUser = Field(advanced, 6, "Пользователь шлюза", options.GatewayUser, 128);
+            layout.Controls.Add(advanced, 0, 12);
+            layout.SetColumnSpan(advanced, 2);
+            void Expand(bool show)
+            {
+                if (advanced.Visible == show) return;
+                advanced.Visible = show;
+                toggle.Symbol = show ? Glyph.Plus : Glyph.Move;
+                int extra = Theme.Scaled(this, AdvancedHeight);
+                ClientSize = new Size(ClientSize.Width, ClientSize.Height + (show ? extra : -extra));
+            }
+            toggle.Click += (sender, args) => Expand(!advanced.Visible);
+            Load += (sender, args) => Expand(!options.IsEmpty);
             var buttons = new FlowLayoutPanel { Dock = DockStyle.Fill, FlowDirection = FlowDirection.RightToLeft, WrapContents = false, Margin = Padding.Empty };
             var cancel = Theme.Button("Отмена", 90);
             cancel.DialogResult = DialogResult.Cancel;
@@ -73,7 +134,8 @@ namespace SshManager
                         throw new ArgumentException("Укажите пользователя, чтобы сохранить пароль RDP.");
                     save(new RdpProfile(id, name.Text, host.Text, Number(port, 3389),
                         user.Text, domain.Text, profile == null ? groupId : profile.GroupId, Number(width, 0), Number(height, 0),
-                        clipboard.Checked, fullScreen.Checked), forgetPassword.Checked ? "" : password.Text, forgetPassword.Checked);
+                        clipboard.Checked, fullScreen.Checked, new RdpOptions(drives.Items.Cast<string>(), printers.Checked, multimon.Checked,
+                        gateway.Text, gatewayUser.Text)), forgetPassword.Checked ? "" : password.Text, forgetPassword.Checked);
                     password.Clear();
                     DialogResult = DialogResult.OK;
                 }
@@ -87,7 +149,7 @@ namespace SshManager
                 fromFile.Click += (sender, args) => { ImportRequested = true; DialogResult = DialogResult.Cancel; };
                 buttons.Controls.Add(fromFile);
             }
-            layout.Controls.Add(buttons, 0, 11);
+            layout.Controls.Add(buttons, 0, 14);
             layout.SetColumnSpan(buttons, 2);
             AcceptButton = commit;
             CancelButton = cancel;

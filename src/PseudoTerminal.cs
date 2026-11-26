@@ -197,7 +197,9 @@ namespace SshManager
                     var pseudoconsoleAttribute = new IntPtr(0x00020016);
                     if (!UpdateProcThreadAttribute(attributes, 0, pseudoconsoleAttribute, pseudo, new IntPtr(IntPtr.Size), IntPtr.Zero, IntPtr.Zero))
                         throw new Win32Exception();
-                    var startup = new StartupInfoEx { Info = new StartupInfo { Size = Marshal.SizeOf(typeof(StartupInfoEx)) }, Attributes = attributes };
+                    // STARTF_USESTDHANDLES with empty handles: a parent with redirected std handles would otherwise pass them
+                    // on, and the child would write there instead of into the pseudo console.
+                    var startup = new StartupInfoEx { Info = new StartupInfo { Size = Marshal.SizeOf(typeof(StartupInfoEx)), Flags = 0x100 }, Attributes = attributes };
                     var command = new StringBuilder("\"" + executable + "\" " + arguments);
                     IntPtr environment = IntPtr.Zero;
                     try
@@ -241,7 +243,8 @@ namespace SshManager
         {
             public int Size;
             private IntPtr reserved, desktop, title;
-            private int x, y, width, height, columns, rows, colors, flags;
+            private int x, y, width, height, columns, rows, colors;
+            public int Flags;
             private short show, reservedSize;
             private IntPtr reservedBytes, input, output, error;
         }

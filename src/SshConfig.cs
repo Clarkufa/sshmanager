@@ -105,6 +105,12 @@ namespace SshManager
     {
         private static readonly Regex AliasPattern = new Regex(@"\A[A-Za-z0-9_.][A-Za-z0-9_.-]*\z");
         private static readonly Regex HostNamePattern = new Regex(@"\A[A-Za-z0-9_.:%-]+\z");
+        private static readonly Regex JumpPattern = new Regex(@"\A[A-Za-z0-9_.@:%,\[\]-]+\z");
+        private const string Endpoint = @"(?:[A-Za-z0-9_.*-]+:|\[[0-9A-Fa-f:.]+\]:)?[0-9]{1,5}";
+        private const string Target = @"(?:[A-Za-z0-9_.-]+|\[[0-9A-Fa-f:.]+\]):[0-9]{1,5}";
+        private static readonly Regex TunnelPattern = new Regex(@"\A" + Endpoint + " " + Target + @"\z");
+        private static readonly Regex SocksPattern = new Regex(@"\A" + Endpoint + @"\z");
+        internal static readonly string[] ForwardNames = { "LocalForward", "RemoteForward", "DynamicForward" };
         private readonly List<ConfigLine> lines;
         private readonly string newline;
         private readonly bool bom;
@@ -153,6 +159,26 @@ namespace SshManager
             if (Changed(connection, "port", values.Port) && values.Port.Length > 0 &&
                 (!int.TryParse(values.Port, NumberStyles.None, CultureInfo.InvariantCulture, out port) || port < 1 || port > 65535))
                 throw new ArgumentException("Порт должен быть числом от 1 до 65535.");
+
+            if (Changed(connection, "proxyjump", values.ProxyJump ?? "") && !String.IsNullOrEmpty(values.ProxyJump) && !JumpPattern.IsMatch(values.ProxyJump))
+                throw new ArgumentException("Укажите переходной сервер как псевдоним или user@host:port, несколько — через запятую.");
+
+            var existing = connection?.Forwards ?? new List<string>();
+            foreach (var forward in values.Forwards ?? new List<string>())
+                if (!existing.Contains(forward) && !IsForward(forward))
+                    throw new ArgumentException("Проброс «" + forward + "» указан неверно. Пример: 8080 localhost:80, для D — только порт 1080.");
+        }
+
+        /// <summary>"LocalForward 8080 localhost:80", "RemoteForward 9000 localhost:9000" or "DynamicForward 1080".</summary>
+        public static bool IsForward(string forward)
+        {
+            int space = forward.IndexOf(' ');
+            if (space < 0) return false;
+            string name = forward.Substring(0, space), value = forward.Substring(space + 1);
+            if (!ForwardNames.Contains(name)) return false;
+            var match = (name == "DynamicForward" ? SocksPattern : TunnelPattern).Match(value);
+            return match.Success && Regex.Matches(value, @"(?<=:|^| )[0-9]{1,5}(?= |$)").Cast<Match>()
+                .All(number => int.Parse(number.Value, CultureInfo.InvariantCulture) is int n && n >= 1 && n <= 65535);
         }
 
         public void Update(Connection connection, ConnectionValues values)
@@ -171,6 +197,7 @@ namespace SshManager
             WriteSetting(connection, ref insert, indent, "HostName", values.HostName);
             WriteSetting(connection, ref insert, indent, "User", values.User);
             WriteSetting(connection, ref insert, indent, "Port", values.Port);
+            if (values.ProxyJump != null) WriteSetting(connection, ref insert, indent, "ProxyJump", values.ProxyJump);
 
             var previousKeys = connection.Keys;
             if (previousKeys.Count > 0) insert = lines.IndexOf(connection.Body[previousKeys.Last().LineIndex]) + 1;
@@ -186,6 +213,20 @@ namespace SshManager
             var retained = new HashSet<int>(values.Keys.Select(key => key.LineIndex));
             foreach (var key in previousKeys)
                 if (!retained.Contains(key.LineIndex)) RemoveSetting(connection.Body[key.LineIndex]);
+            if (values.Forwards != null) WriteForwards(connection, header, indent, values.Forwards);
+        }
+
+        /// <summary>Replaces the forwarding lines only when the list changed, so untouched configs stay byte-identical.</summary>
+        private void WriteForwards(Connection connection, ConfigLine header, string indent, List<string> forwards)
+        {
+            if (connection.Forwards.SequenceEqual(forwards)) return;
+            foreach (var line in connection.ForwardLines) RemoveSetting(line);
+            int start = lines.IndexOf(header);
+            int end = start + 1;
+            while (end < lines.Count && !lines[end].IsBoundary) end++;
+            int insert = end;
+            while (insert > start + 1 && lines[insert - 1].IsTrivia) insert--;
+            foreach (var forward in forwards) Insert(ref insert, indent + forward);
         }
 
         public void Delete(Connection connection)
@@ -215,7 +256,9 @@ namespace SshManager
             if (values.HostName.Length > 0) Insert(ref insert, "    HostName " + Quote(values.HostName));
             if (values.User.Length > 0) Insert(ref insert, "    User " + Quote(values.User));
             if (values.Port.Length > 0) Insert(ref insert, "    Port " + Quote(values.Port));
+            if (!String.IsNullOrEmpty(values.ProxyJump)) Insert(ref insert, "    ProxyJump " + Quote(values.ProxyJump));
             foreach (var key in values.Keys) Insert(ref insert, "    IdentityFile " + Quote(key.Value));
+            foreach (var forward in values.Forwards ?? new List<string>()) Insert(ref insert, "    " + forward);
             if (insert < lines.Count && lines[insert].Content.Trim().Length > 0) Insert(ref insert, "");
         }
 
@@ -374,6 +417,15 @@ namespace SshManager
             return line == null ? "" : line.Value;
         }
 
+        internal IEnumerable<ConfigLine> ForwardLines => Body.Where(line =>
+            (line.Keyword == "localforward" || line.Keyword == "remoteforward") && line.Args.Count == 2 ||
+            line.Keyword == "dynamicforward" && line.Args.Count == 1).ToList();
+
+        /// <summary>Forwarding lines as "LocalForward 8080 localhost:80".</summary>
+        public List<string> Forwards => ForwardLines.Select(line =>
+            ConfigDocument.ForwardNames.First(name => name.ToLowerInvariant() == line.Keyword) + " " +
+            String.Join(" ", line.Args.Select(arg => arg.Value))).ToList();
+
         public List<Identity> Keys
         {
             get
@@ -399,5 +451,8 @@ namespace SshManager
         public string User;
         public string Port;
         public List<Identity> Keys;
+        /// <summary>null leaves the setting as it is.</summary>
+        public string ProxyJump;
+        public List<string> Forwards;
     }
 }

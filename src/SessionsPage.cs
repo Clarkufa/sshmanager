@@ -16,8 +16,13 @@ namespace SshManager
         public readonly PasswordTarget Password;
         public readonly bool WithoutForwarding;
         public readonly RdpProfile Desktop;
+        /// <summary>Quick connect: ssh arguments without a config entry.</summary>
+        public readonly string DirectArguments;
+        /// <summary>A one-off remote command such as «Скопировать ключ на сервер».</summary>
+        public readonly string RemoteCommand;
         public string Protocol => Desktop == null ? "SSH" : "RDP";
-        public string Key => Desktop == null ? Alias : RdpKey(Desktop);
+        public string Key => Desktop != null ? RdpKey(Desktop) : DirectArguments != null ? "quick:" + Address :
+            RemoteCommand != null ? Alias + "\ncommand" : Alias;
         public static string RdpKey(RdpProfile profile) => "RDP:" + profile.Id;
 
         public SessionTarget(Connection connection, ServerGroup group)
@@ -44,18 +49,39 @@ namespace SshManager
             Color = TabColor.Find(group?.ColorId)?.Swatch ?? Theme.Teal;
         }
 
-        private SessionTarget(SessionTarget original)
+        public SessionTarget(QuickTarget quick)
+        {
+            Alias = quick.Host;
+            Address = quick.Address;
+            Group = "";
+            Color = Theme.Teal;
+            DirectArguments = quick.SshArguments;
+        }
+
+        private SessionTarget(SessionTarget original, string command = null)
         {
             Alias = original.Alias;
             Address = original.Address;
             Group = original.Group;
             Color = original.Color;
             Password = original.Password;
+            DirectArguments = original.DirectArguments;
+            RemoteCommand = command ?? original.RemoteCommand;
             WithoutForwarding = true;
         }
 
         public SessionTarget SkipForwarding() { return new SessionTarget(this); }
-        public string Arguments { get { return WithoutForwarding ? "-o ClearAllForwardings=yes " + Alias : Alias; } }
+        public SessionTarget WithCommand(string command) { return new SessionTarget(this, command); }
+
+        public string Arguments
+        {
+            get
+            {
+                string options = WithoutForwarding ? "-o ClearAllForwardings=yes " : "";
+                if (DirectArguments != null) return options + DirectArguments;
+                return options + Alias + (RemoteCommand == null ? "" : " " + Terminal.Quote(RemoteCommand));
+            }
+        }
     }
 
     internal sealed class TerminalSession : IDisposable
@@ -71,6 +97,9 @@ namespace SshManager
         public long LastUsed;
         public uint? ExitCode;
         public bool ForwardingFailed;
+        /// <summary>Automatic reconnects in a row and when the next one is due.</summary>
+        public int Attempts;
+        public DateTime? ReconnectAt;
         private string recentOutput = "";
         private int inspectedOutput;
 
@@ -141,7 +170,13 @@ namespace SshManager
         private readonly TextBox search;
         private readonly ListBox list;
         private readonly Label count, selectedTitle, selectedDetail, empty;
-        private readonly Button duplicate, close, files, fullScreenButton, windowButton, reconnectButton;
+        private readonly Button duplicate, close, files, fullScreenButton, windowButton, reconnectButton, snippetsButton;
+        private readonly TableLayoutPanel endedBar;
+        private readonly Label endedText;
+        private readonly ContextMenuStrip snippetMenu;
+        private readonly Timer reconnectTimer;
+        private bool broadcast;
+        private Preferences preferences = new Preferences();
         private readonly SurfaceButton themeButton;
         private readonly ContextMenuStrip sessionMenu;
         private readonly ToolTip hints;
@@ -159,6 +194,21 @@ namespace SshManager
         public event Action PickServer;
         public event Action ThemeRequested;
         public event Action<SessionTarget> ShowFiles;
+        public event Action AddSnippet;
+        public event Action<Snippet> RemoveSnippet;
+        public Func<IList<Snippet>> Snippets;
+
+        /// <summary>Terminal font, scrollback and automatic reconnect from «Настройки».</summary>
+        public Preferences Preferences
+        {
+            get { return preferences; }
+            set
+            {
+                preferences = value ?? new Preferences();
+                TerminalScreen.HistoryLines = preferences.Scrollback;
+                terminal.SetFont(preferences.TerminalFont, preferences.TerminalSize);
+            }
+        }
 
         public SessionsPage(Func<SessionTarget, Size, PseudoTerminal> startProcess = null)
         {
@@ -264,10 +314,11 @@ namespace SshManager
             sidebar.Controls.Add(Theme.Frame(list, Padding.Empty), 0, 2);
             layout.Controls.Add(sidebar, 0, 1);
 
-            var workspace = new TableLayoutPanel { Dock = DockStyle.Fill, Margin = new Padding(0), ColumnCount = 1, RowCount = 2 };
+            var workspace = new TableLayoutPanel { Dock = DockStyle.Fill, Margin = new Padding(0), ColumnCount = 1, RowCount = 3 };
             workspace.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
             workspace.RowStyles.Add(new RowStyle(SizeType.Absolute, 65));
             workspace.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+            workspace.RowStyles.Add(new RowStyle(SizeType.AutoSize));
             info = new TableLayoutPanel { Dock = DockStyle.Fill, Margin = new Padding(0, 0, 0, 7), ColumnCount = 2, RowCount = 2 };
             info.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
             info.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
@@ -291,11 +342,15 @@ namespace SshManager
             windowButton.Click += (sender, args) => DetachActive();
             reconnectButton = Theme.Button("Переподключить", 150, glyph: Glyph.Refresh);
             reconnectButton.Click += (sender, args) => active?.Desktop?.Reconnect();
+            snippetsButton = Theme.Button("Команды", 106, glyph: Glyph.Terminal);
+            snippetsButton.Click += (sender, args) => ShowSnippets();
+            snippetMenu = Theme.Menu();
             hints = new ToolTip();
             hints.SetToolTip(fullScreenButton, FullScreenHint);
             hints.SetToolTip(windowButton, WindowHint);
-            buttons.Controls.AddRange(new Control[] { files, reconnectButton, windowButton, fullScreenButton, duplicate, close });
-            foreach (var button in new[] { files, reconnectButton, windowButton, fullScreenButton, duplicate })
+            hints.SetToolTip(snippetsButton, "Сохранённые команды");
+            buttons.Controls.AddRange(new Control[] { files, snippetsButton, reconnectButton, windowButton, fullScreenButton, duplicate, close });
+            foreach (var button in new[] { files, snippetsButton, reconnectButton, windowButton, fullScreenButton, duplicate })
             {
                 labels[button] = button.Text;
                 fullWidths[button] = button.Width; // Logical width; FitButtons scales it.
@@ -312,10 +367,27 @@ namespace SshManager
             display.Controls.Add(empty);
             empty.BringToFront();
             workspace.Controls.Add(display, 0, 1);
+            endedBar = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2, RowCount = 1, AutoSize = true, Visible = false,
+                Margin = new Padding(0, 7, 0, 0), BackColor = Theme.Canvas };
+            endedBar.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+            endedBar.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+            endedText = new Label { Dock = DockStyle.Fill, TextAlign = ContentAlignment.MiddleLeft, AutoEllipsis = true, ForeColor = Theme.Ink,
+                Margin = new Padding(0) };
+            var endedActions = new FlowLayoutPanel { AutoSize = true, WrapContents = false, Margin = new Padding(0), Anchor = AnchorStyles.Right };
+            var reconnectSsh = Theme.Button("Переподключить", 150, true, Glyph.Refresh);
+            reconnectSsh.Click += (sender, args) => { if (active != null) Reconnect(active, automatic: false); };
+            var closeEnded = Theme.Button("Закрыть сеанс", 128);
+            closeEnded.Click += (sender, args) => CloseActive();
+            endedActions.Controls.AddRange(new Control[] { reconnectSsh, closeEnded });
+            endedBar.Controls.Add(endedText, 0, 0);
+            endedBar.Controls.Add(endedActions, 1, 0);
+            workspace.Controls.Add(endedBar, 0, 2);
             layout.Controls.Add(workspace, 1, 1);
 
             timer = new Timer { Interval = 33 };
             timer.Tick += (sender, args) => PumpOutput();
+            reconnectTimer = new Timer { Interval = 500 };
+            reconnectTimer.Tick += (sender, args) => RunDueReconnects();
             RefreshList();
             RefreshDetails();
         }
@@ -383,6 +455,7 @@ namespace SshManager
 
         private static PseudoTerminal StartSsh(SessionTarget target, Size size)
         {
+            if (target.DirectArguments != null) return Terminal.StartEmbedded(target.Arguments, size, null);
             if (!ConfigDocument.IsAlias(target.Alias)) throw new ArgumentException("Недопустимый псевдоним подключения.");
             var password = SshPasswords.Exists(target.Password) ? Terminal.FindPasswordTarget(target.Alias, target.Password.Id) : null;
             return Terminal.StartEmbedded(target.Arguments, size, password);
@@ -478,6 +551,13 @@ namespace SshManager
                 session.ExitCode = code;
                 session.Screen.Feed(Encoding.UTF8.GetBytes("\r\n\u001b[0mSSH завершился (код " + code + ").\r\n"));
                 exited = true;
+                // 0 is a normal exit and 130 is Ctrl+C; anything else (usually 255) means the connection broke.
+                if (preferences.AutoReconnect && code != 0 && code != 130 && session.Target.RemoteCommand == null && session.Attempts < 3)
+                {
+                    session.Attempts++;
+                    session.ReconnectAt = DateTime.UtcNow.AddSeconds(5);
+                    reconnectTimer.Start();
+                }
                 repaint |= session == active;
             }
             if (repaint) terminal.Invalidate();
@@ -520,6 +600,14 @@ namespace SshManager
             files.Visible = active != null && active.Desktop == null;
             windowButton.Visible = reconnectButton.Visible = fullScreenButton.Visible = active?.Desktop != null;
             fullScreenButton.Enabled = active?.Desktop?.IsConnected == true;
+            snippetsButton.Visible = active != null && active.Desktop == null;
+            snippetsButton.Enabled = active != null && active.IsOpen;
+            bool ended = active != null && active.Desktop == null && !active.IsOpen;
+            if (ended)
+                endedText.Text = active.ReconnectAt.HasValue
+                    ? "Соединение прервано · повтор через 5 с (попытка " + active.Attempts + " из 3)"
+                    : "Сеанс SSH завершён (код " + active.ExitCode + ")";
+            endedBar.Visible = ended;
             empty.Visible = active == null;
             FitButtons();
         }
@@ -538,7 +626,7 @@ namespace SshManager
                 foreach (var button in labels.Keys) SetCompact(button, false);
                 var shown = new List<Control> { duplicate, close };
                 if (active?.Desktop != null) shown.InsertRange(0, new Control[] { reconnectButton, windowButton, fullScreenButton });
-                else if (active != null) shown.Insert(0, files);
+                else if (active != null) shown.InsertRange(0, new Control[] { files, snippetsButton });
                 int available = info.ClientSize.Width - Theme.Scaled(this, 160);
                 int Needed() => shown.Sum(button => button.Width + button.Margin.Horizontal);
                 if (Needed() > available) SetCompact(duplicate, true);
@@ -555,6 +643,85 @@ namespace SshManager
             button.Width = Theme.Scaled(this, compact ? 38 : fullWidths[button]);
             button.AccessibleName = label;
             hints.SetToolTip(button, compact ? label : button == fullScreenButton ? FullScreenHint : button == windowButton ? WindowHint : null);
+        }
+
+        /// <summary>Starts SSH again in place of an ended session, keeping its number and label.</summary>
+        private void Reconnect(TerminalSession old, bool automatic)
+        {
+            if (!sessions.Contains(old) || old.Desktop != null || old.IsOpen) return;
+            old.ReconnectAt = null;
+            try
+            {
+                var size = terminal.GridSize;
+                var child = startProcess(old.Target, size);
+                TerminalSession fresh;
+                try { fresh = new TerminalSession(old.Target, child, old.Number, size) { Name = old.Name, LastUsed = old.LastUsed }; }
+                catch { child.Dispose(); throw; }
+                fresh.Attempts = automatic ? old.Attempts : 0;
+                sessions[sessions.IndexOf(old)] = fresh;
+                if (old == active)
+                {
+                    active = null;
+                    Activate(fresh, true);
+                }
+                else RefreshList();
+                old.Dispose();
+                timer.Start();
+                Changed?.Invoke();
+            }
+            catch (Exception ex) when (Theme.IsFileError(ex) || ex is ExternalException || ex is ArgumentException ||
+                ex is System.Reflection.TargetInvocationException || ex is InvalidOperationException)
+            {
+                if (!automatic) Theme.ShowError(this, ex);
+                RefreshDetails();
+            }
+        }
+
+        private void RunDueReconnects()
+        {
+            var due = sessions.Where(session => session.ReconnectAt.HasValue && session.ReconnectAt <= DateTime.UtcNow).ToArray();
+            foreach (var session in due) Reconnect(session, automatic: true);
+            if (!sessions.Any(session => session.ReconnectAt.HasValue)) reconnectTimer.Stop();
+        }
+
+        /// <summary>«Команды»: saved commands, «Во все открытые сеансы», «Добавить…» and «Удалить».</summary>
+        private void ShowSnippets()
+        {
+            foreach (var item in snippetMenu.Items.Cast<ToolStripItem>().ToArray()) item.Dispose();
+            var saved = Snippets?.Invoke() ?? new List<Snippet>();
+            if (saved.Count == 0) snippetMenu.Items.Add(new ToolStripMenuItem("Сохранённых команд пока нет.") { Enabled = false });
+            foreach (var snippet in saved)
+            {
+                var item = Theme.MenuItem(snippet.Name.Replace("&", "&&"), Glyph.Terminal, (sender, args) => Send(snippet));
+                item.ToolTipText = snippet.Command.Length > 300 ? snippet.Command.Substring(0, 300) + "…" : snippet.Command;
+                snippetMenu.Items.Add(item);
+            }
+            snippetMenu.Items.Add(new ToolStripSeparator());
+            var everywhere = Theme.MenuItem("Во все открытые сеансы", Glyph.None, (sender, args) =>
+            {
+                broadcast = !broadcast;
+                BeginInvoke(new Action(ShowSnippets));
+            });
+            everywhere.Checked = broadcast;
+            snippetMenu.Items.Add(everywhere);
+            snippetMenu.Items.Add(Theme.MenuItem("Добавить…", Glyph.Plus, (sender, args) => AddSnippet?.Invoke()));
+            if (saved.Count > 0)
+            {
+                var remove = Theme.MenuItem("Удалить", Glyph.Delete);
+                foreach (var snippet in saved)
+                    remove.DropDownItems.Add(Theme.MenuItem(snippet.Name.Replace("&", "&&"), Glyph.None, (sender, args) => RemoveSnippet?.Invoke(snippet)));
+                snippetMenu.Items.Add(remove);
+            }
+            snippetMenu.Show(snippetsButton, new Point(0, snippetsButton.Height));
+        }
+
+        private void Send(Snippet snippet)
+        {
+            var bytes = Encoding.UTF8.GetBytes(snippet.Command.Replace("\r\n", "\r").Replace("\n", "\r") + "\r");
+            var targets = broadcast ? sessions.Where(session => session.IsOpen && session.Process != null).ToArray()
+                : active != null && active.IsOpen && active.Process != null ? new[] { active } : new TerminalSession[0];
+            foreach (var target in targets) target.Process.Send(bytes);
+            FocusTerminal();
         }
 
         private void OpenFiles()
@@ -636,6 +803,8 @@ namespace SshManager
             if (disposing)
             {
                 if (timer != null) timer.Dispose();
+                reconnectTimer?.Dispose();
+                snippetMenu?.Dispose();
                 if (sessionMenu != null) sessionMenu.Dispose();
                 if (hints != null) hints.Dispose();
                 foreach (var session in sessions) session.Dispose();

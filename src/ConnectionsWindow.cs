@@ -15,6 +15,8 @@ namespace SshManager
     internal sealed class ConnectionsWindow : ThemedForm
     {
         private const string PortColumn = "Port", FilesColumn = "FilesAction", TerminalColumn = "TerminalAction";
+        /// <summary>The «Избранное» tab; group ids are 32 hex digits, so this never collides with one.</summary>
+        private const string FavoritesId = "favorites";
         private const int ActionOuterPadding = 5, ActionInnerPadding = 7, ActionIcon = 16, ActionGap = 6;
         private const TextFormatFlags ActionText = TextFormatFlags.VerticalCenter | TextFormatFlags.SingleLine |
             TextFormatFlags.NoPadding | TextFormatFlags.EndEllipsis | TextFormatFlags.NoPrefix | TextFormatFlags.PreserveGraphicsClipping;
@@ -53,6 +55,10 @@ namespace SshManager
         private readonly ToolStripMenuItem moveTabRight;
         private readonly ToolStripMenuItem startupTab;
         private readonly ToolStripMenuItem moveMenu;
+        private readonly ToolStripMenuItem favoriteItem;
+        private readonly TextBox quick;
+        private readonly SurfaceButton settingsButton;
+        private readonly TableLayoutPanel catalogHeader;
         private Groups groups = new Groups();
         private Connection menuConnection;
         private ConfigDocument document;
@@ -102,9 +108,10 @@ namespace SshManager
 
             add = Theme.Button("Добавить сервер", 158, true, Glyph.Plus);
             add.Click += (sender, args) => { if (showRdp) EditDesktop(null); else EditConnection(null); };
-            var header = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 5, Margin = new Padding(0, 0, 0, 7) };
+            var header = catalogHeader = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 6, Margin = new Padding(0, 0, 0, 7) };
             header.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 51));
             header.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+            header.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
             header.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
             header.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
             header.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
@@ -119,10 +126,15 @@ namespace SshManager
             themeButton.Anchor = AnchorStyles.Right;
             Theme.RefreshSwitcher(themeButton);
             themeButton.Click += (sender, args) => ToggleTheme();
-            header.Controls.Add(themeButton, 2, 0);
-            header.Controls.Add(sessionsButton, 3, 0);
-            header.Controls.Add(add, 4, 0);
+            settingsButton = Theme.Button("Настройки", 118, glyph: Glyph.Settings, quiet: true);
+            settingsButton.Anchor = AnchorStyles.Right;
+            settingsButton.Click += (sender, args) => EditSettings();
+            header.Controls.Add(settingsButton, 2, 0);
+            header.Controls.Add(themeButton, 3, 0);
+            header.Controls.Add(sessionsButton, 4, 0);
+            header.Controls.Add(add, 5, 0);
             layout.Controls.Add(header, 0, 0);
+            header.Resize += (sender, args) => FitHeader();
 
             var protocols = new FlowLayoutPanel { Dock = DockStyle.Fill, WrapContents = false, Margin = Padding.Empty };
             sshTab = Theme.Button("SSH", 86, glyph: Glyph.Terminal);
@@ -133,7 +145,20 @@ namespace SshManager
             sshTab.Click += (sender, args) => SelectProtocol(false);
             rdpTab.Click += (sender, args) => SelectProtocol(true);
             protocols.Controls.AddRange(new Control[] { sshTab, rdpTab });
-            layout.Controls.Add(protocols, 0, 1);
+            var protocolRow = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2, Margin = Padding.Empty };
+            protocolRow.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+            protocolRow.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 310));
+            protocolRow.Controls.Add(protocols, 0, 0);
+            quick = new TextBox { AccessibleName = "Быстрое подключение", MaxLength = 300 };
+            Theme.SetCue(quick, "Быстрое подключение: user@host или rdp://host");
+            hints.SetToolTip(quick, "Подключиться без сохранения профиля. Enter — подключиться.");
+            quick.KeyDown += (sender, args) =>
+            {
+                if (args.KeyCode == Keys.Enter) { args.SuppressKeyPress = true; QuickConnect(); }
+                else if (args.KeyCode == Keys.Escape && quick.TextLength > 0) { args.SuppressKeyPress = true; quick.Clear(); }
+            };
+            protocolRow.Controls.Add(Theme.Frame(quick, new Padding(0, 2, 0, 3)), 1, 0);
+            layout.Controls.Add(protocolRow, 0, 1);
 
             var tabBar = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2, Margin = new Padding(0, 0, 0, 1) };
             tabBar.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
@@ -178,6 +203,8 @@ namespace SshManager
             backupMenu = Theme.Menu();
             backupMenu.Items.Add(Theme.MenuItem("Экспорт архива…", Glyph.Copy, async (sender, args) => await RunBackup(backup.Export)));
             backupMenu.Items.Add(Theme.MenuItem("Импорт архива…", Glyph.Folder, async (sender, args) => await RunBackup(backup.Import)));
+            backupMenu.Items.Add(new ToolStripSeparator());
+            backupMenu.Items.Add(Theme.MenuItem("Импорт из других программ…", Glyph.Folder, (sender, args) => ImportOther()));
             backupButton.Click += (sender, args) => backupMenu.Show(backupButton, new Point(0, backupButton.Height));
             edit.Click += (sender, args) => EditRow(grid.CurrentRow?.Tag);
             delete.Click += (sender, args) => { if (showRdp) DeleteDesktop(SelectedDesktop); else DeleteConnection(Selected); };
@@ -233,6 +260,7 @@ namespace SshManager
             list.Controls.Add(grid);
 
             moveMenu = Theme.MenuItem("Переместить во вкладку", Glyph.Move);
+            favoriteItem = Theme.MenuItem("В избранное", Glyph.Star, (sender, args) => ToggleFavorite(Groups.Key(menuConnection.Alias), menuConnection.Alias));
             serverMenu = Theme.Menu();
             serverMenu.Items.AddRange(new ToolStripItem[]
             {
@@ -241,8 +269,10 @@ namespace SshManager
                 Theme.MenuItem("Файлы (SFTP)", Glyph.Folder, (sender, args) => OpenFiles(menuConnection)),
                 Theme.MenuItem("Открыть в Windows Terminal", Glyph.Terminal, (sender, args) => ConnectExternal(menuConnection)),
                 Theme.MenuItem("Изменить", Glyph.Edit, (sender, args) => EditConnection(menuConnection)),
+                favoriteItem,
                 moveMenu,
                 Theme.MenuItem("Копировать команду SSH", Glyph.Copy, (sender, args) => CopyCommand(menuConnection)),
+                Theme.MenuItem("Скопировать ключ на сервер", Glyph.Key, (sender, args) => CopyKey(menuConnection)),
                 new ToolStripSeparator(),
                 Theme.MenuItem("Удалить", Glyph.Delete, (sender, args) => DeleteConnection(menuConnection))
             });
@@ -301,7 +331,231 @@ namespace SshManager
             Shown += async (sender, args) => await CheckUpdates(interactive: false);
         }
 
+        private const string FavoritesHint = "Отметьте серверы звёздочкой: «В избранное» в меню строки.";
+
+        /// <summary>The open user tab: null for «Все серверы» and «Избранное».</summary>
+        private string ActiveTabId => activeGroupId == FavoritesId ? null : activeGroupId;
+
         private Connection Selected => grid.CurrentRow?.Tag as Connection;
+
+        /// <summary>
+        /// Keeps the page title whole: in a narrow window «Настройки» and then the theme switcher show only their
+        /// icons, with the label in a tooltip.
+        /// </summary>
+        private void FitHeader()
+        {
+            if (!catalogHeader.IsHandleCreated) return;
+            Theme.RefreshSwitcher(themeButton);
+            var buttons = new[] { settingsButton, themeButton, sessionsButton, add };
+            int Needed() => Theme.Scaled(this, 63) + catalogTitle.PreferredWidth + buttons.Sum(button => button.Width + button.Margin.Horizontal);
+            void Compact(SurfaceButton button, bool compact, int logical)
+            {
+                string label = button.AccessibleName;
+                button.Text = compact ? "" : label;
+                button.Width = Theme.Scaled(this, compact ? 38 : logical);
+                hints.SetToolTip(button, compact ? label : null);
+            }
+            Compact(settingsButton, false, 118);
+            Compact(themeButton, false, 130);
+            if (Needed() > catalogHeader.ClientSize.Width) Compact(settingsButton, true, 118);
+            if (Needed() > catalogHeader.ClientSize.Width) Compact(themeButton, true, 130);
+        }
+
+        private void ApplyPreferences()
+        {
+            TrayApplication.CloseToTray = groups.Preferences.CloseToTray;
+            if (sessions != null) sessions.Preferences = groups.Preferences;
+        }
+
+        private void RecordRecent(string key)
+        {
+            try { groups = groupFile.Update(items => items.RecordRecent(key)); }
+            catch (Exception ex) when (Theme.IsFileError(ex)) { /* Recent servers are a convenience. */ }
+        }
+
+        private void ToggleFavorite(string key, string select)
+        {
+            string tab = activeGroupId == FavoritesId && groups.Favorites.Count == 1 && groups.IsFavorite(key) ? null : activeGroupId;
+            UpdateGroups(items => items.ToggleFavorite(key), tab, select);
+        }
+
+        private void EditSettings()
+        {
+            using (var dialog = new SettingsDialog(groups.Preferences))
+            {
+                if (dialog.ShowDialog(this) != DialogResult.OK) return;
+                var chosen = dialog.Result;
+                try { groups = groupFile.Update(items => items.Preferences = chosen); }
+                catch (Exception ex) when (Theme.IsFileError(ex)) { Theme.ShowError(this, ex); return; }
+                ApplyPreferences();
+            }
+        }
+
+        private void AddSnippet()
+        {
+            using (var dialog = new SnippetDialog())
+            {
+                if (dialog.ShowDialog(this) != DialogResult.OK) return;
+                var snippet = dialog.Result;
+                try { groups = groupFile.Update(items => items.Snippets.Add(snippet)); }
+                catch (Exception ex) when (Theme.IsFileError(ex)) { Theme.ShowError(this, ex); }
+            }
+        }
+
+        private void RemoveSnippet(Snippet snippet)
+        {
+            if (MessageBox.Show(this, "Удалить команду «" + snippet.Name + "»?", Text, MessageBoxButtons.YesNo, MessageBoxIcon.Warning,
+                MessageBoxDefaultButton.Button2) != DialogResult.Yes) return;
+            try
+            {
+                groups = groupFile.Update(items =>
+                {
+                    int index = items.Snippets.FindIndex(item => item.Name == snippet.Name && item.Command == snippet.Command);
+                    if (index >= 0) items.Snippets.RemoveAt(index);
+                });
+            }
+            catch (Exception ex) when (Theme.IsFileError(ex)) { Theme.ShowError(this, ex); }
+        }
+
+        /// <summary>«Быстрое подключение»: connects without a profile, then offers to save one (docs/ui-spec.md §7).</summary>
+        private void QuickConnect()
+        {
+            QuickTarget target;
+            try { target = new QuickTarget(quick.Text); }
+            catch (ArgumentException error) { Theme.ShowError(this, error); return; }
+            if (target.Rdp)
+            {
+                RdpProfile profile;
+                try { profile = new RdpProfile(Guid.NewGuid().ToString("N"), target.Host, target.Host, target.Port, target.User, "", ActiveTabId); }
+                catch (ArgumentException error) { Theme.ShowError(this, error); return; }
+                quick.Clear();
+                ConnectDesktop(profile, forceNew: true);
+                if (!Ask("Сохранить подключение «" + profile.Name + "»?")) return;
+                UpdateGroups(items => items.SaveDesktop(profile, false), activeGroupId, profile.Id);
+                return;
+            }
+            if (document == null) { Theme.ShowError(this, new IOException("Не удалось прочитать SSH config. Нажмите «Обновить».")); return; }
+            try
+            {
+                SessionWorkspace().Open(new SessionTarget(target), true);
+                ShowSessions();
+            }
+            catch (Exception ex) when (Theme.IsFileError(ex) || ex is ArgumentException || ex is ExternalException)
+            {
+                Theme.ShowError(this, ex);
+                return;
+            }
+            quick.Clear();
+            string alias = QuickTarget.Alias(target.Host, document.Connections().Select(item => item.Alias));
+            if (!Ask("Сохранить подключение «" + alias + "»?")) return;
+            try
+            {
+                var next = new ConfigDocument(document.ToString());
+                next.Update(null, new ConnectionValues { Alias = alias, HostName = target.Host, User = target.User,
+                    Port = target.Port == 22 ? "" : target.Port.ToString(System.Globalization.CultureInfo.InvariantCulture),
+                    Keys = new List<Identity>() });
+                file.Save(next);
+                document = next;
+                string tab = ActiveTabId;
+                if (tab != null) groups = groupFile.Update(items => items.Move(alias, tab));
+            }
+            catch (Exception ex) when (Theme.IsFileError(ex) || ex is ArgumentException || ex is InvalidOperationException) { Theme.ShowError(this, ex); }
+            RefreshList(alias);
+        }
+
+        private bool Ask(string question) => MessageBox.Show(this, question, Text, MessageBoxButtons.YesNo, MessageBoxIcon.Question,
+            MessageBoxDefaultButton.Button1) == DialogResult.Yes;
+
+        /// <summary>«Импорт из других программ»: SSH entries go to the config, RDP entries to tabs.xml.</summary>
+        private void ImportOther()
+        {
+            List<FoundConnection> chosen;
+            using (var dialog = new ImportDialog())
+            {
+                if (dialog.ShowDialog(this) != DialogResult.OK) return;
+                chosen = dialog.Chosen;
+            }
+            if (chosen.Count == 0) return;
+            int added = 0;
+            var problems = new List<string>();
+            string tab = ActiveTabId;
+            var ssh = chosen.Where(item => !item.Rdp).ToList();
+            if (ssh.Count > 0 && document != null)
+            {
+                var next = new ConfigDocument(document.ToString());
+                var aliases = new List<string>();
+                foreach (var item in ssh)
+                {
+                    string alias = QuickTarget.Alias(item.Name, next.Connections().Select(connection => connection.Alias));
+                    try
+                    {
+                        next.Update(null, new ConnectionValues { Alias = alias, HostName = item.Host, User = item.User,
+                            Port = item.Port == 22 ? "" : item.Port.ToString(System.Globalization.CultureInfo.InvariantCulture), Keys = new List<Identity>() });
+                        aliases.Add(alias);
+                    }
+                    catch (ArgumentException error) { problems.Add(item.Name + ": " + error.Message); }
+                }
+                try
+                {
+                    file.Save(next);
+                    document = next;
+                    added += aliases.Count;
+                    if (tab != null && aliases.Count > 0) groups = groupFile.Update(items => { foreach (var alias in aliases) items.Move(alias, tab); });
+                }
+                catch (Exception ex) when (Theme.IsFileError(ex) || ex is InvalidOperationException) { problems.Add(ex.Message); }
+            }
+            var desktops = new List<RdpProfile>();
+            foreach (var item in chosen.Where(item => item.Rdp))
+            {
+                try { desktops.Add(new RdpProfile(Guid.NewGuid().ToString("N"), item.Name.Length > 80 ? item.Name.Substring(0, 80) : item.Name,
+                    item.Host, item.Port, item.User, item.Domain, tab)); }
+                catch (ArgumentException error) { problems.Add(item.Name + ": " + error.Message); }
+            }
+            if (desktops.Count > 0)
+            {
+                try
+                {
+                    groups = groupFile.Update(items => { foreach (var profile in desktops) items.SaveDesktop(profile, false); });
+                    added += desktops.Count;
+                }
+                catch (Exception ex) when (Theme.IsFileError(ex) || ex is InvalidOperationException) { problems.Add(ex.Message); }
+            }
+            RefreshTabs(activeGroupId);
+            RefreshList(null);
+            string report = "Импортировано подключений: " + added + ".";
+            if (problems.Count > 0) report += "\n\nНе импортированы:\n" + String.Join("\n", problems.Take(10));
+            MessageBox.Show(this, report, "Импорт из других программ", MessageBoxButtons.OK,
+                problems.Count > 0 ? MessageBoxIcon.Warning : MessageBoxIcon.Information);
+        }
+
+        /// <summary>«Скопировать ключ на сервер»: appends a public key to ~/.ssh/authorized_keys over SSH.</summary>
+        private void CopyKey(Connection connection)
+        {
+            if (connection == null) return;
+            string publicKey = null;
+            try
+            {
+                var keys = Directory.Exists(sshDirectory) ? Directory.GetFiles(sshDirectory, "*.pub") : new string[0];
+                if (keys.Length == 1) publicKey = keys[0];
+            }
+            catch (Exception ex) when (Theme.IsFileError(ex)) { }
+            if (publicKey == null)
+            {
+                using (var dialog = new OpenFileDialog { Title = "Публичный ключ для сервера", Filter = "Публичный ключ OpenSSH (*.pub)|*.pub|Все файлы|*.*" })
+                {
+                    if (Directory.Exists(sshDirectory)) dialog.InitialDirectory = sshDirectory;
+                    if (dialog.ShowDialog(this) != DialogResult.OK) return;
+                    publicKey = dialog.FileName;
+                }
+            }
+            try
+            {
+                var command = SshKeys.CopyCommand(publicKey);
+                SessionWorkspace().Open(new SessionTarget(connection, groups.ForAlias(connection.Alias)).WithCommand(command), true);
+                ShowSessions();
+            }
+            catch (Exception ex) when (Theme.IsFileError(ex) || ex is ArgumentException || ex is ExternalException) { Theme.ShowError(this, ex); }
+        }
         private RdpProfile SelectedDesktop => grid.CurrentRow?.Tag as RdpProfile;
         private string SelectedKey => SelectedDesktop?.Id ?? Selected?.Alias;
 
@@ -323,16 +577,17 @@ namespace SshManager
 
         private void SortColumn(int index)
         {
-            var current = groups.Sort(activeGroupId, showRdp);
+            string tab = ActiveTabId;
+            var current = groups.Sort(tab, showRdp);
             var ascending = index == 0 ? ServerSort.Name : ServerSort.Address;
             var descending = index == 0 ? ServerSort.NameDescending : ServerSort.AddressDescending;
             var next = current == ascending ? descending : current == descending ? ServerSort.Original : ascending;
-            UpdateGroups(items => items.SetSort(activeGroupId, showRdp, next), activeGroupId, SelectedKey);
+            UpdateGroups(items => items.SetSort(tab, showRdp, next), activeGroupId, SelectedKey);
         }
 
         private async Task CheckUpdates(bool interactive)
         {
-            if (!updateButton.Enabled) return;
+            if (!updateButton.Enabled || (!interactive && !groups.Preferences.CheckUpdates)) return;
             updateButton.Enabled = false;
             if (interactive) updateButton.Text = "Проверка…";
             var token = updateLifetime.Token;
@@ -427,6 +682,7 @@ namespace SshManager
             try { groups = groupFile.Load(); }
             catch (Exception ex) when (Theme.IsFileError(ex)) { Theme.ShowError(this, ex); }
             if (Theme.IsDark != groups.DarkTheme) ApplySelectedTheme();
+            ApplyPreferences();
             RefreshTabs(openStartupTab ? groups.StartupTabId : groupId);
             RefreshList(selected);
         }
@@ -443,6 +699,7 @@ namespace SshManager
             Theme.IsDark = groups.DarkTheme;
             Theme.Apply(this);
             Theme.RefreshSwitcher(themeButton);
+            FitHeader();
             sessions?.RefreshThemeButton();
             foreach (var window in fileWindows.Values) Theme.Apply(window);
         }
@@ -450,7 +707,8 @@ namespace SshManager
         private void RefreshList(string selectAlias)
         {
             grid.Rows.Clear();
-            var order = groups.Sort(activeGroupId, showRdp);
+            var order = groups.Sort(ActiveTabId, showRdp);
+            bool favorites = activeGroupId == FavoritesId;
             grid.Columns[0].HeaderCell.SortGlyphDirection = order == ServerSort.Name ? SortOrder.Ascending :
                 order == ServerSort.NameDescending ? SortOrder.Descending : SortOrder.None;
             grid.Columns[1].HeaderCell.SortGlyphDirection = order == ServerSort.Address ? SortOrder.Ascending :
@@ -458,7 +716,8 @@ namespace SshManager
             var activeGroup = groups.Find(activeGroupId);
             if (showRdp) { RefreshDesktops(selectAlias, order, activeGroup); return; }
             var connections = document == null ? new Connection[0] : document.Connections()
-                .Where(connection => activeGroup == null || activeGroup.Aliases.Contains(connection.Alias)).ToArray();
+                .Where(connection => (activeGroup == null || activeGroup.Aliases.Contains(connection.Alias)) &&
+                    (!favorites || groups.IsFavorite(Groups.Key(connection.Alias)))).ToArray();
             string query = search.Text.Trim();
             DataGridViewRow toSelect = null;
             foreach (var connection in ServerOrder.Apply(connections, order, item => item.Alias, item => HostOrAlias(item)))
@@ -477,7 +736,7 @@ namespace SshManager
             if (toSelect != null) grid.CurrentCell = toSelect.Cells[0];
             empty.Text = "По вашему запросу ничего не найдено.";
             if (document == null) empty.Text = "Не удалось прочитать SSH config. Нажмите «Обновить», чтобы повторить попытку.";
-            else if (connections.Length == 0) empty.Text = activeGroup == null
+            else if (connections.Length == 0) empty.Text = favorites ? FavoritesHint : activeGroup == null
                 ? "Добавьте сервер, чтобы создать первое подключение."
                 : "Добавьте сервер или перенесите сюда подключение из «Все серверы».";
             UpdateListStatus(connections.Length);
@@ -485,7 +744,8 @@ namespace SshManager
 
         private void RefreshDesktops(string selected, ServerSort order, ServerGroup activeGroup)
         {
-            var desktops = groups.Desktops.Where(profile => activeGroup == null || profile.GroupId == activeGroup.Id).ToArray();
+            var desktops = groups.Desktops.Where(profile => (activeGroup == null || profile.GroupId == activeGroup.Id) &&
+                (activeGroupId != FavoritesId || groups.IsFavorite(Groups.Key(profile)))).ToArray();
             var query = search.Text.Trim();
             foreach (var profile in ServerOrder.Apply(desktops, order, item => item.Name, item => item.Host))
             {
@@ -497,7 +757,8 @@ namespace SshManager
                 row.Tag = profile;
                 if (profile.Id == selected) grid.CurrentCell = row.Cells[0];
             }
-            empty.Text = desktops.Length == 0 ? "Добавьте RDP-подключение или импортируйте профиль .rdp." : "По вашему запросу ничего не найдено.";
+            empty.Text = desktops.Length > 0 ? "По вашему запросу ничего не найдено." : activeGroupId == FavoritesId ? FavoritesHint :
+                "Добавьте RDP-подключение или импортируйте профиль .rdp.";
             UpdateListStatus(desktops.Length);
         }
 
@@ -532,7 +793,7 @@ namespace SshManager
             bool import, hasPassword = false;
             try { hasPassword = profile != null && RdpPasswords.Exists(profile); }
             catch (IOException error) { Theme.ShowError(this, error); }
-            using (var dialog = new RdpDialog(profile, activeGroupId, hasPassword, (replacement, password, forgetPassword) =>
+            using (var dialog = new RdpDialog(profile, ActiveTabId, hasPassword, (replacement, password, forgetPassword) =>
             {
                 bool changePassword = forgetPassword || password.Length > 0 ||
                     (hasPassword && profile != null && profile.Account != replacement.Account);
@@ -570,7 +831,11 @@ namespace SshManager
         {
             if (profile == null || MessageBox.Show(this, "Удалить RDP-подключение «" + profile.Name + "»?",
                 Text, MessageBoxButtons.YesNo, MessageBoxIcon.Warning, MessageBoxDefaultButton.Button2) != DialogResult.Yes) return;
-            UpdateGroups(items => items.Desktops.RemoveAll(item => item.Id == profile.Id), activeGroupId);
+            UpdateGroups(items =>
+            {
+                items.Desktops.RemoveAll(item => item.Id == profile.Id);
+                items.RenameKey(Groups.Key(profile), null);
+            }, activeGroupId);
             if (groups.Desktops.Any(item => item.Id == profile.Id)) return;
             try { RdpPasswords.Set(profile, null); }
             catch (IOException error) { Theme.ShowError(this, error); }
@@ -589,7 +854,7 @@ namespace SshManager
                     if (!import) profile.Export(dialog.FileName);
                     else
                     {
-                        var imported = RdpProfile.Import(dialog.FileName, activeGroupId);
+                        var imported = RdpProfile.Import(dialog.FileName, ActiveTabId);
                         groups = groupFile.Update(items => items.SaveDesktop(imported, false));
                         search.Clear();
                         RefreshList(imported.Id);
@@ -634,7 +899,9 @@ namespace SshManager
                 document = next;
                 try
                 {
-                    string groupId = activeGroupId;
+                    if (connection != null && !String.Equals(connection.Alias, values.Alias, StringComparison.OrdinalIgnoreCase))
+                        groups = groupFile.Update(items => items.RenameKey(Groups.Key(connection.Alias), Groups.Key(values.Alias)));
+                    string groupId = ActiveTabId;
                     if (connection == null && groupId != null)
                         groups = groupFile.Update(items => items.Move(values.Alias, groupId));
                     else if (connection != null && connection.Alias != values.Alias && groups.ForAlias(connection.Alias) != null)
@@ -648,7 +915,7 @@ namespace SshManager
                         });
                 }
                 catch (Exception ex) when (Theme.IsFileError(ex) || ex is InvalidOperationException) { tabError = ex; }
-            }))
+            }, groups.Preferences))
             {
                 if (dialog.ShowDialog(this) != DialogResult.OK) return;
                 search.Clear();
@@ -675,8 +942,14 @@ namespace SshManager
                 document = next;
             }
             catch (Exception ex) when (Theme.IsFileError(ex)) { Theme.ShowError(this, ex); return; }
-            if (groups.ForAlias(connection.Alias) != null && !document.Connections().Any(item => String.Equals(item.Alias, connection.Alias, StringComparison.OrdinalIgnoreCase)))
-                UpdateGroups(items => items.Move(connection.Alias, null), activeGroupId);
+            bool gone = !document.Connections().Any(item => String.Equals(item.Alias, connection.Alias, StringComparison.OrdinalIgnoreCase));
+            if (gone && (groups.ForAlias(connection.Alias) != null || groups.IsFavorite(Groups.Key(connection.Alias)) ||
+                groups.Recent.Any(entry => String.Equals(entry.Key, Groups.Key(connection.Alias), StringComparison.OrdinalIgnoreCase))))
+                UpdateGroups(items =>
+                {
+                    items.Move(connection.Alias, null);
+                    items.RenameKey(Groups.Key(connection.Alias), null);
+                }, activeGroupId);
             else RefreshList(null);
         }
 
@@ -693,21 +966,23 @@ namespace SshManager
                 var previous = tabs.Controls.Cast<Control>().ToArray();
                 tabs.Controls.Clear();
                 foreach (var page in previous) page.Dispose();
+                if (groups.Favorites.Count > 0) AddGroupTab("Избранное", FavoritesId, glyph: Glyph.Star);
                 AddGroupTab(Groups.AllName, null);
                 foreach (var group in groups.Items) AddGroupTab(group.Name, group.Id, TabColor.Find(group.ColorId));
             }
             finally { tabs.ResumeLayout(); }
-            SelectGroup(groups.Find(selected) == null ? null : selected);
+            SelectGroup(selected == FavoritesId && groups.Favorites.Count > 0 ? FavoritesId : groups.Find(selected) == null ? null : selected);
         }
 
-        private void AddGroupTab(string title, string id, TabColor color = null)
+        private void AddGroupTab(string title, string id, TabColor color = null, Glyph glyph = Glyph.None)
         {
-            int padding = color == null ? 22 : 39;
+            int padding = color == null && glyph == Glyph.None ? 22 : 39;
             int desiredWidth = TextRenderer.MeasureText(title, Theme.Emphasis).Width + padding * DeviceDpi / 96;
             var tab = Theme.Button(title, Math.Min(250 * DeviceDpi / 96, desiredWidth));
             tab.Height = 30 * DeviceDpi / 96;
             tab.Margin = new Padding(0, 2, 5, 0);
             tab.Tag = id;
+            tab.Symbol = glyph;
             tab.AccessibleRole = AccessibleRole.PageTab;
             if (color != null)
             {
@@ -742,6 +1017,7 @@ namespace SshManager
 
         private void ShowTabMenu(Control tab, string id, Point location)
         {
+            if (id == FavoritesId) return;
             string alias = SelectedKey;
             SelectGroup(id);
             RefreshList(alias);
@@ -813,6 +1089,7 @@ namespace SshManager
             menuConnection = Selected;
             if (menuConnection == null) return;
             var connection = menuConnection;
+            favoriteItem.Text = groups.IsFavorite(Groups.Key(connection.Alias)) ? "Убрать из избранного" : "В избранное";
             foreach (ToolStripItem item in moveMenu.DropDownItems.Cast<ToolStripItem>().ToArray()) item.Dispose();
             var assigned = groups.ForAlias(connection.Alias);
             string current = assigned == null ? null : assigned.Id;
@@ -856,6 +1133,8 @@ namespace SshManager
                     { Theme.ShowError(this, error); }
                 }),
                 Theme.MenuItem("Изменить", Glyph.Edit, (sender, args) => EditDesktop(profile)),
+                Theme.MenuItem(groups.IsFavorite(Groups.Key(profile)) ? "Убрать из избранного" : "В избранное", Glyph.Star,
+                    (sender, args) => ToggleFavorite(Groups.Key(profile), profile.Id)),
                 move,
                 Theme.MenuItem("Экспорт .rdp…", Glyph.Copy, (sender, args) => TransferDesktop(profile)),
                 new ToolStripSeparator(),
@@ -918,6 +1197,7 @@ namespace SshManager
             {
                 SessionWorkspace().Open(new SessionTarget(connection, groups.ForAlias(connection.Alias)), forceNew);
                 ShowSessions();
+                RecordRecent(Groups.Key(connection.Alias));
             }
             catch (Exception ex) when (Theme.IsFileError(ex) || ex is ArgumentException || ex is System.Runtime.InteropServices.ExternalException)
             {
@@ -933,6 +1213,14 @@ namespace SshManager
 
         private void ConnectDesktop(RdpProfile profile, bool forceNew = false)
         {
+            if (groups.Desktops.Any(item => item.Id == profile.Id)) RecordRecent(Groups.Key(profile));
+            if (profile.Options.Multimon)
+            {
+                // The embedded client draws into one window; all monitors need the Windows client.
+                try { profile.OpenExternal(); }
+                catch (Exception error) when (Theme.IsFileError(error) || error is System.ComponentModel.Win32Exception) { Theme.ShowError(this, error); }
+                return;
+            }
             bool fromCatalog = catalog.Visible;
             try
             {
@@ -1003,6 +1291,10 @@ namespace SshManager
             if (sessions != null) return sessions;
             sessions = new SessionsPage { Visible = false };
             Theme.ScaleToDpi(sessions);
+            sessions.Preferences = groups.Preferences;
+            sessions.Snippets = () => groups.Snippets;
+            sessions.AddSnippet += AddSnippet;
+            sessions.RemoveSnippet += RemoveSnippet;
             sessions.ThemeRequested += ToggleTheme;
             sessions.ShowFiles += OpenFiles;
             sessions.PickServer += () =>
@@ -1063,6 +1355,7 @@ namespace SshManager
             {
                 if (keyData == (Keys.Control | Keys.F)) { search.Focus(); search.SelectAll(); return true; }
                 if (keyData == (Keys.Control | Keys.N)) { add.PerformClick(); return true; }
+                if (keyData == (Keys.Control | Keys.L)) { quick.Focus(); quick.SelectAll(); return true; }
                 if (keyData == Keys.F5) { Reload(); return true; }
             }
             if (sessions != null && sessions.Visible)
@@ -1164,7 +1457,10 @@ namespace SshManager
             string content = Convert.ToString(args.FormattedValue);
             if (args.ColumnIndex == 0)
             {
-                graphics.DrawImage(Theme.Icon(Glyph.Server, Theme.Teal), new Rectangle(box.Left + inset, box.Top + (box.Height - iconSize) / 2, iconSize, iconSize));
+                var tag = grid.Rows[args.RowIndex].Tag;
+                bool favorite = tag is Connection item ? groups.IsFavorite(Groups.Key(item.Alias)) : tag is RdpProfile desktop && groups.IsFavorite(Groups.Key(desktop));
+                var icon = favorite ? Theme.Icon(Glyph.Star, TabColor.Find("amber").Swatch) : Theme.Icon(Glyph.Server, Theme.Teal);
+                graphics.DrawImage(icon, new Rectangle(box.Left + inset, box.Top + (box.Height - iconSize) / 2, iconSize, iconSize));
                 var text = new Rectangle(box.Left + iconSize + inset * 2, box.Top, box.Width - iconSize - inset * 3, box.Height);
                 TextRenderer.DrawText(graphics, content, Theme.Emphasis, text, Theme.Ink, TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis | TextFormatFlags.NoPrefix);
             }

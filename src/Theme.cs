@@ -9,7 +9,7 @@ using System.Windows.Forms;
 
 namespace SshManager
 {
-    internal enum Glyph { None, Plus, Refresh, Edit, Delete, Terminal, Server, Folder, Move, MoveLeft, Copy, Key, Browse, Dot, Moon, Sun }
+    internal enum Glyph { None, Plus, Refresh, Edit, Delete, Terminal, Server, Folder, Move, MoveLeft, Copy, Key, Browse, Dot, Moon, Sun, Star, Settings }
     internal enum ButtonStyle { Outline, Primary, Quiet, Tab, SelectedTab }
 
     internal static class Theme
@@ -344,6 +344,24 @@ namespace SshManager
                         break;
                     case Glyph.Dot:
                         using (var fill = new SolidBrush(color)) g.FillEllipse(fill, 2, 2, 12, 12);
+                        break;
+                    case Glyph.Star:
+                        var points = new PointF[10];
+                        for (int i = 0; i < 10; i++)
+                        {
+                            double angle = Math.PI / 5 * i - Math.PI / 2, radius = i % 2 == 0 ? 7 : 3;
+                            points[i] = new PointF(8 + (float)(radius * Math.Cos(angle)), 8.5f + (float)(radius * Math.Sin(angle)));
+                        }
+                        using (var fill = new SolidBrush(color)) g.FillPolygon(fill, points);
+                        break;
+                    case Glyph.Settings:
+                        g.DrawEllipse(p, 5.5f, 5.5f, 5, 5);
+                        for (int i = 0; i < 8; i++)
+                        {
+                            double angle = Math.PI / 4 * i;
+                            g.DrawLine(p, 8 + (float)(4.8 * Math.Cos(angle)), 8 + (float)(4.8 * Math.Sin(angle)),
+                                8 + (float)(6.6 * Math.Cos(angle)), 8 + (float)(6.6 * Math.Sin(angle)));
+                        }
                         break;
                 }
             }
