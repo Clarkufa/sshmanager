@@ -72,6 +72,7 @@ class Profile:
     end: int = -1
     proxy_jump: str = ""
     forwards: tuple = ()  # ("LocalForward", "8080 localhost:80"), …
+    known_hosts: str = ""  # UserKnownHostsFile (docs/ui-spec.md §9.1)
 
     @property
     def address(self):
@@ -93,6 +94,9 @@ class Profile:
             quote(path)
         if self.proxy_jump and not re.fullmatch(r"[A-Za-z0-9_.@:%,\[\]-]+", self.proxy_jump):
             raise ValueError("Укажите переходной сервер как псевдоним или user@host:port, несколько — через запятую.")
+        if self.known_hosts and not (self.known_hosts.startswith(("/", "~/")) and len(self.known_hosts) <= 1024
+                                     and '"' not in self.known_hosts and not any(ord(char) < 32 for char in self.known_hosts)):
+            raise ValueError("Укажите полный путь к файлу known_hosts или путь от ~, например ~/.ssh/known_hosts_work.")
         for name, value in self.forwards:
             parts = value.split()
             valid = name in FORWARDS.values() and (
@@ -130,6 +134,7 @@ class Document:
                 names[0], *(settings.get(key, [""])[0] for key in ("hostname", "user", "port")),
                 tuple(settings.get("identityfile", ())), begin, end,
                 proxy_jump=settings.get("proxyjump", [""])[0], forwards=tuple(forwards),
+                known_hosts=settings.get("userknownhostsfile", [""])[0],
             ))
 
     def update(self, before, after):
@@ -158,6 +163,8 @@ class Document:
                 ("Port", (before.port,) if before.port else (), (after.port,) if after.port else ()),
                 ("IdentityFile", before.keys, after.keys),
                 ("ProxyJump", (before.proxy_jump,) if before.proxy_jump else (), (after.proxy_jump,) if after.proxy_jump else ()),
+                ("UserKnownHostsFile", (before.known_hosts,) if before.known_hosts else (),
+                 (after.known_hosts,) if after.known_hosts else ()),
                 *((name, tuple(v for n, v in before.forwards if n == name), tuple(v for n, v in after.forwards if n == name))
                   for name in FORWARDS.values()),
             )
@@ -194,7 +201,7 @@ class Document:
     def format_fields(self, profile):
         for name, value in (("HostName", profile.host), ("User", profile.user), ("Port", profile.port),
                             *(("IdentityFile", key) for key in profile.keys), ("ProxyJump", profile.proxy_jump),
-                            *profile.forwards):
+                            ("UserKnownHostsFile", profile.known_hosts), *profile.forwards):
             if value:
                 yield f"    {name} {render(name, value)}{self.newline}"
 

@@ -456,6 +456,7 @@ class Window(Gtk.ApplicationWindow):
             Item("Переместить во вкладку", icon="move", children=destinations),
             Item("Копировать команду SSH", lambda: self.copy_command(profile), icon="copy"),
             Item("Скопировать ключ на сервер", lambda: self.copy_key(profile), icon="key"),
+            Item("Известные хосты…", lambda: self.open_known_hosts(profile), icon="key"),
             favorite,
             None,
             Item("Удалить", lambda: self.delete_profile(profile), icon="delete", danger=True),
@@ -844,6 +845,24 @@ class Window(Gtk.ApplicationWindow):
                 self.update_catalog_settings(snippets=snippets)
             except OSError as error:
                 message(self, error, Gtk.MessageType.ERROR)
+
+    def open_known_hosts(self, focus=None):
+        """«Известные хосты» (docs/ui-spec.md §9.2): for a server — its file and its host in the search."""
+        from .dialogs import KnownHostsDialog
+        from .known_hosts import host_name, resolve
+        default = self.config.path.parent / "known_hosts"
+        files = {}
+        for profile in (self.document.profiles if self.document else []):
+            if profile.known_hosts:
+                files.setdefault(profile.known_hosts, []).append(profile.alias)
+        selected, query = None, ""
+        if focus is not None:
+            selected = resolve(focus.known_hosts, default)
+            port = int(focus.port) if focus.port.isdigit() and 1 <= int(focus.port) <= 65535 else 22
+            query = host_name(focus.host or focus.alias, port)
+        dialog = KnownHostsDialog(self, default, sorted(files.items()), selected, query)
+        dialog.run()
+        dialog.destroy()
 
     def open_settings(self):
         dialog = SettingsDialog(self, self.settings["preferences"])

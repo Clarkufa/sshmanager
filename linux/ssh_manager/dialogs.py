@@ -4,13 +4,17 @@ import uuid
 from dataclasses import replace
 from pathlib import Path
 
-from gi.repository import Gdk, Gtk, Pango
+from gi.repository import Gdk, Gio, GLib, Gtk, Pango
 
 import os
+import re
 import socket
+import subprocess
+import threading
 
 from .auth import account_for
 from .config import FORWARD_KINDS, Profile
+from . import known_hosts
 from .extras import generate_key
 from .rdp import DesktopProfile
 from .vnc import VncProfile
@@ -111,7 +115,11 @@ class ProfileDialog(Gtk.Dialog):
         grid.attach(_label("Через сервер (ProxyJump)"), 0, 11, 1, 1)
         self.proxy_jump = Gtk.Entry(text=profile.proxy_jump, hexpand=True, placeholder_text="bastion или user@host:port")
         grid.attach(self.proxy_jump, 1, 11, 2, 1)
-        grid.attach(_label("Пробросы портов"), 0, 12, 1, 1)
+        grid.attach(_label("Файл known_hosts"), 0, 12, 1, 1)
+        self.known_hosts = Gtk.Entry(text=profile.known_hosts, hexpand=True, placeholder_text="~/.ssh/known_hosts (по умолчанию)")
+        self.known_hosts.set_tooltip_text("UserKnownHostsFile: полный путь или путь от ~")
+        grid.attach(self.known_hosts, 1, 12, 2, 1)
+        grid.attach(_label("Пробросы портов"), 0, 13, 1, 1)
         self.forwards = Gtk.ListStore(str, str)
         names = {name: kind for kind, name in FORWARD_KINDS.items()}
         for name, value in profile.forwards:
@@ -123,7 +131,7 @@ class ProfileDialog(Gtk.Dialog):
         forward_scroll = Gtk.ScrolledWindow(min_content_height=60)
         forward_scroll.add(forward_view)
         mark(forward_scroll, "sshm-frame")
-        grid.attach(forward_scroll, 1, 12, 2, 1)
+        grid.attach(forward_scroll, 1, 13, 2, 1)
         forward_row = Gtk.Box(spacing=6)
         self.forward_kind = Gtk.ComboBoxText()
         for kind, title in (("L", "L — локальный"), ("R", "R — удалённый"), ("D", "D — SOCKS")):
@@ -134,10 +142,10 @@ class ProfileDialog(Gtk.Dialog):
         forward_row.pack_start(self.forward_value, True, True, 0)
         forward_row.pack_start(action_button("Добавить", self.add_forward, icon="plus"), False, False, 0)
         forward_row.pack_start(action_button("Убрать", self.remove_forward, icon="delete"), False, False, 0)
-        grid.attach(forward_row, 1, 13, 2, 1)
+        grid.attach(forward_row, 1, 14, 2, 1)
         self.hint = _label("", wrap=True)
         mark(self.hint, "sshm-danger")
-        grid.attach(self.hint, 1, 14, 2, 1)
+        grid.attach(self.hint, 1, 15, 2, 1)
         for name in ("alias", "host", "user", "port"):
             self.entries[name].connect("changed", lambda *_: self.update_password_hint())
         self.show_all()
@@ -224,8 +232,238 @@ class ProfileDialog(Gtk.Dialog):
     def values(self):
         forwards = tuple((FORWARD_KINDS[kind], value) for kind, value in self.forwards)
         profile = Profile(*(self.entries[name].get_text().strip() for name in ("alias", "host", "user", "port")), self.keys(),
-                          proxy_jump=self.proxy_jump.get_text().strip(), forwards=forwards)
+                          proxy_jump=self.proxy_jump.get_text().strip(), forwards=forwards,
+                          known_hosts=self.known_hosts.get_text().strip())
         return profile, self.entries["password"].get_text(), self.forget.get_active()
+
+
+class HostKeyDialog(Gtk.Dialog):
+    """«Добавить ключ хоста»: host and port for ssh-keyscan."""
+
+    def __init__(self, owner, suggested=""):
+        super().__init__(title="Добавить ключ хоста", transient_for=owner, modal=True)
+        themed(self)
+        self.set_default_size(440, -1)
+        dialog_buttons(self, "Получить ключи")
+        grid = _grid(self, 90)
+        name, number = suggested or "", "22"
+        match = re.fullmatch(r"\[([^\]]+)\]:(\d{1,5})", name)
+        if match:
+            name, number = match.groups()
+        self.host = _field(grid, 0, "Хост", name, limit=253)
+        self.host.set_placeholder_text("server.example.com или 10.0.0.5")
+        self.port = _field(grid, 1, "Порт", number, limit=5)
+        self.show_all()
+
+    def values(self):
+        host = self.host.get_text().strip().strip("[]")
+        port = self.port.get_text().strip()
+        if not host:
+            raise ValueError("Укажите хост.")
+        if not port.isdigit() or not 1 <= int(port) <= 65535:
+            raise ValueError("Порт должен быть числом от 1 до 65535.")
+        return host, int(port)
+
+
+class KnownHostsDialog(Gtk.Dialog):
+    """«Известные хосты»: view, search, delete and add known_hosts entries (docs/ui-spec.md §9.2)."""
+
+    def __init__(self, owner, default, profile_files=(), selected=None, query=""):
+        """profile_files: [(UserKnownHostsFile value, [aliases])]; selected: a path to open first."""
+        super().__init__(title="Известные хосты", transient_for=owner, modal=True)
+        themed(self)
+        self.set_default_size(900, 540)
+        self.owner = owner
+        self.current = None
+        self.busy = False
+        close = self.add_button("Закрыть", Gtk.ResponseType.CLOSE)
+        mark(close, "sshm-button", "outline")
+        area = self.get_content_area()
+        area.set_border_width(14)
+        area.set_spacing(8)
+        home = str(Path.home())
+
+        def short(path):
+            text = str(path)
+            return "~" + text[len(home):] if text.startswith(home + "/") else text
+        row = Gtk.Box(spacing=8)
+        row.pack_start(_label("Файл"), False, False, 0)
+        self.files = Gtk.ComboBoxText(hexpand=True)
+        self.files.append(str(default), short(default) + " (по умолчанию)")
+        for value, aliases in profile_files:
+            path = str(known_hosts.resolve(value, default))
+            if not any(path == item[1] for item in self.files.get_model()):
+                self.files.append(path, short(path) + " · " + ", ".join(aliases))
+        if selected and not any(str(selected) == item[1] for item in self.files.get_model()):
+            self.files.append(str(selected), short(selected))
+        self.files.set_active_id(str(selected) if selected else str(default))
+        self.files.connect("changed", lambda *_: self.load())
+        row.pack_start(self.files, True, True, 0)
+        row.pack_start(action_button("Другой файл…", self.choose_file, icon="browse"), False, False, 0)
+        row.pack_start(action_button("Открыть в редакторе", self.open_editor, "quiet", icon="edit"), False, False, 0)
+        area.pack_start(row, False, False, 0)
+
+        tools = Gtk.Box(spacing=6)
+        self.search = Gtk.SearchEntry(placeholder_text="Найти хост", text=query or "")
+        self.search.set_size_request(265, -1)
+        self.search.connect("search-changed", lambda *_: self.fill())
+        tools.pack_start(self.search, False, False, 0)
+        self.remove_button = action_button("Удалить", self.remove_selected, "quiet", icon="delete", danger=True)
+        self.refresh_button = action_button("Обновить", self.load, "quiet", icon="refresh")
+        self.add_key_button = action_button("Добавить…", self.add_keys, "quiet", icon="plus")
+        for widget in (self.remove_button, self.refresh_button, self.add_key_button):
+            tools.pack_end(widget, False, False, 0)
+        area.pack_start(tools, False, False, 0)
+
+        self.model = Gtk.ListStore(str, str, str, str, object)
+        self.view = Gtk.TreeView(model=self.model)
+        self.view.get_selection().set_mode(Gtk.SelectionMode.MULTIPLE)
+        self.view.get_selection().connect("changed", lambda *_: self.update_actions())
+        self.view.connect("key-press-event", self.keys)
+        for index, (title, width) in enumerate((("Хост", 280), ("Тип ключа", 170), ("Отпечаток", 300), ("Метка", 110))):
+            column = Gtk.TreeViewColumn(title, Gtk.CellRendererText(ellipsize=Pango.EllipsizeMode.END), text=index)
+            column.set_resizable(True)
+            column.set_min_width(80)
+            column.set_fixed_width(width)
+            column.set_sizing(Gtk.TreeViewColumnSizing.FIXED)
+            self.view.append_column(column)
+        scroll = Gtk.ScrolledWindow(vexpand=True)
+        scroll.add(self.view)
+        mark(scroll, "sshm-frame")
+        area.pack_start(scroll, True, True, 0)
+        self.status = _label("", muted=True)
+        area.pack_start(self.status, False, False, 0)
+        self.show_all()
+        self.load()
+        self.search.grab_focus()
+
+    @property
+    def path(self):
+        return Path(self.files.get_active_id())
+
+    def load(self):
+        try:
+            self.current = known_hosts.KnownHosts(self.path)
+        except (OSError, UnicodeError) as error:
+            self.current = None
+            self.model.clear()
+            self.status.set_text(f"Не удалось прочитать файл. {error}")
+            self.update_actions()
+            return
+        self.fill()
+
+    def fill(self):
+        if self.current is None:
+            return
+        shown = self.current.search(self.search.get_text())
+        self.model.clear()
+        for entry in shown:
+            self.model.append((entry.display, entry.key_type, entry.fingerprint, entry.marker, entry))
+        total = len(self.current.entries)
+        if not total:
+            self.status.set_text("Записей нет." if self.current.path.exists() else "Файла пока нет: он появится после первой записи.")
+        else:
+            self.status.set_text(f"Найдено: {len(shown)} из {total}" if self.search.get_text().strip() else f"Записей: {total}")
+        self.update_actions()
+
+    def chosen(self):
+        model, paths = self.view.get_selection().get_selected_rows()
+        return [model[path][4] for path in paths]
+
+    def update_actions(self):
+        self.remove_button.set_sensitive(not self.busy and self.current is not None and bool(self.chosen()))
+        for widget in (self.add_key_button, self.refresh_button, self.files):
+            widget.set_sensitive(not self.busy)
+
+    def keys(self, view, event):
+        if event.keyval == Gdk.KEY_Delete:
+            self.remove_selected()
+            return True
+        return False
+
+    def remove_selected(self):
+        from .widgets import confirm, message
+        chosen = self.chosen()
+        if self.busy or self.current is None or not chosen:
+            return
+        if not confirm(self, f"Удалить записи ({len(chosen)}) из known_hosts?", str(self.current.path)):
+            return
+        try:
+            self.current.remove(chosen)
+        except OSError as error:
+            message(self, error, Gtk.MessageType.ERROR)
+            return
+        self.load()
+        self.status.set_text(f"Удалено записей: {len(chosen)}. Прежняя версия: {self.current.path.name}.old")
+
+    def add_keys(self):
+        from .widgets import confirm
+        if self.busy or self.current is None:
+            return
+        dialog = HostKeyDialog(self, self.search.get_text().strip())
+        try:
+            while True:
+                if dialog.run() != Gtk.ResponseType.OK:
+                    return
+                try:
+                    host, port = dialog.values()
+                    break
+                except ValueError as error:
+                    from .widgets import message
+                    message(dialog, error, Gtk.MessageType.ERROR)
+        finally:
+            dialog.destroy()
+        name = known_hosts.host_name(host, port)
+        self.busy = True
+        self.update_actions()
+        self.status.set_text(f"Получение ключей {name}…")
+
+        def work():
+            try:
+                keys = known_hosts.scan(host, port)
+            except (OSError, ValueError, subprocess.SubprocessError) as error:
+                GLib.idle_add(done, None, error)
+            else:
+                GLib.idle_add(done, keys, None)
+
+        def done(keys, error):
+            self.busy = False
+            self.update_actions()
+            if error is not None:
+                self.status.set_text(f"Не удалось получить ключи. {error}")
+                return False
+            summary = "\n".join(f"{entry.key_type} · {entry.fingerprint}" for entry in map(known_hosts.parse, keys) if entry)
+            if not confirm(self, "Добавить ключи хоста в known_hosts?",
+                           f"Прежние записи этого хоста будут заменены.\n\n{name}\n{summary}"):
+                self.status.set_text("Ключи не добавлены.")
+                return False
+            try:
+                self.current.replace(name, keys)
+            except OSError as error:
+                self.status.set_text(str(error))
+                return False
+            self.load()
+            self.search.set_text(name)
+            self.status.set_text(f"Добавлено ключей: {len(keys)}.")
+            return False
+        threading.Thread(target=work, daemon=True).start()
+
+    def choose_file(self):
+        path = chooser(self, "Файл known_hosts", Gtk.FileChooserAction.OPEN, directory=self.path.parent)
+        if path:
+            if not any(path == item[1] for item in self.files.get_model()):
+                self.files.append(path, path)
+            self.files.set_active_id(path)
+
+    def open_editor(self):
+        from .widgets import message
+        if not self.path.exists():
+            message(self, "Файла пока нет: он появится после первой записи.")
+            return
+        try:
+            Gio.AppInfo.launch_default_for_uri(self.path.as_uri(), None)
+        except GLib.Error as error:
+            message(self, error.message, Gtk.MessageType.ERROR)
 
 
 class DesktopDialog(Gtk.Dialog):
@@ -633,9 +871,13 @@ class SettingsDialog(Gtk.Dialog):
         self.updates = Gtk.CheckButton(label="Проверять обновления при запуске", active=preferences["check_updates"])
         for row, check in enumerate((self.reconnect, self.tray, self.updates), start=4):
             grid.attach(check, 1, row, 2, 1)
+        if hasattr(owner, "open_known_hosts"):
+            known = action_button("Известные хосты…", lambda: owner.open_known_hosts(None), icon="key")
+            known.set_halign(Gtk.Align.START)
+            grid.attach(known, 1, 7, 2, 1)
         self.error = _label("", wrap=True)
         mark(self.error, "sshm-danger")
-        grid.attach(self.error, 1, 7, 2, 1)
+        grid.attach(self.error, 1, 8, 2, 1)
         self.show_all()
 
     def values(self, preferences):

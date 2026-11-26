@@ -69,6 +69,7 @@ home = Path(tempfile.mkdtemp())
     User deploy
     Port 2222
     ProxyJump bastion
+    UserKnownHostsFile ~/.ssh/known_hosts_work
     LocalForward 8080 localhost:80
 
 Host db-1
@@ -95,6 +96,14 @@ settings = {"groups": groups, "members": {"web-prod": "a" * 32, "db-1": "a" * 32
                           "domain": "CORP", "group": "", "width": 1280, "height": 800, "clipboard": False, "fullscreen": False}],
             "vnc": [{"id": "e" * 32, "name": "Пульт лаборатории", "host": "192.168.1.50", "port": 5900,
                      "group": "b" * 32, "via": "lab"}]}
+# «Известные хосты» show a demo file next to the test config, never the real ~/.ssh/known_hosts.
+(home / "ssh/known_hosts").write_text(
+    "# demo\n"
+    "web.example.com,192.168.10.21 ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl\n"
+    "[db.internal.example.com]:2222 ecdsa-sha2-nistp256 AAAAE2VjZHNhLXNoYTItbmlzdHAyNTYAAAAIbmlzdHAyNTYAAABBBEmKSENjQEez"
+    "OmxkZMy7opKgwFB9nkt5YRrYMjNuG5N87uRgg6CLrbo5wAdT/y6v0mKV0U2w0WZ2YB/++Tpockg=\n"
+    "|1|JfKTdBh7rNbXkVAQCRp4OQoPfmI=|USECr3SWf1JUPsms5AqfD5QfxkM= ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABAQC8\n"
+    "@cert-authority *.corp.example ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl\n")
 (home / "state").mkdir()
 (home / "state/settings.json").write_text(json.dumps(settings, ensure_ascii=False))
 
@@ -197,6 +206,7 @@ step(lambda: window.select_group("*"))
 step(lambda: shot("14-favorites"))
 step(lambda: window.select_group(""))
 step(lambda: in_dialog("15-dialog-settings", window.open_settings))
+step(lambda: in_dialog("28-known-hosts", lambda: window.open_known_hosts(None)))
 step(lambda: in_dialog("16-dialog-import", window.import_other))
 step(lambda: window.connect_profile(next(item for item in window.document.profiles if item.alias == "lab")))
 step(lambda: None)
