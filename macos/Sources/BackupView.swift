@@ -110,9 +110,10 @@ extension Manager {
             }
             let replaced = plan.changedReplacements
             var summary = "Импортировать резервную копию?\n\nНовых файлов: \(plan.changedCount - replaced.count)\nЗаменяемых файлов: \(replaced.count)"
-            let ssh = plan.passwordCount - plan.desktopPasswordCount
-            if ssh > 0 { summary += "\nSSH-паролей: \(ssh)" }
-            if plan.desktopPasswordCount > 0 { summary += "\nRDP-паролей: \(plan.desktopPasswordCount)" }
+            for kind in ConnectionProtocol.allCases {
+                let count = plan.passwordCount(for: kind)
+                if count > 0 { summary += "\n\(kind.rawValue)-паролей: \(count)" }
+            }
             if !replaced.isEmpty {
                 summary += "\n\nПредыдущие версии этих файлов будут сохранены:\n" + replaced.prefix(7).joined(separator: "\n")
                 if replaced.count > 7 { summary += "\nИ ещё \(replaced.count - 7)" }
@@ -128,7 +129,8 @@ extension Manager {
             self.reload()
             var text = "Резервная копия восстановлена."
             if plan.passwordCount > 0 {
-                text += "\nВосстановлено паролей SSH: \(plan.passwordCount - plan.desktopPasswordCount), RDP: \(plan.desktopPasswordCount)"
+                let counts = ConnectionProtocol.allCases.map { "\($0.rawValue): \(plan.passwordCount(for: $0))" }
+                text += "\nВосстановлено паролей " + counts.joined(separator: ", ")
             }
             if !plan.changedReplacements.isEmpty { text += "\n\nПредыдущие файлы сохранены здесь:\n" + plan.recoveryURL.path }
             self.notice = Notice(title: "Импорт резервной копии", text: text)

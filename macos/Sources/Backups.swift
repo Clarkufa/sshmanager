@@ -22,6 +22,7 @@ private func digest(_ text: String) -> String {
 private func backupPasswordPath(_ profile: Profile) -> String { passwordPrefix + digest(profile.account) }
 /// RDP passwords: app/passwords/rdp-<profile id>, the same naming as the Windows and Linux archives.
 private func backupPasswordPath(_ profile: DesktopProfile) -> String { passwordPrefix + "rdp-" + profile.id }
+private func backupPasswordPath(_ profile: VncProfile) -> String { passwordPrefix + "vnc-" + profile.id }
 
 private func regularPath(_ url: URL, allowMissing: Bool) throws {
     var current = url.standardizedFileURL
@@ -89,10 +90,10 @@ final class BackupSnapshot {
             for profile in try config.read().profiles where profile.passwordHost != nil {
                 if let password = try Passwords.read(profile.account) { try add(backupPasswordPath(profile), data: Data(password.utf8)) }
             }
-            for profile in settings.desktops {
-                if let password = try Passwords.read(profile.keychainAccount) {
-                    try add(backupPasswordPath(profile), data: Data(password.utf8))
-                }
+            let desktopAccounts = settings.desktops.map { (backupPasswordPath($0), $0.keychainAccount) }
+                + settings.vnc.map { (backupPasswordPath($0), $0.keychainAccount) }
+            for (path, account) in desktopAccounts {
+                if let password = try Passwords.read(account) { try add(path, data: Data(password.utf8)) }
             }
         }
     }
@@ -219,14 +220,14 @@ struct BackupRestore {
     private let config: ConfigStore
     private var changes: [Change] = []
     /// Keychain account and the password to store there, for SSH and RDP profiles alike.
-    private var passwords: [(account: String, secret: String, desktop: Bool)] = []
+    private var passwords: [(account: String, secret: String, kind: ConnectionProtocol)] = []
     var fileCount: Int { changes.count }
     var replaced: [String] { changes.filter { $0.before != nil }.map { $0.destination.path } }
     /// Files whose content actually changes, as in the Windows summary.
     var changedCount: Int { changes.filter { $0.before != $0.data }.count }
     var changedReplacements: [String] { changes.filter { $0.before != nil && $0.before != $0.data }.map { $0.destination.path } }
     var passwordCount: Int { passwords.count }
-    var desktopPasswordCount: Int { passwords.filter { $0.desktop }.count }
+    func passwordCount(for kind: ConnectionProtocol) -> Int { passwords.filter { $0.kind == kind }.count }
     let recoveryURL: URL
 
     init(entries: [String: Data], config: ConfigStore, settingsURL: URL = ManagerSettings.url) throws {
@@ -238,7 +239,10 @@ struct BackupRestore {
         })
         guard let configData = entries[configEntry], let settingsData = entries[settingsEntry] else { throw BackupArchive.invalid() }
         let profiles = try ConfigDocument(configText(configData)).profiles
-        let desktops = try ManagerSettings.decode(settingsData).desktops
+        let settings = try ManagerSettings.decode(settingsData)
+        let desktopAccounts = Dictionary(uniqueKeysWithValues:
+            settings.desktops.map { (backupPasswordPath($0), $0.keychainAccount) }
+                + settings.vnc.map { (backupPasswordPath($0), $0.keychainAccount) })
         let folder = config.url.deletingLastPathComponent()
         let stamp = ISO8601DateFormatter().string(from: Date()).replacingOccurrences(of: ":", with: "") + "-" + UUID().uuidString.prefix(8)
         recoveryURL = folder.appendingPathComponent(restoreFolder).appendingPathComponent(stamp)
@@ -247,13 +251,13 @@ struct BackupRestore {
             if name == configEntry || name == settingsEntry { continue }
             if name.hasPrefix(passwordPrefix) {
                 let ssh = profiles.first(where: { backupPasswordPath($0) == name })
-                let desktop = desktops.first(where: { backupPasswordPath($0) == name })
-                guard let account = ssh?.account ?? desktop?.keychainAccount,
+                guard let account = ssh?.account ?? desktopAccounts[name],
                       (1...1022).contains(data.count), let secret = String(data: data, encoding: .utf8),
                       !secret.contains("\0"), !secret.contains(where: \.isNewline) else {
                     throw ManagerError("В копии найден неподдерживаемый пароль подключения.")
                 }
-                passwords.append((account, secret, ssh == nil))
+                let kind: ConnectionProtocol = ssh != nil ? .ssh : name.hasPrefix(passwordPrefix + "vnc-") ? .vnc : .rdp
+                passwords.append((account, secret, kind))
                 continue
             }
             let key = name.lowercased()

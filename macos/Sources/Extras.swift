@@ -4,31 +4,34 @@ import SwiftUI
 // Stage 2 helpers shared by the Manager and the views (docs/ui-spec.md §7).
 
 struct QuickTarget {
-    let rdp: Bool
+    let kind: ConnectionProtocol
     let user: String
     let host: String
     let port: Int
 
-    /// «user@host:port», «ssh://…» or «rdp://[user@]host[:port]».
+    /// «user@host:port» or a target with an ssh://, rdp:// or vnc:// scheme.
     init(_ input: String) throws {
         var text = input.trimmingCharacters(in: .whitespaces)
-        var rdp = false
-        for (prefix, kind) in [("rdp://", true), ("ssh://", false)] where text.lowercased().hasPrefix(prefix) {
-            rdp = kind
+        var kind: ConnectionProtocol = .ssh
+        for protocolKind in ConnectionProtocol.allCases {
+            let prefix = protocolKind.rawValue.lowercased() + "://"
+            guard text.lowercased().hasPrefix(prefix) else { continue }
+            kind = protocolKind
             text = String(text.dropFirst(prefix.count))
             while text.hasSuffix("/") { text.removeLast() }
+            break
         }
         let pattern = #"^(?:([^@\s:]+)@)?(\[[0-9A-Fa-f:.]+\]|[A-Za-z0-9_.-]+)(?::([0-9]{1,5}))?$"#
         guard let regex = try? NSRegularExpression(pattern: pattern),
               let match = regex.firstMatch(in: text, range: NSRange(text.startIndex..., in: text)) else {
-            throw ManagerError("Введите адрес как user@host:port или rdp://host:port.")
+            throw ManagerError("Введите адрес как user@host:port, rdp://host:port или vnc://host:port.")
         }
         func group(_ index: Int) -> String? {
             Range(match.range(at: index), in: text).map { String(text[$0]) }
         }
-        let port = group(3).flatMap { Int($0) } ?? (rdp ? 3389 : 22)
+        let port = group(3).flatMap { Int($0) } ?? kind.defaultPort
         guard (1...65535).contains(port) else { throw ManagerError("Порт должен быть числом от 1 до 65535.") }
-        self.rdp = rdp
+        self.kind = kind
         user = group(1) ?? ""
         host = (group(2) ?? "").trimmingCharacters(in: CharacterSet(charactersIn: "[]"))
         self.port = port
@@ -48,7 +51,7 @@ func quickAlias(_ host: String, existing: [String]) -> String {
 
 struct FoundConnection: Identifiable {
     let id = UUID()
-    let rdp: Bool
+    let kind: ConnectionProtocol
     let name: String
     let host: String
     let port: Int
@@ -72,7 +75,7 @@ enum Importers {
             guard values["Protocol", default: "ssh"] == "ssh", var host = values["HostName"], !host.isEmpty else { return nil }
             var user = values["UserName"] ?? ""
             if user.isEmpty, let at = host.firstIndex(of: "@") { user = String(host[..<at]); host = String(host[host.index(after: at)...]) }
-            return FoundConnection(rdp: false, name: name.removingPercentEncoding ?? name, host: host,
+            return FoundConnection(kind: .ssh, name: name.removingPercentEncoding ?? name, host: host,
                                    port: Int(values["PortNumber"] ?? "") ?? 22, user: user, source: "PuTTY")
         }
     }
@@ -90,17 +93,18 @@ enum Importers {
         return nodes.compactMap { node in
             guard let element = node as? XMLElement else { return nil }
             func value(_ name: String) -> String { element.attribute(forName: name)?.stringValue ?? "" }
-            let rdp: Bool
-            switch value("Protocol") {
-            case "SSH1", "SSH2": rdp = false
-            case "RDP": rdp = true
+            let kind: ConnectionProtocol
+            switch value("Protocol").uppercased() {
+            case "SSH1", "SSH2": kind = .ssh
+            case "RDP": kind = .rdp
+            case "VNC": kind = .vnc
             default: return nil
             }
             let host = value("Hostname")
             guard !host.isEmpty else { return nil }
-            return FoundConnection(rdp: rdp, name: value("Name").isEmpty ? host : value("Name"), host: host,
-                                   port: Int(value("Port")) ?? (rdp ? 3389 : 22), user: value("Username"),
-                                   domain: rdp ? value("Domain") : "", source: "mRemoteNG")
+            return FoundConnection(kind: kind, name: value("Name").isEmpty ? host : value("Name"), host: host,
+                                   port: Int(value("Port")) ?? kind.defaultPort, user: value("Username"),
+                                   domain: kind == .rdp ? value("Domain") : "", source: "mRemoteNG")
         }
     }
 
@@ -112,10 +116,15 @@ enum Importers {
             let name = String(line[..<equals]).trimmingCharacters(in: .whitespaces)
             let fields = String(line[line.index(after: equals)...]).components(separatedBy: "%")
             guard fields.count >= 4 else { return nil }
-            let kind = fields[0].split(separator: "#").last.map(String.init) ?? ""
-            guard kind == "0" || kind == "4", !fields[1].isEmpty else { return nil }
-            let rdp = kind == "4"
-            return FoundConnection(rdp: rdp, name: name, host: fields[1], port: Int(fields[2]) ?? (rdp ? 3389 : 22),
+            guard !fields[1].isEmpty else { return nil }
+            let kind: ConnectionProtocol
+            switch fields[0].split(separator: "#").last.map(String.init) ?? "" {
+            case "0": kind = .ssh
+            case "4": kind = .rdp
+            case "5": kind = .vnc
+            default: return nil
+            }
+            return FoundConnection(kind: kind, name: name, host: fields[1], port: Int(fields[2]) ?? kind.defaultPort,
                                    user: fields[3], source: "MobaXterm")
         }
     }
@@ -227,7 +236,7 @@ struct ImportSheet: View {
             List($found) { $item in
                 Toggle(isOn: $item.chosen) {
                     HStack {
-                        Text(item.rdp ? "RDP" : "SSH").frame(width: 40, alignment: .leading)
+                        Text(item.kind.rawValue).frame(width: 40, alignment: .leading)
                         Text(item.name).frame(width: 160, alignment: .leading).lineLimit(1)
                         Text((item.user.isEmpty ? "" : item.user + "@") + item.host + ":\(item.port)").lineLimit(1)
                         Spacer()

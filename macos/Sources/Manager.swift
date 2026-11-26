@@ -7,7 +7,15 @@ enum Destination: Hashable {
 }
 
 enum ConnectionProtocol: String, CaseIterable, Identifiable {
-    case ssh = "SSH", rdp = "RDP"
+    case ssh = "SSH", rdp = "RDP", vnc = "VNC"
+
+    var defaultPort: Int {
+        switch self {
+        case .ssh: 22
+        case .rdp: 3389
+        case .vnc: 5900
+        }
+    }
     var id: Self { self }
 }
 
@@ -18,42 +26,50 @@ struct Notice: Identifiable {
     var confirm: (() -> Void)? = nil
 }
 
-/// One row of the sessions list: an SSH terminal or an RDP desktop.
+/// One row of the sessions list: an SSH terminal or a remote desktop.
 enum SessionEntry: Identifiable {
-    case ssh(TerminalSession), rdp(DesktopSession)
+    case ssh(TerminalSession), rdp(DesktopSession), vnc(VncSession)
 
     var id: UUID {
         switch self {
         case .ssh(let session): session.id
         case .rdp(let session): session.id
+        case .vnc(let session): session.id
         }
     }
     var title: String {
         switch self {
         case .ssh(let session): session.title
         case .rdp(let session): session.title
+        case .vnc(let session): session.title
         }
     }
     var live: Bool {
         switch self {
         case .ssh(let session): session.live
         case .rdp(let session): session.live
+        case .vnc(let session): session.live
         }
     }
     var protocolName: String {
-        if case .rdp = self { return "RDP" }
-        return "SSH"
+        switch self {
+        case .ssh: "SSH"
+        case .rdp: "RDP"
+        case .vnc: "VNC"
+        }
     }
     var address: String {
         switch self {
         case .ssh(let session): session.address
-        case .rdp(let session): session.profile.address
+        case .rdp(let session): session.address
+        case .vnc(let session): session.address
         }
     }
     var name: String {
         switch self {
         case .ssh(let session): session.name
         case .rdp(let session): session.name
+        case .vnc(let session): session.name
         }
     }
 }
@@ -78,11 +94,13 @@ final class Manager: ObservableObject {
     private var reconnectAttempts: [String: Int] = [:]
     @Published private(set) var sessions: [TerminalSession] = []
     @Published private(set) var desktopSessions: [DesktopSession] = []
+    @Published private(set) var vncSessions: [VncSession] = []
     @Published var notice: Notice?
     @Published var editor: ProfileEditorState?
     @Published var groupEditor: GroupEditorState?
     @Published var catalogProtocol: ConnectionProtocol = .ssh
     @Published var desktopEditor: DesktopEditorState?
+    @Published var vncEditor: VncEditorState?
     @Published var choosingServer = false
     @Published var backupPassword: BackupPasswordRequest?
     /// «Найти сервер»: shared with the footer for «Найдено: X из N».
@@ -160,6 +178,7 @@ final class Manager: ObservableObject {
 
     static func key(_ profile: Profile) -> String { "ssh:" + profile.id }
     static func key(_ desktop: DesktopProfile) -> String { "rdp:" + desktop.id }
+    static func key(_ profile: VncProfile) -> String { "vnc:" + profile.id }
 
     func isFavorite(_ key: String) -> Bool { settings.favorites.contains(key) }
 
@@ -183,7 +202,20 @@ final class Manager: ObservableObject {
     func quickConnect(_ text: String) {
         do {
             let target = try QuickTarget(text)
-            if target.rdp {
+            if target.kind == .vnc {
+                var profile = VncProfile(group: currentGroup?.id)
+                profile.name = String(target.host.prefix(80))
+                profile.host = target.host
+                profile.port = target.port
+                profile.user = target.user
+                try profile.validate()
+                connectVnc(profile, new: true)
+                notice = Notice(title: "SSH Manager", text: "Сохранить подключение «\(target.host)»?") { [weak self] in
+                    do { try self?.storeVnc(profile, editing: false) } catch { self?.show(error) }
+                }
+                return
+            }
+            if target.kind == .rdp {
                 var desktop = DesktopProfile(group: currentGroup?.id)
                 desktop.name = target.host
                 desktop.host = target.host
@@ -245,7 +277,15 @@ final class Manager: ObservableObject {
         var names = profiles.map(\.alias)
         for item in chosen {
             do {
-                if item.rdp {
+                if item.kind == .vnc {
+                    var profile = VncProfile(group: currentGroup?.id)
+                    profile.name = String((item.name.isEmpty ? item.host : item.name).prefix(80))
+                    profile.host = item.host
+                    profile.port = item.port
+                    profile.user = item.user
+                    try profile.validate()
+                    try storeVnc(profile, editing: false)
+                } else if item.kind == .rdp {
                     var desktop = DesktopProfile(group: currentGroup?.id)
                     desktop.name = String((item.name.isEmpty ? item.host : item.name).prefix(80))
                     desktop.host = item.host
@@ -296,9 +336,14 @@ final class Manager: ObservableObject {
     }
     func group(of desktop: DesktopProfile) -> ServerGroup? { settings.groups.first { $0.id == desktop.group } }
 
+    func group(of profile: VncProfile) -> ServerGroup? { settings.groups.first { $0.id == profile.group } }
+
     var currentSort: ServerSort {
-        if catalogProtocol == .rdp { return currentGroup?.rdpSort ?? settings.rdpSort }
-        return currentGroup?.sshSort ?? settings.sshSort
+        switch catalogProtocol {
+        case .ssh: currentGroup?.sshSort ?? settings.sshSort
+        case .rdp: currentGroup?.rdpSort ?? settings.rdpSort
+        case .vnc: currentGroup?.vncSort ?? settings.vncSort
+        }
     }
 
     /// Header click: ascending → descending → original order (src/ConnectionsWindow.cs:301-308).
@@ -314,12 +359,17 @@ final class Manager: ObservableObject {
         updateSettings { latest in
             if let group {
                 guard let index = latest.groups.firstIndex(where: { $0.id == group }) else { return }
-                if kind == .ssh { latest.groups[index].sshSort = order }
-                else { latest.groups[index].rdpSort = order }
-            } else if kind == .ssh {
-                latest.sshSort = order
+                switch kind {
+                case .ssh: latest.groups[index].sshSort = order
+                case .rdp: latest.groups[index].rdpSort = order
+                case .vnc: latest.groups[index].vncSort = order
+                }
             } else {
-                latest.rdpSort = order
+                switch kind {
+                case .ssh: latest.sshSort = order
+                case .rdp: latest.rdpSort = order
+                case .vnc: latest.vncSort = order
+                }
             }
         }
     }
@@ -449,6 +499,9 @@ final class Manager: ObservableObject {
                 for index in $0.desktops.indices where $0.desktops[index].group == group.id {
                     $0.desktops[index].group = nil
                 }
+                for index in $0.vnc.indices where $0.vnc[index].group == group.id {
+                    $0.vnc[index].group = nil
+                }
                 if $0.startup == group.id { $0.startup = nil }
             }
             if self.destination == .group(group.id) { self.destination = .all }
@@ -480,10 +533,10 @@ final class Manager: ObservableObject {
     }
 
     func addCatalogEntry() {
-        if catalogProtocol == .ssh {
-            editor = ProfileEditorState()
-        } else {
-            desktopEditor = DesktopEditorState(original: nil, group: currentGroup?.id)
+        switch catalogProtocol {
+        case .ssh: editor = ProfileEditorState()
+        case .rdp: desktopEditor = DesktopEditorState(original: nil, group: currentGroup?.id)
+        case .vnc: vncEditor = VncEditorState(original: nil, group: currentGroup?.id)
         }
     }
 
@@ -563,22 +616,95 @@ final class Manager: ObservableObject {
         }
     }
 
+    // MARK: VNC profiles
+
+    func editVnc(_ profile: VncProfile) {
+        vncEditor = VncEditorState(original: profile, group: profile.group)
+    }
+
+    func hasVncPassword(_ profile: VncProfile) -> Bool {
+        (try? Passwords.read(profile.keychainAccount)) != nil
+    }
+
+    func saveVnc(_ profile: VncProfile, editing: Bool, password: String, removePassword: Bool) throws {
+        try profile.validate()
+        if !profile.via.isEmpty, !profiles.contains(where: { $0.alias.caseInsensitiveCompare(profile.via) == .orderedSame }) {
+            throw ManagerError("Выберите SSH-сервер из списка или «Напрямую».")
+        }
+        guard password.utf8.count <= 1022, !password.contains(where: \.isNewline), !password.contains("\0")
+        else { throw ManagerError("Пароль слишком длинный или содержит недопустимые символы.") }
+        guard !password.isEmpty || removePassword else { try storeVnc(profile, editing: editing); return }
+        let before = try Passwords.read(profile.keychainAccount)
+        try Passwords.set(removePassword ? nil : password, for: profile.keychainAccount)
+        do { try storeVnc(profile, editing: editing) }
+        catch {
+            do { try Passwords.set(before, for: profile.keychainAccount) }
+            catch let keychainError { throw ManagerError(error.localizedDescription + "\n" + keychainError.localizedDescription) }
+            throw error
+        }
+    }
+
+    private func storeVnc(_ profile: VncProfile, editing: Bool) throws {
+        var latest = try ManagerSettings.load()
+        if let group = profile.group, !latest.groups.contains(where: { $0.id == group }) {
+            throw ManagerError("Эта вкладка уже удалена.")
+        }
+        if editing {
+            guard let index = latest.vnc.firstIndex(where: { $0.id == profile.id }) else {
+                throw ManagerError("VNC-подключение уже удалено.")
+            }
+            latest.vnc[index] = profile
+        } else {
+            latest.vnc.append(profile)
+        }
+        try latest.save()
+        settings = latest
+    }
+
+    func removeVnc(_ profile: VncProfile) {
+        notice = Notice(title: "SSH Manager", text: "Удалить VNC-подключение «\(profile.name)»?") { [weak self] in
+            guard let self else { return }
+            do {
+                var latest = try ManagerSettings.load()
+                latest.vnc.removeAll { $0.id == profile.id }
+                latest.favorites.removeAll { $0 == Self.key(profile) }
+                latest.recent.removeAll { $0.key == Self.key(profile) }
+                try latest.save()
+                self.settings = latest
+                if self.destination == .favorites && latest.favorites.isEmpty { self.destination = .all }
+                try Passwords.set(nil, for: profile.keychainAccount)
+            } catch { self.show(error) }
+        }
+    }
+
+    func moveVnc(_ profile: VncProfile, to group: String?) {
+        updateSettings { latest in
+            guard let index = latest.vnc.firstIndex(where: { $0.id == profile.id }),
+                  group == nil || latest.groups.contains(where: { $0.id == group }) else {
+                throw ManagerError("Подключение или вкладка уже удалены.")
+            }
+            latest.vnc[index].group = group
+        }
+    }
+
     // MARK: sessions
 
     var entries: [SessionEntry] {
         order.compactMap { id in
             if let session = sessions.first(where: { $0.id == id }) { return .ssh(session) }
             if let session = desktopSessions.first(where: { $0.id == id }) { return .rdp(session) }
+            if let session = vncSessions.first(where: { $0.id == id }) { return .vnc(session) }
             return nil
         }
     }
 
     var activeEntry: SessionEntry? { entries.first { $0.id == activeSession } }
 
-    var liveCount: Int { sessions.filter(\.live).count + desktopSessions.filter(\.live).count }
+    var liveCount: Int { entries.filter(\.live).count }
 
     func liveCount(for profile: Profile) -> Int { sessions.filter { $0.profile.id == profile.id && $0.live }.count }
     func liveCount(for desktop: DesktopProfile) -> Int { desktopSessions.filter { $0.profile.id == desktop.id && $0.live }.count }
+    func liveCount(for profile: VncProfile) -> Int { vncSessions.filter { $0.profile.id == profile.id && $0.live }.count }
 
     func connect(_ profile: Profile, new: Bool = false, noForwarding: Bool = false) {
         let related = sessions.filter { $0.profile.id == profile.id }
@@ -658,10 +784,31 @@ final class Manager: ObservableObject {
         session.start()
     }
 
+    func connectVnc(_ profile: VncProfile, new: Bool = false) {
+        if settings.vnc.contains(where: { $0.id == profile.id }) { recordRecent(Self.key(profile)) }
+        let related = vncSessions.filter { $0.profile.id == profile.id }
+        if !new, let latest = lastSessions.compactMap({ id in related.first { $0.id == id && $0.live } }).first {
+            activate(latest.id)
+            return
+        }
+        do {
+            let password = try Passwords.read(profile.keychainAccount)
+            let number = (related.map(\.number).max() ?? 0) + 1
+            let session = VncSession(profile: profile, number: number, password: password) { [weak self] alias in
+                self?.profiles.first { $0.alias.caseInsensitiveCompare(alias) == .orderedSame }
+            }
+            vncSessions.append(session)
+            order.append(session.id)
+            activate(session.id)
+            session.start()
+        } catch { show(error) }
+    }
+
     func duplicate(_ entry: SessionEntry, noForwarding: Bool? = nil) {
         switch entry {
         case .ssh(let session): connect(session.profile, new: true, noForwarding: noForwarding ?? session.noForwarding)
         case .rdp(let session): openDesktop(session.profile, user: session.user, domain: session.domain, password: session.password)
+        case .vnc(let session): connectVnc(session.profile, new: true)
         }
     }
 
@@ -669,6 +816,7 @@ final class Manager: ObservableObject {
     func reconnect(_ entry: SessionEntry, automatic: Bool = false) {
         switch entry {
         case .rdp(let session): session.start()
+        case .vnc(let session): session.start()
         case .ssh(let old):
             pendingReconnect[old.id] = nil
             if !automatic { reconnectAttempts[Self.key(old.profile)] = 0 }
@@ -676,7 +824,13 @@ final class Manager: ObservableObject {
         }
     }
 
-    func fullScreen(_ session: DesktopSession) { session.start(fullScreen: true) }
+    func fullScreen(_ entry: SessionEntry) {
+        switch entry {
+        case .ssh: break
+        case .rdp(let session): session.start(fullScreen: true)
+        case .vnc(let session): session.start(fullScreen: true)
+        }
+    }
 
     func activate(_ id: UUID) {
         lastSessions.removeAll { $0 == id }
@@ -715,6 +869,9 @@ final class Manager: ObservableObject {
         case .rdp(let session):
             session.stop()
             desktopSessions.removeAll { $0.id == session.id }
+        case .vnc(let session):
+            session.stop()
+            vncSessions.removeAll { $0.id == session.id }
         }
         order.removeAll { $0 == entry.id }
         lastSessions.removeAll { $0 == entry.id }
@@ -727,6 +884,7 @@ final class Manager: ObservableObject {
         switch entry {
         case .ssh(let session): siblings = sessions.filter { $0.profile.id == session.profile.id && $0.id != session.id }.map(\.name)
         case .rdp(let session): siblings = desktopSessions.filter { $0.profile.id == session.profile.id && $0.id != session.id }.map(\.name)
+        case .vnc(let session): siblings = vncSessions.filter { $0.profile.id == session.profile.id && $0.id != session.id }.map(\.name)
         }
         if name.unicodeScalars.contains(where: CharacterSet.controlCharacters.contains) ||
             (!name.isEmpty && siblings.contains { $0.caseInsensitiveCompare(name) == .orderedSame }) {
@@ -735,6 +893,7 @@ final class Manager: ObservableObject {
         switch entry {
         case .ssh(let session): session.name = name
         case .rdp(let session): session.name = name
+        case .vnc(let session): session.name = name
         }
         objectWillChange.send()
     }
@@ -773,6 +932,12 @@ struct GroupEditorState: Identifiable {
 struct DesktopEditorState: Identifiable {
     let id = UUID()
     var original: DesktopProfile?
+    var group: String?
+}
+
+struct VncEditorState: Identifiable {
+    let id = UUID()
+    var original: VncProfile?
     var group: String?
 }
 

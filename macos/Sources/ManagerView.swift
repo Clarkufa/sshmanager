@@ -118,6 +118,12 @@ private struct ManagerView: View {
                 try manager.saveDesktop($0, editing: state.original != nil, password: $1, removePassword: $2)
             }
         }
+        .sheet(item: $manager.vncEditor) { state in
+            VncEditor(state: state, hasPassword: state.original.map(manager.hasVncPassword) ?? false,
+                      sshAliases: manager.profiles.map(\.alias)) {
+                try manager.saveVnc($0, editing: state.original != nil, password: $1, removePassword: $2)
+            }
+        }
         .sheet(item: $manager.logonRequest) { request in LogonSheet(request: request) }
         .sheet(isPresented: $manager.choosingServer) { ServerPicker(manager: manager) }
         .sheet(item: $manager.backupPassword) { request in BackupPasswordSheet(request: request) }
@@ -259,6 +265,12 @@ private struct CatalogModel {
         return manager.settings.desktops.filter { $0.group == group.id }
     }
 
+    var groupVnc: [VncProfile] {
+        if favorites { return manager.settings.vnc.filter { manager.isFavorite(Manager.key($0)) } }
+        guard let group = manager.currentGroup else { return manager.settings.vnc }
+        return manager.settings.vnc.filter { $0.group == group.id }
+    }
+
     var profiles: [Profile] {
         let search = query.trimmingCharacters(in: .whitespacesAndNewlines)
         let filtered = groupProfiles.filter { profile in
@@ -277,9 +289,21 @@ private struct CatalogModel {
         return manager.currentSort.apply(filtered, name: \.name, host: \.host)
     }
 
+    var vnc: [VncProfile] {
+        let search = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        let filtered = groupVnc.filter { profile in
+            search.isEmpty || [profile.name, profile.address, profile.user, manager.group(of: profile)?.name ?? ""]
+                .contains { $0.localizedCaseInsensitiveContains(search) }
+        }
+        return manager.currentSort.apply(filtered, name: \.name, host: \.host)
+    }
+
     var statusText: String {
-        let total = manager.catalogProtocol == .ssh ? groupProfiles.count : groupDesktops.count
-        let shown = manager.catalogProtocol == .ssh ? profiles.count : desktops.count
+        let (total, shown) = switch manager.catalogProtocol {
+        case .ssh: (groupProfiles.count, profiles.count)
+        case .rdp: (groupDesktops.count, desktops.count)
+        case .vnc: (groupVnc.count, vnc.count)
+        }
         return shown == total ? "Подключений: \(total)" : "Найдено: \(shown) из \(total)"
     }
 }
@@ -291,11 +315,10 @@ private struct CatalogPage: View {
     @Environment(\.colorScheme) private var scheme
 
     var body: some View {
-        let rdp = manager.catalogProtocol == .rdp
         let query = manager.catalogQuery
         let model = CatalogModel(manager: manager, query: query)
         VStack(alignment: .leading, spacing: 0) {
-            PageHeader(title: rdp ? "RDP-подключения" : "SSH-подключения") {
+            PageHeader(title: manager.catalogProtocol.rawValue + "-подключения") {
                 Button { manager.editingSettings = true } label: {
                     ViewThatFits(in: .horizontal) {
                         GlyphLabel(title: "Настройки", glyph: .settings, kind: .quiet)
@@ -323,7 +346,7 @@ private struct CatalogPage: View {
                 QuickConnectField(manager: manager)
             }.padding(.bottom, 6)
             TabStrip(manager: manager)
-            tools(rdp: rdp, model: model)
+            tools(model: model)
             ServerTable(manager: manager, model: model, selection: $selection, query: query)
         }
         .padding(.horizontal, 24)
@@ -338,7 +361,7 @@ private struct CatalogPage: View {
         }
     }
 
-    private func tools(rdp: Bool, model: CatalogModel) -> some View {
+    private func tools(model: CatalogModel) -> some View {
         HStack(spacing: 4) {
             SearchField(placeholder: "Найти сервер", text: $manager.catalogQuery, focus: $searchFocused).frame(width: 265)
             Spacer()
@@ -361,18 +384,26 @@ private struct CatalogPage: View {
     }
 
     private func editSelected(_ model: CatalogModel) {
-        if manager.catalogProtocol == .rdp, let profile = model.desktops.first(where: { $0.id == selection }) {
-            manager.desktopEditor = DesktopEditorState(original: profile, group: profile.group)
-        } else if let profile = model.profiles.first(where: { $0.id == selection }) {
-            manager.editor = ProfileEditorState(original: profile)
+        switch manager.catalogProtocol {
+        case .ssh:
+            if let profile = model.profiles.first(where: { $0.id == selection }) { manager.editor = ProfileEditorState(original: profile) }
+        case .rdp:
+            if let profile = model.desktops.first(where: { $0.id == selection }) {
+                manager.desktopEditor = DesktopEditorState(original: profile, group: profile.group)
+            }
+        case .vnc:
+            if let profile = model.vnc.first(where: { $0.id == selection }) { manager.editVnc(profile) }
         }
     }
 
     private func deleteSelected(_ model: CatalogModel) {
-        if manager.catalogProtocol == .rdp, let profile = model.desktops.first(where: { $0.id == selection }) {
-            manager.removeDesktop(profile)
-        } else if let profile = model.profiles.first(where: { $0.id == selection }) {
-            manager.remove(profile)
+        switch manager.catalogProtocol {
+        case .ssh:
+            if let profile = model.profiles.first(where: { $0.id == selection }) { manager.remove(profile) }
+        case .rdp:
+            if let profile = model.desktops.first(where: { $0.id == selection }) { manager.removeDesktop(profile) }
+        case .vnc:
+            if let profile = model.vnc.first(where: { $0.id == selection }) { manager.removeVnc(profile) }
         }
     }
 }
@@ -476,6 +507,7 @@ private struct ServerTable: View {
         let sessions: Int
         let ssh: Profile?
         let rdp: DesktopProfile?
+        let vnc: VncProfile?
     }
 
     private var rows: [Row] {
@@ -483,13 +515,20 @@ private struct ServerTable: View {
             return model.desktops.map { desktop in
                 Row(id: desktop.id, name: desktop.name, address: desktop.host, user: desktop.account.isEmpty ? "—" : desktop.account,
                     port: String(desktop.port), tab: manager.group(of: desktop)?.name ?? "—",
-                    sessions: manager.liveCount(for: desktop), ssh: nil, rdp: desktop)
+                    sessions: manager.liveCount(for: desktop), ssh: nil, rdp: desktop, vnc: nil)
+            }
+        }
+        if manager.catalogProtocol == .vnc {
+            return model.vnc.map { profile in
+                Row(id: profile.id, name: profile.name, address: profile.host, user: profile.user.isEmpty ? "—" : profile.user,
+                    port: String(profile.port), tab: manager.group(of: profile)?.name ?? "—",
+                    sessions: manager.liveCount(for: profile), ssh: nil, rdp: nil, vnc: profile)
             }
         }
         return model.profiles.map { profile in
             Row(id: profile.id, name: profile.alias, address: profile.host.isEmpty ? "—" : profile.host,
                 user: profile.user.isEmpty ? "—" : profile.user, port: profile.port.isEmpty ? "—" : profile.port,
-                tab: manager.group(of: profile)?.name ?? "—", sessions: manager.liveCount(for: profile), ssh: profile, rdp: nil)
+                tab: manager.group(of: profile)?.name ?? "—", sessions: manager.liveCount(for: profile), ssh: profile, rdp: nil, vnc: nil)
         }
     }
 
@@ -525,6 +564,7 @@ private struct ServerTable: View {
         if !query.trimmingCharacters(in: .whitespaces).isEmpty { return "По вашему запросу ничего не найдено." }
         if manager.destination == .favorites { return "Отметьте серверы звёздочкой: «В избранное» в меню строки." }
         if manager.catalogProtocol == .rdp { return "Добавьте RDP-подключение или импортируйте профиль .rdp." }
+        if manager.catalogProtocol == .vnc { return "Добавьте VNC-подключение." }
         if manager.currentGroup != nil { return "Добавьте сервер или перенесите сюда подключение из «Все серверы»." }
         return "Добавьте сервер, чтобы создать первое подключение."
     }
@@ -581,7 +621,8 @@ private struct ServerTable: View {
         let selected = selection == row.id
         return HStack(spacing: 0) {
             HStack(spacing: 8) {
-                if manager.isFavorite(row.ssh.map { Manager.key($0) } ?? row.rdp.map { Manager.key($0) } ?? "") {
+                if manager.isFavorite(row.ssh.map { Manager.key($0) } ?? row.rdp.map { Manager.key($0) }
+                    ?? row.vnc.map { Manager.key($0) } ?? "") {
                     GlyphView(glyph: .star, color: GroupMarker.amber.color)
                 } else {
                     GlyphView(glyph: .server, color: palette.teal)
@@ -599,6 +640,7 @@ private struct ServerTable: View {
             pill(row.sessions > 0 ? "К сеансу · \(row.sessions)" : "Подключиться", glyph: .terminal, palette: palette) {
                 if let profile = row.ssh { manager.connect(profile) }
                 if let desktop = row.rdp { manager.connectDesktop(desktop) }
+                if let profile = row.vnc { manager.connectVnc(profile) }
             }.frame(width: widths[6])
         }
         .frame(height: 45)
@@ -610,6 +652,7 @@ private struct ServerTable: View {
         .contextMenu {
             if let profile = row.ssh { sshMenu(profile) }
             if let desktop = row.rdp { rdpMenu(desktop) }
+            if let profile = row.vnc { vncMenu(profile) }
         }
     }
 
@@ -637,6 +680,7 @@ private struct ServerTable: View {
         selection = row.id
         if let profile = row.ssh { manager.editor = ProfileEditorState(original: profile) }
         if let desktop = row.rdp { manager.desktopEditor = DesktopEditorState(original: desktop, group: desktop.group) }
+        if let profile = row.vnc { manager.editVnc(profile) }
     }
 
     @ViewBuilder
@@ -694,6 +738,26 @@ private struct ServerTable: View {
         Button { manager.transferDesktop(desktop) } label: { Label("Экспорт .rdp…", systemImage: "doc.on.doc") }
         Divider()
         Button(role: .destructive) { manager.removeDesktop(desktop) } label: { Label("Удалить", systemImage: "trash") }
+    }
+    @ViewBuilder
+    private func vncMenu(_ profile: VncProfile) -> some View {
+        Button { manager.connectVnc(profile) } label: { Label("Подключиться", systemImage: "server.rack") }
+        Button { manager.connectVnc(profile, new: true) } label: { Label("Новый сеанс", systemImage: "plus") }
+        Button { manager.connectVnc(profile, new: true) } label: { Label("Открыть в отдельном окне", systemImage: "macwindow") }
+        Button { manager.editVnc(profile) } label: { Label("Изменить", systemImage: "pencil") }
+        favoriteItem(Manager.key(profile))
+        Menu {
+            Button { manager.moveVnc(profile, to: nil) } label: {
+                if profile.group == nil { Label("Без вкладки", systemImage: "checkmark") } else { Text("Без вкладки") }
+            }
+            ForEach(manager.settings.groups) { group in
+                Button { manager.moveVnc(profile, to: group.id) } label: {
+                    if profile.group == group.id { Label(group.name, systemImage: "checkmark") } else { Text(group.name) }
+                }
+            }
+        } label: { Label("Переместить во вкладку", systemImage: "arrow.right") }
+        Divider()
+        Button(role: .destructive) { manager.removeVnc(profile) } label: { Label("Удалить", systemImage: "trash") }
     }
 }
 
@@ -757,6 +821,7 @@ private struct SessionsPage: View {
         switch entry {
         case .ssh(let session): manager.group(of: session.profile)?.name ?? ""
         case .rdp(let session): manager.group(of: session.profile)?.name ?? ""
+        case .vnc(let session): manager.group(of: session.profile)?.name ?? ""
         }
     }
 
@@ -765,6 +830,7 @@ private struct SessionsPage: View {
         switch entry {
         case .ssh(let session): marker = manager.group(of: session.profile)?.marker
         case .rdp(let session): marker = manager.group(of: session.profile)?.marker
+        case .vnc(let session): marker = manager.group(of: session.profile)?.marker
         }
         return marker?.color ?? palette.teal
     }
@@ -780,7 +846,8 @@ private struct SessionListRow: View {
     var body: some View {
         switch entry {
         case .ssh(let session): SSHRow(session: session, color: color, selected: selected, palette: palette)
-        case .rdp(let session): RDPRow(session: session, color: color, selected: selected, palette: palette)
+        case .rdp(let session): RemoteRow(session: session, protocolName: "RDP", color: color, selected: selected, palette: palette)
+        case .vnc(let session): RemoteRow(session: session, protocolName: "VNC", color: color, selected: selected, palette: palette)
         }
     }
 }
@@ -796,13 +863,14 @@ private struct SSHRow: View {
     }
 }
 
-private struct RDPRow: View {
-    @ObservedObject var session: DesktopSession
+private struct RemoteRow<Session: RemoteDesktopSession>: View {
+    @ObservedObject var session: Session
+    let protocolName: String
     let color: Color
     let selected: Bool
     let palette: Palette
     var body: some View {
-        RowLayout(title: session.title, subtitle: "RDP · " + (session.live ? session.profile.address : "Сеанс завершён"),
+        RowLayout(title: session.title, subtitle: protocolName + " · " + (session.live ? session.address : "Сеанс завершён"),
                   color: session.live ? color : palette.line, selected: selected, palette: palette)
     }
 }
@@ -843,13 +911,19 @@ private struct SessionMenu: View {
                 }
             }
         case .rdp(let session):
-            if session.live && session.usesFreeRDP {
-                Button { manager.fullScreen(session) } label: { Label("Полноэкранный режим RDP", systemImage: "rectangle.inset.filled") }
-            }
-            Button { manager.reconnect(entry) } label: { Label("Переподключить", systemImage: "arrow.clockwise") }
+            remoteActions(fullScreen: session.live && session.supportsFullScreen, label: "Полноэкранный режим RDP")
+        case .vnc(let session):
+            remoteActions(fullScreen: session.live && session.supportsFullScreen, label: "Весь экран")
         }
         Divider()
         Button(role: .destructive) { manager.closeSession(entry) } label: { Label("Закрыть сеанс", systemImage: "trash") }
+    }
+    @ViewBuilder
+    private func remoteActions(fullScreen: Bool, label: String) -> some View {
+        if fullScreen {
+            Button { manager.fullScreen(entry) } label: { Label(label, systemImage: "rectangle.inset.filled") }
+        }
+        Button { manager.reconnect(entry) } label: { Label("Переподключить", systemImage: "arrow.clockwise") }
     }
 }
 
@@ -862,8 +936,9 @@ private struct SessionInfo: View {
     var body: some View {
         switch entry {
         case .ssh(let session): SSHInfo(manager: manager, session: session, entry: entry!, groupName: groupName)
-        case .rdp(let session): RDPInfo(manager: manager, session: session, entry: entry!, groupName: groupName)
-        case nil: InfoLayout(title: "Сеансы SSH и RDP", detail: "") { EmptyView() }
+        case .rdp(let session): RemoteInfo(manager: manager, session: session, entry: entry!, groupName: groupName)
+        case .vnc(let session): RemoteInfo(manager: manager, session: session, entry: entry!, groupName: groupName, route: session.route)
+        case nil: InfoLayout(title: "Сеансы SSH, RDP и VNC", detail: "") { EmptyView() }
         }
     }
 }
@@ -908,17 +983,18 @@ private struct SSHInfo: View {
     }
 }
 
-private struct RDPInfo: View {
+private struct RemoteInfo<Session: RemoteDesktopSession>: View {
     @ObservedObject var manager: Manager
-    @ObservedObject var session: DesktopSession
+    @ObservedObject var session: Session
     let entry: SessionEntry
     let groupName: String
+    var route = ""
 
     var body: some View {
-        InfoLayout(title: session.title, detail: detailLine(["RDP", session.profile.address, groupName, session.status])) {
+        InfoLayout(title: session.title, detail: detailLine([entry.protocolName, session.address, groupName, session.status, route])) {
             Button { manager.reconnect(entry) } label: { GlyphLabel(title: "Переподключить", glyph: .refresh) }.winButton(.outline)
-            Button { manager.fullScreen(session) } label: { GlyphLabel(title: "Весь экран", glyph: .server) }
-                .winButton(.outline).disabled(!session.live || !session.usesFreeRDP)
+            Button { manager.fullScreen(entry) } label: { GlyphLabel(title: "Весь экран", glyph: .server) }
+                .winButton(.outline).disabled(!session.live || !session.supportsFullScreen)
             Button { manager.duplicate(entry) } label: { GlyphLabel(title: "Новый сеанс этого сервера", glyph: .plus) }.winButton(.quiet)
             Button { manager.closeSession(entry) } label: { GlyphLabel(title: "Закрыть", glyph: nil, danger: true) }
                 .winButton(.quiet, danger: true)
@@ -935,7 +1011,8 @@ private struct SessionContent: View {
             Palette.terminalBackground
             switch entry {
             case .ssh(let session): SSHContent(manager: manager, session: session, entry: entry!).id(session.id)
-            case .rdp(let session): RDPContent(manager: manager, session: session, entry: entry!)
+            case .rdp(let session): RemoteContent(manager: manager, session: session, entry: entry!)
+            case .vnc(let session): RemoteContent(manager: manager, session: session, entry: entry!)
             case nil:
                 Text("Выберите сервер в каталоге, чтобы начать сеанс.").foregroundStyle(Palette.terminalText)
             }
@@ -1021,7 +1098,7 @@ private struct QuickConnectField: View {
         let palette = Palette.of(scheme)
         HStack(spacing: 8) {
             GlyphView(glyph: .terminal, color: palette.muted)
-            TextField("Быстрое подключение: user@host или rdp://host", text: $text)
+            TextField("Быстрое подключение: user@host, rdp:// или vnc://", text: $text)
                 .textFieldStyle(.plain)
                 .focused($focused)
                 .onSubmit {
@@ -1042,10 +1119,10 @@ private struct QuickConnectField: View {
     }
 }
 
-/// The dark area of an RDP session: where the desktop opened, or why it ended with «Переподключить» / «Закрыть сеанс».
-private struct RDPContent: View {
+/// Shows where the desktop opened or why the connection ended.
+private struct RemoteContent<Session: RemoteDesktopSession>: View {
     @ObservedObject var manager: Manager
-    @ObservedObject var session: DesktopSession
+    @ObservedObject var session: Session
     let entry: SessionEntry
 
     var body: some View {
@@ -1444,6 +1521,88 @@ private struct DesktopEditor: View {
     }
 }
 
+private struct VncEditor: View {
+    @Environment(\.dismiss) private var dismiss
+    @Environment(\.colorScheme) private var scheme
+    @State private var profile: VncProfile
+    @State private var port: String
+    @State private var error = ""
+    @State private var password = ""
+    @State private var removePassword = false
+    let creating: Bool
+    let hasPassword: Bool
+    let sshAliases: [String]
+    let save: (VncProfile, String, Bool) throws -> Void
+
+    init(state: VncEditorState, hasPassword: Bool, sshAliases: [String],
+         save: @escaping (VncProfile, String, Bool) throws -> Void) {
+        creating = state.original == nil
+        self.hasPassword = hasPassword
+        self.sshAliases = sshAliases
+        self.save = save
+        var start = state.original ?? VncProfile(group: state.group)
+        start.via = sshAliases.first { $0.caseInsensitiveCompare(start.via) == .orderedSame } ?? start.via
+        _profile = State(initialValue: start)
+        _port = State(initialValue: String(start.port))
+    }
+
+    var body: some View {
+        let palette = Palette.of(scheme)
+        VStack(alignment: .leading, spacing: 10) {
+            Text(creating ? "Новое VNC-подключение" : "Изменить VNC-подключение").font(.title2.weight(.semibold))
+            Grid(alignment: .leading, horizontalSpacing: 12, verticalSpacing: 8) {
+                GridRow { Text("Название"); TextField("", text: $profile.name) }
+                GridRow { Text("Адрес"); TextField("", text: $profile.host) }
+                GridRow { Text("Порт"); TextField("5900", text: $port) }
+                GridRow { Text("Пользователь"); TextField("", text: $profile.user) }
+                GridRow { Text("Пароль"); SecureField("", text: $password).disabled(removePassword) }
+                GridRow {
+                    Color.clear.frame(width: 1, height: 1)
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text(hasPassword ? "Сохранён. Пустое поле — не менять." : "Необязательно. Хранится в Связке ключей.")
+                        Text("VNC-пароль: учитываются первые 8 символов.")
+                        if hasPassword { Toggle("Удалить пароль", isOn: $removePassword) }
+                    }.foregroundStyle(palette.muted).font(.callout)
+                }
+                GridRow {
+                    Text("Через SSH-сервер")
+                    Picker("Через SSH-сервер", selection: $profile.via) {
+                        Text("Напрямую").tag("")
+                        if !profile.via.isEmpty && !sshAliases.contains(profile.via) { Text(profile.via).tag(profile.via) }
+                        ForEach(sshAliases, id: \.self) { Text($0).tag($0) }
+                    }.labelsHidden()
+                }
+                GridRow {
+                    Text("Масштаб")
+                    Picker("Масштаб", selection: $profile.scale) {
+                        ForEach(VncProfile.Scale.allCases, id: \.self) { Text($0.title).tag($0) }
+                    }.labelsHidden()
+                }
+                GridRow { Color.clear.frame(width: 1, height: 1); Toggle("Только просмотр", isOn: $profile.viewOnly) }
+                GridRow { Color.clear.frame(width: 1, height: 1); Toggle("Общий буфер обмена", isOn: $profile.clipboard) }
+                GridRow { Color.clear.frame(width: 1, height: 1); Toggle("Открывать на весь экран", isOn: $profile.fullScreen) }
+            }.textFieldStyle(.roundedBorder)
+            if !error.isEmpty { Text(error).foregroundStyle(palette.danger).font(.callout) }
+            DialogButtons(commit: "Сохранить", cancel: { dismiss() }, submit: submit)
+        }.padding(22).frame(width: 565)
+    }
+
+    private func submit() {
+        let trim: (String) -> String = { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+        var value = profile
+        value.name = trim(value.name)
+        value.host = trim(value.host).trimmingCharacters(in: CharacterSet(charactersIn: "[]"))
+        value.user = trim(value.user)
+        guard let parsedPort = trim(port).isEmpty ? 5900 : Int(trim(port)) else {
+            error = "Укажите порт от 1 до 65535."
+            return
+        }
+        value.port = parsedPort
+        do { try save(value, removePassword ? "" : password, removePassword); dismiss() }
+        catch { self.error = error.localizedDescription }
+    }
+}
+
 /// «Вход: имя» before an RDP connection without a saved password (docs/ui-spec.md §4.3).
 private struct LogonSheet: View {
     @Environment(\.dismiss) private var dismiss
@@ -1525,6 +1684,7 @@ private struct ServerPicker: View {
         let color: Color?
         let ssh: Profile?
         let rdp: DesktopProfile?
+        let vnc: VncProfile?
     }
 
     private var everything: [Choice] {
@@ -1532,13 +1692,20 @@ private struct ServerPicker: View {
             return manager.profiles.map { profile in
                 let group = manager.group(of: profile)
                 return Choice(id: "ssh:" + profile.id, name: profile.alias, address: profile.address, group: group?.name ?? "",
-                              color: group?.marker?.color, ssh: profile, rdp: nil)
+                              color: group?.marker?.color, ssh: profile, rdp: nil, vnc: nil)
+            }
+        }
+        if kind == .vnc {
+            return manager.settings.vnc.map { profile in
+                let group = manager.group(of: profile)
+                return Choice(id: Manager.key(profile), name: profile.name, address: profile.address, group: group?.name ?? "",
+                              color: group?.marker?.color, ssh: nil, rdp: nil, vnc: profile)
             }
         }
         return manager.settings.desktops.map { desktop in
             let group = manager.group(of: desktop)
             return Choice(id: "rdp:" + desktop.id, name: desktop.name, address: desktop.address, group: group?.name ?? "",
-                          color: group?.marker?.color, ssh: nil, rdp: desktop)
+                          color: group?.marker?.color, ssh: nil, rdp: desktop, vnc: nil)
         }
     }
 
@@ -1609,5 +1776,6 @@ private struct ServerPicker: View {
         dismiss()
         if let profile = choice.ssh { manager.connect(profile, new: true) }
         if let desktop = choice.rdp { manager.connectDesktop(desktop, new: true) }
+        if let profile = choice.vnc { manager.connectVnc(profile, new: true) }
     }
 }

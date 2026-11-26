@@ -18,7 +18,7 @@ struct SSHRequest {
         passwordHost = (try? Passwords.read(profile.account)) != nil ? profile.passwordHost : nil
     }
 
-    func arguments(sftp: Bool = false, noForwarding: Bool = false) -> [String] {
+    func arguments(sftp: Bool = false, noForwarding: Bool = false, tunnel: String? = nil) -> [String] {
         var result = ["-o", "ServerAliveInterval=15", "-o", "ServerAliveCountMax=3", "-o", "ConnectTimeout=15"]
         if let configURL { result += ["-F", configURL.path] }
         if let passwordHost {
@@ -30,6 +30,10 @@ struct SSHRequest {
         if sftp {
             result += ["-T", "-o", "RemoteCommand=none", "-o", "SessionType=subsystem",
                        "-o", "ControlMaster=no", "-o", "ControlPath=none", "-o", "BatchMode=no", "-s", "--", profile.alias, "sftp"]
+        } else if let tunnel {
+            result += ["-N", "-T", "-o", "ExitOnForwardFailure=yes", "-o", "RemoteCommand=none",
+                       "-o", "ControlMaster=no", "-o", "ControlPath=none", "-o", "ForkAfterAuthentication=no",
+                       "-L", tunnel, "--", profile.alias]
         } else if direct {
             if !profile.port.isEmpty { result += ["-p", profile.port] }
             if !profile.user.isEmpty { result += ["-l", profile.user] }

@@ -8,6 +8,7 @@ struct ServerGroup: Identifiable {
     var aliases: Set<String> = []
     var sshSort: ServerSort = .name
     var rdpSort: ServerSort = .original
+    var vncSort: ServerSort = .original
 
     init(id: String = UUID().uuidString.lowercased().replacingOccurrences(of: "-", with: ""), name: String, marker: GroupMarker? = nil) {
         self.id = id
@@ -96,7 +97,9 @@ struct ManagerSettings {
     var appearance: Appearance = .system
     var sshSort: ServerSort = .name
     var rdpSort: ServerSort = .original
+    var vncSort: ServerSort = .original
     var desktops: [DesktopProfile] = []
+    var vnc: [VncProfile] = []
 
     static let url = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
         .appendingPathComponent("SSH Manager/tabs.xml")
@@ -115,6 +118,7 @@ struct ManagerSettings {
         var settings = ManagerSettings()
         settings.sshSort = order("sshSort", on: root, fallback: .name)
         settings.rdpSort = order("rdpSort", on: root, fallback: .original)
+        settings.vncSort = order("vncSort", on: root, fallback: .original)
         if let theme = root.attribute(forName: "theme")?.stringValue { settings.appearance = Appearance(rawValue: theme) ?? .system }
         func text(_ key: String) -> String? { root.attribute(forName: key)?.stringValue }
         var preferences = Preferences()
@@ -128,7 +132,7 @@ struct ManagerSettings {
         preferences.checkUpdates = text("checkUpdates") != "0"
         settings.preferences = preferences
         settings.favorites = root.elements(forName: "favorite").compactMap { $0.attribute(forName: "key")?.stringValue }
-            .filter { $0.hasPrefix("ssh:") || $0.hasPrefix("rdp:") }
+            .filter { $0.hasPrefix("ssh:") || $0.hasPrefix("rdp:") || $0.hasPrefix("vnc:") }
         settings.recent = Array(root.elements(forName: "recent").compactMap { element -> RecentEntry? in
             guard let key = element.attribute(forName: "key")?.stringValue else { return nil }
             return RecentEntry(key: key, at: Int(element.attribute(forName: "at")?.stringValue ?? "") ?? 0)
@@ -151,6 +155,7 @@ struct ManagerSettings {
             var group = ServerGroup(id: id, name: name, marker: marker)
             group.sshSort = order("sshSort", on: element, fallback: .name)
             group.rdpSort = order("rdpSort", on: element, fallback: .original)
+            group.vncSort = order("vncSort", on: element, fallback: .original)
             for host in element.elements(forName: "host") {
                 guard let alias = host.attribute(forName: "alias")?.stringValue, Profile.validAlias(alias),
                       aliases.insert(alias.lowercased()).inserted
@@ -168,6 +173,12 @@ struct ManagerSettings {
             guard desktops.insert(profile.id).inserted else { throw ManagerError("RDP-профиль повторяется в настройках.") }
             settings.desktops.append(profile)
         }
+        var vncIDs: Set<String> = []
+        for element in root.elements(forName: "vnc") {
+            let profile = try VncProfile(element: element, groups: groups)
+            guard vncIDs.insert(profile.id).inserted else { throw ManagerError("VNC-профиль повторяется в настройках.") }
+            settings.vnc.append(profile)
+        }
         return settings
     }
 
@@ -177,6 +188,7 @@ struct ManagerSettings {
         if appearance != .system { Self.attribute("theme", value: appearance.rawValue, on: root) }
         Self.attribute("sshSort", value: sshSort.rawValue, on: root)
         Self.attribute("rdpSort", value: rdpSort.rawValue, on: root)
+        Self.attribute("vncSort", value: vncSort.rawValue, on: root)
         if !preferences.terminalFont.isEmpty { Self.attribute("terminalFont", value: preferences.terminalFont, on: root) }
         Self.attribute("terminalSize", value: String(preferences.terminalSize), on: root)
         Self.attribute("scrollback", value: String(preferences.scrollback), on: root)
@@ -209,6 +221,7 @@ struct ManagerSettings {
             if let marker = group.marker { Self.attribute("color", value: marker.rawValue, on: element) }
             Self.attribute("sshSort", value: group.sshSort.rawValue, on: element)
             Self.attribute("rdpSort", value: group.rdpSort.rawValue, on: element)
+            Self.attribute("vncSort", value: group.vncSort.rawValue, on: element)
             for alias in group.aliases.sorted() {
                 let host = XMLElement(name: "host")
                 Self.attribute("alias", value: alias, on: host)
@@ -218,6 +231,13 @@ struct ManagerSettings {
         }
         for profile in desktops {
             let element = XMLElement(name: "rdp")
+            for (key, value) in profile.fields.sorted(by: { $0.key < $1.key }) {
+                Self.attribute(key, value: value, on: element)
+            }
+            root.addChild(element)
+        }
+        for profile in vnc {
+            let element = XMLElement(name: "vnc")
             for (key, value) in profile.fields.sorted(by: { $0.key < $1.key }) {
                 Self.attribute(key, value: value, on: element)
             }

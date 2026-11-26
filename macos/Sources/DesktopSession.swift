@@ -1,9 +1,21 @@
 import AppKit
+import Combine
 import Foundation
+
+protocol RemoteDesktopSession: ObservableObject {
+    var title: String { get }
+    var address: String { get }
+    var live: Bool { get }
+    var status: String { get }
+    var external: String { get }
+    var endedTitle: String { get }
+    var endedDetail: String { get }
+    var supportsFullScreen: Bool { get }
+}
 
 /// An RDP connection shown in the sessions list. The desktop itself opens in FreeRDP's or Windows App's window,
 /// but the session keeps a status, can reconnect, go full screen and explains why it ended (docs/ui-spec.md §3.8).
-final class DesktopSession: ObservableObject, Identifiable {
+final class DesktopSession: RemoteDesktopSession, Identifiable {
     let id = UUID()
     let profile: DesktopProfile
     let number: Int
@@ -33,7 +45,8 @@ final class DesktopSession: ObservableObject, Identifiable {
         return number <= 1 ? profile.name : "\(profile.name) · \(number)"
     }
 
-    var usesFreeRDP: Bool { DesktopProfile.freeRDPClient() != nil }
+    var address: String { profile.address }
+    var supportsFullScreen: Bool { DesktopProfile.freeRDPClient() != nil }
 
     func start(fullScreen: Bool = false) {
         stopProcess()
