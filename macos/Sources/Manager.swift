@@ -120,6 +120,7 @@ final class Manager: ObservableObject {
     /// «Найти сервер»: shared with the footer for «Найдено: X из N».
     @Published var catalogQuery = ""
     @Published var logonRequest: DesktopLogonRequest?
+    @Published var knownHostsRequest: KnownHostsRequest?
     @Published var renaming: SessionEntry.ID?
     private let config = ConfigStore.standard
     private let catalogQueue = DispatchQueue(label: "sshmanager.catalog", qos: .userInitiated)
@@ -169,6 +170,29 @@ final class Manager: ObservableObject {
     func reloadAll() {
         reload()
         reloadSettings()
+    }
+
+    /// «Известные хосты» (docs/ui-spec.md §9.2): for a server — its file and its host in the search.
+    func openKnownHosts(_ focus: Profile?) {
+        let fallback = config.url.deletingLastPathComponent().appendingPathComponent("known_hosts")
+        let home = FileManager.default.homeDirectoryForCurrentUser.path
+        func short(_ path: String) -> String { path.hasPrefix(home + "/") ? "~" + path.dropFirst(home.count) : path }
+        var files = [KnownHostsRequest.Choice(path: fallback.path, title: short(fallback.path) + " (по умолчанию)")]
+        let users = Dictionary(grouping: profiles.filter { !$0.knownHosts.isEmpty }, by: \.knownHosts)
+        for (value, owners) in users.sorted(by: { $0.key < $1.key }) {
+            let path = KnownHostsFile.resolve(value, fallback: fallback).path
+            if !files.contains(where: { $0.path == path }) {
+                files.append(.init(path: path, title: short(path) + " · " + owners.map(\.alias).joined(separator: ", ")))
+            }
+        }
+        var selected = fallback.path
+        var query = ""
+        if let focus {
+            selected = KnownHostsFile.resolve(focus.knownHosts, fallback: fallback).path
+            if !files.contains(where: { $0.path == selected }) { files.append(.init(path: selected, title: short(selected))) }
+            query = KnownHostsFile.hostName(focus.host.isEmpty ? focus.alias : focus.host, port: Int(focus.port).flatMap { (1...65535).contains($0) ? $0 : nil } ?? 22)
+        }
+        knownHostsRequest = KnownHostsRequest(files: files, selected: selected, query: query)
     }
 
     /// Folds or unfolds a group of the «Серверы» column and keeps it in tabs.xml.

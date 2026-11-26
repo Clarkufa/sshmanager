@@ -170,9 +170,11 @@ struct SettingsSheet: View {
     @State private var preferences: Preferences
     @State private var failure: String?
     let save: (Preferences) throws -> Void
+    var openKnownHosts: (() -> Void)?
 
-    init(preferences: Preferences, save: @escaping (Preferences) throws -> Void) {
+    init(preferences: Preferences, openKnownHosts: (() -> Void)? = nil, save: @escaping (Preferences) throws -> Void) {
         _preferences = State(initialValue: preferences)
+        self.openKnownHosts = openKnownHosts
         self.save = save
     }
 
@@ -194,6 +196,12 @@ struct SettingsSheet: View {
                 GridRow { Color.clear.frame(width: 1, height: 1); Toggle("Переподключать SSH автоматически", isOn: $preferences.autoReconnect) }
                 GridRow { Color.clear.frame(width: 1, height: 1); Toggle("Оставлять работать в строке меню при закрытии окна", isOn: $preferences.closeToTray) }
                 GridRow { Color.clear.frame(width: 1, height: 1); Toggle("Проверять обновления при запуске", isOn: $preferences.checkUpdates) }
+                if let openKnownHosts {
+                    GridRow {
+                        Color.clear.frame(width: 1, height: 1)
+                        Button { dismiss(); openKnownHosts() } label: { GlyphLabel(title: "Известные хосты…", glyph: .key) }.winButton(.outline)
+                    }
+                }
             }.textFieldStyle(.roundedBorder)
             if let failure { Text(failure).foregroundStyle(.red).font(.callout) }
             HStack {

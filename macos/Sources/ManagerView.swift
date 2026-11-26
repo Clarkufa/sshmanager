@@ -60,6 +60,7 @@ struct SSHManagerApp: App {
                     .keyboardShortcut(.delete, modifiers: .command)
                     .disabled(manager.showingSessions)
                 Button("Открыть OpenSSH config") { manager.openConfig() }
+                Button("Известные хосты…") { manager.openKnownHosts(nil) }
                 Button("Быстрое подключение") {
                     NotificationCenter.default.post(name: .focusQuickConnect, object: nil)
                 }.keyboardShortcut("l", modifiers: .command)
@@ -140,11 +141,14 @@ private struct ManagerView: View {
             }
         }
         .sheet(item: $manager.logonRequest) { request in LogonSheet(request: request) }
+        .sheet(item: $manager.knownHostsRequest) { request in KnownHostsView(request: request) }
         .sheet(isPresented: $manager.choosingServer) { ServerPicker(manager: manager) }
         .sheet(item: $manager.backupPassword) { request in BackupPasswordSheet(request: request) }
         .sheet(isPresented: $updates.presented) { MacUpdateView(updates: updates) }
         .sheet(isPresented: $manager.editingSettings) {
-            SettingsSheet(preferences: manager.settings.preferences) { try manager.savePreferences($0) }
+            SettingsSheet(preferences: manager.settings.preferences, openKnownHosts: {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { manager.openKnownHosts(nil) }
+            }) { try manager.savePreferences($0) }
         }
         .sheet(isPresented: $manager.importing) { ImportSheet { manager.importConnections($0) } }
         .sheet(isPresented: $manager.addingSnippet) { SnippetSheet { manager.saveSnippet(name: $0, command: $1) } }
@@ -922,6 +926,7 @@ private struct CatalogRowMenu: View {
         } label: { Label("Переместить во вкладку", systemImage: "arrow.right") }
         Button { manager.copyCommand(profile) } label: { Label("Копировать команду SSH", systemImage: "doc.on.doc") }
         Button { manager.copyKey(to: profile) } label: { Label("Скопировать ключ на сервер", systemImage: "key") }
+        Button { manager.openKnownHosts(profile) } label: { Label("Известные хосты…", systemImage: "key.horizontal") }
         Divider()
         Button(role: .destructive) { manager.remove(profile) } label: { Label("Удалить", systemImage: "trash") }
     }
@@ -1385,6 +1390,7 @@ private struct ProfileEditor: View {
                     Text("Пустые поля используют настройки OpenSSH.").foregroundStyle(palette.muted).font(.callout)
                 }
                 GridRow { Text("Через сервер"); TextField("ProxyJump: bastion или user@host:port", text: $profile.proxyJump) }
+                GridRow { Text("Файл known_hosts"); TextField("~/.ssh/known_hosts (по умолчанию)", text: $profile.knownHosts) }
                 GridRow(alignment: .top) {
                     Text("Пробросы портов")
                     VStack(alignment: .leading, spacing: 6) {
@@ -1507,6 +1513,7 @@ private struct ProfileEditor: View {
         profile.user = profile.user.trimmingCharacters(in: .whitespacesAndNewlines)
         profile.port = profile.port.trimmingCharacters(in: .whitespacesAndNewlines)
         profile.proxyJump = profile.proxyJump.trimmingCharacters(in: .whitespacesAndNewlines)
+        profile.knownHosts = profile.knownHosts.trimmingCharacters(in: .whitespacesAndNewlines)
         profile.identities = keys.joined(separator: "\n")
         do { try save(profile, removePassword ? "" : password, removePassword); dismiss() }
         catch { failure = error.localizedDescription }

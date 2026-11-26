@@ -15,6 +15,8 @@ struct Profile: Identifiable, Equatable {
     var port = ""
     var identities = ""
     var proxyJump = ""
+    /// UserKnownHostsFile (docs/ui-spec.md §9.1)
+    var knownHosts = ""
     /// "LocalForward 8080 localhost:80", "RemoteForward …", "DynamicForward 1080"
     var forwards: [String] = []
 
@@ -58,6 +60,8 @@ struct Profile: Identifiable, Equatable {
         guard proxyJump == original?.proxyJump || proxyJump.isEmpty ||
                 proxyJump.range(of: #"^[A-Za-z0-9_.@:%,\[\]-]+$"#, options: .regularExpression) != nil
         else { throw ManagerError("Укажите переходной сервер как псевдоним или user@host:port, несколько — через запятую.") }
+        guard knownHosts == original?.knownHosts || knownHosts.isEmpty || KnownHostsFile.validSetting(knownHosts)
+        else { throw ManagerError("Укажите полный путь к файлу known_hosts или путь от ~, например ~/.ssh/known_hosts_work.") }
         let endpoint = #"(?:[A-Za-z0-9_.*-]+:|\[[0-9A-Fa-f:.]+\]:)?[0-9]{1,5}"#
         let target = #"(?:[A-Za-z0-9_.-]+|\[[0-9A-Fa-f:.]+\]):[0-9]{1,5}"#
         for forward in forwards where !(original?.forwards.contains(forward) ?? false) {
@@ -115,6 +119,7 @@ struct ConfigDocument {
                 }
                 switch key {
                 case "proxyjump" where profile.proxyJump.isEmpty: profile.proxyJump = value
+                case "userknownhostsfile" where profile.knownHosts.isEmpty: profile.knownHosts = value
                 case "hostname" where profile.host.isEmpty: profile.host = value
                 case "user" where profile.user.isEmpty: profile.user = value
                 case "port" where profile.port.isEmpty: profile.port = value
@@ -173,7 +178,8 @@ struct ConfigDocument {
 
     private static func fields(_ profile: Profile) -> [(key: String, values: [String])] {
         var result: [(key: String, values: [String])] = [("HostName", [profile.host]), ("User", [profile.user]), ("Port", [profile.port]),
-         ("IdentityFile", profile.identities.components(separatedBy: .newlines)), ("ProxyJump", [profile.proxyJump])].map {
+         ("IdentityFile", profile.identities.components(separatedBy: .newlines)), ("ProxyJump", [profile.proxyJump]),
+         ("UserKnownHostsFile", [profile.knownHosts])].map {
             ($0.0, $0.1.filter { !$0.isEmpty })
         }
         for name in ["LocalForward", "RemoteForward", "DynamicForward"] {
