@@ -218,44 +218,10 @@ final class FilesController: ObservableObject {
     }
 }
 
-final class FilesWindow: NSWindowController, NSWindowDelegate {
-    private let files: FilesController
-    private let didClose: () -> Void
-
-    init(profile: Profile, didClose: @escaping () -> Void) {
-        files = FilesController(profile: profile)
-        self.didClose = didClose
-        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1090, height: 620),
-                              styleMask: [.titled, .closable, .miniaturizable, .resizable], backing: .buffered, defer: false)
-        window.title = "Файлы — " + profile.alias + " · " + profile.address
-        window.minSize = NSSize(width: 800, height: 440)
-        window.isReleasedWhenClosed = false
-        window.contentView = NSHostingView(rootView: FilesView(files: files))
-        super.init(window: window)
-        window.delegate = self
-        window.center()
-        files.connect()
-    }
-
-    required init?(coder: NSCoder) { nil }
-
-    func windowShouldClose(_ sender: NSWindow) -> Bool {
-        guard files.transferring else { return true }
-        let alert = NSAlert()
-        alert.messageText = "Прервать передачу и закрыть окно?"
-        alert.addButton(withTitle: "Нет")
-        alert.addButton(withTitle: "Да")
-        return alert.runModal() == .alertSecondButtonReturn
-    }
-
-    func windowWillClose(_ notification: Notification) {
-        files.close()
-        didClose()
-    }
-}
-
-private struct FilesView: View {
+/// «Файлы · сервер» in the workspace (docs/ui-spec.md §3.2.1).
+struct FilesView: View {
     @ObservedObject var files: FilesController
+    var onClose: () -> Void
     @Environment(\.colorScheme) private var scheme
     @State private var localPath = ""
     @State private var remotePathText = ""
@@ -263,6 +229,11 @@ private struct FilesView: View {
     @State private var promptOpen = false
     @State private var name = ""
     @State private var removing: FileRow?
+
+    init(files: FilesController, onClose: @escaping () -> Void) {
+        self.files = files
+        self.onClose = onClose
+    }
 
     private static let dates: DateFormatter = {
         let formatter = DateFormatter()
@@ -274,12 +245,14 @@ private struct FilesView: View {
         let palette = Palette.of(scheme)
         VStack(alignment: .leading, spacing: 0) {
             HStack(spacing: 8) {
-                Text("Файлы · " + files.profile.alias).font(.system(size: 21, weight: .semibold)).lineLimit(1)
+                Text("Файлы · " + files.profile.alias).font(.system(size: 13, weight: .semibold)).lineLimit(1)
                 Spacer(minLength: 12)
                 Button { files.reconnect() } label: { GlyphLabel(title: "Переподключить", glyph: .refresh) }
                     .winButton(.outline).disabled(files.busy)
+                Button { onClose() } label: { GlyphLabel(title: "Закрыть", glyph: nil, danger: true) }
+                    .winButton(.quiet, danger: true)
             }
-            .padding(.horizontal, 22).padding(.top, 16).padding(.bottom, 10)
+            .frame(height: 44).padding(.bottom, 6)
             HStack(alignment: .top, spacing: 16) {
                 pane(remote: false, path: $localPath, rows: files.localItems, selection: $files.localSelection, palette: palette)
                 pane(remote: true, path: $remotePathText, rows: files.remoteItems, selection: $files.remoteSelection, palette: palette)
@@ -290,7 +263,6 @@ private struct FilesView: View {
                         return true
                     }
             }
-            .padding(.horizontal, 22)
             HStack(spacing: 8) {
                 Button { files.transferFiles(upload: true) } label: { GlyphLabel(title: "На сервер", glyph: .move, kind: .primary) }
                     .winButton(.primary).disabled(!files.online || files.busy || files.localSelection.isEmpty)
@@ -301,7 +273,7 @@ private struct FilesView: View {
                 Text(status).foregroundStyle(palette.muted).lineLimit(1).truncationMode(.middle)
                 Spacer()
             }
-            .padding(.horizontal, 22).frame(height: 56)
+            .frame(height: 56)
         }
         .background(palette.canvas)
         .foregroundStyle(palette.ink)

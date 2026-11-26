@@ -184,10 +184,11 @@ extension View {
 
 /// The app mark next to page titles.
 struct AppMark: View {
+    var size: CGFloat = 42
     var body: some View {
         Image(nsImage: NSApp.applicationIconImage ?? NSImage())
             .resizable().interpolation(.high)
-            .frame(width: 42, height: 42)
+            .frame(width: size, height: size)
             .accessibilityHidden(true)
     }
 }

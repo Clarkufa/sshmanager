@@ -15,7 +15,7 @@ struct SSHManagerApp: App {
                     if loaded && manager.settings.preferences.checkUpdates { updates.check(manual: false) }
                 }
         }
-        .defaultSize(width: 980, height: 570)
+        .defaultSize(width: 1280, height: 720)
         .commands {
             CommandGroup(replacing: .appSettings) {
                 Button("Настройки…") { manager.editingSettings = true }.keyboardShortcut(",", modifiers: .command)
@@ -29,20 +29,29 @@ struct SSHManagerApp: App {
                 Button("Новая вкладка…") { manager.groupEditor = GroupEditorState() }
             }
             CommandMenu("Подключения") {
-                Button("К серверам") { manager.showServers() }
+                Button("Каталог") { manager.showServers() }
                     .keyboardShortcut(.escape, modifiers: .shift)
                     .disabled(!manager.showingSessions)
                 Button("Сеансы") { manager.showSessionsPage() }
+                Button("Колонка «Серверы»") { manager.toggleServerColumn(shown: manager.serverColumn) }
+                Button("Колонка «Сеансы»") { manager.toggleSessionColumn(shown: manager.sessionColumn) }
                 Button("Предыдущий сеанс") { manager.switchSession() }
                     .keyboardShortcut(.tab, modifiers: .control)
                     .disabled(manager.entries.isEmpty)
-                Button("Поиск сеанса") { manager.showSessionsPage(); NotificationCenter.default.post(name: .focusSessionSearch, object: nil) }
+                Button("Поиск сеанса") {
+                    manager.revealSessionColumn()
+                    DispatchQueue.main.async { NotificationCenter.default.post(name: .focusSessionSearch, object: nil) }
+                }
                     .keyboardShortcut("p", modifiers: [.command, .shift])
                 Button("Обновить") { manager.reloadAll() }
                     .keyboardShortcut("r", modifiers: .command)
+                // The catalog table's search when it is shown, otherwise the search of the «Серверы» column.
                 Button("Найти сервер") {
-                    manager.showServers()
-                    DispatchQueue.main.async { NotificationCenter.default.post(name: .focusCatalogSearch, object: nil) }
+                    let catalog = manager.workspace == .catalog
+                    if !catalog { manager.revealServerColumn() }
+                    DispatchQueue.main.async {
+                        NotificationCenter.default.post(name: catalog ? .focusCatalogSearch : .focusServerSearch, object: nil)
+                    }
                 }.keyboardShortcut("f", modifiers: .command)
                 Button("Изменить сервер") { NotificationCenter.default.post(name: .editCatalogRow, object: nil) }
                     .keyboardShortcut("e", modifiers: .command)
@@ -52,7 +61,6 @@ struct SSHManagerApp: App {
                     .disabled(manager.showingSessions)
                 Button("Открыть OpenSSH config") { manager.openConfig() }
                 Button("Быстрое подключение") {
-                    manager.showServers()
                     NotificationCenter.default.post(name: .focusQuickConnect, object: nil)
                 }.keyboardShortcut("l", modifiers: .command)
                 Button("Экспорт архива…") { manager.exportBackup() }
@@ -79,6 +87,7 @@ extension Notification.Name {
     static let focusSessionSearch = Notification.Name("SSHManagerFocusSessionSearch")
     static let focusQuickConnect = Notification.Name("SSHManagerFocusQuickConnect")
     static let focusCatalogSearch = Notification.Name("SSHManagerFocusCatalogSearch")
+    static let focusServerSearch = Notification.Name("SSHManagerFocusServerSearch")
     static let editCatalogRow = Notification.Name("SSHManagerEditCatalogRow")
     static let deleteCatalogRow = Notification.Name("SSHManagerDeleteCatalogRow")
 }
@@ -93,13 +102,19 @@ private struct ManagerView: View {
 
     var body: some View {
         let palette = Palette.of(scheme)
-        VStack(spacing: 0) {
-            if manager.showingSessions {
-                SessionsPage(manager: manager)
-            } else {
-                CatalogPage(manager: manager)
+        GeometryReader { geometry in
+            let columns = ColumnLayout(width: geometry.size.width, manager: manager)
+            VStack(spacing: 0) {
+                WorkspaceHeader(manager: manager, columns: columns)
+                HStack(alignment: .top, spacing: ColumnLayout.gap) {
+                    if columns.servers { ServerColumn(manager: manager).frame(width: ColumnLayout.serverWidth) }
+                    if columns.sessions { SessionColumn(manager: manager).frame(width: ColumnLayout.sessionWidth) }
+                    WorkspaceArea(manager: manager)
+                }
+                .padding(.horizontal, ColumnLayout.margin)
+                .frame(maxHeight: .infinity, alignment: .top)
+                Footer(manager: manager, updates: updates)
             }
-            Footer(manager: manager, updates: updates)
         }
         .background(palette.canvas)
         .foregroundStyle(palette.ink)
@@ -157,34 +172,238 @@ private struct RenameRequest: Identifiable {
     var id: UUID { entry.id }
 }
 
-/// Logo, page title and the buttons on the right (docs/ui-spec.md §2.1, §3.1).
-private struct PageHeader<Buttons: View>: View {
-    let title: String
-    @ViewBuilder let buttons: Buttons
+/// Three columns under the header: «Серверы» 248, «Сеансы» 203 and the workspace. A narrow window folds «Серверы»,
+/// then «Сеансы», so the workspace keeps 620 for the catalog table or 460 for a session or files (docs/ui-spec.md §2.2).
+private struct ColumnLayout {
+    static let serverWidth: CGFloat = 248
+    static let sessionWidth: CGFloat = 203
+    static let gap: CGFloat = 12
+    static let margin: CGFloat = 12
+    let servers: Bool
+    let sessions: Bool
+
+    init(width: CGFloat, manager: Manager) {
+        let free = width - 2 * Self.margin
+        let need: CGFloat = manager.workspace == .catalog ? 620 : 460
+        var servers = manager.serverColumn
+        var sessions = manager.sessionColumn
+        func room() -> CGFloat {
+            free - (servers ? Self.serverWidth + Self.gap : 0) - (sessions ? Self.sessionWidth + Self.gap : 0)
+        }
+        if servers && !manager.serverColumnForced && room() < need { servers = false }
+        if sessions && !manager.sessionColumnForced && room() < need { sessions = false }
+        self.servers = servers
+        self.sessions = sessions
+    }
+}
+
+/// Logo, «SSH Manager», quick connect and the window buttons (docs/ui-spec.md §2.1).
+private struct WorkspaceHeader: View {
+    @ObservedObject var manager: Manager
+    let columns: ColumnLayout
+    @Environment(\.colorScheme) private var scheme
 
     var body: some View {
         HStack(spacing: 8) {
-            AppMark()
-            Text(title).font(.system(size: 26, weight: .semibold)).lineLimit(1)
-            Spacer(minLength: 12)
-            buttons
+            AppMark(size: 32)
+            Text("SSH Manager").font(.system(size: 14, weight: .semibold)).lineLimit(1).fixedSize()
+            Spacer(minLength: 6)
+            QuickConnectField(manager: manager)
+            Spacer(minLength: 6)
+            ViewThatFits(in: .horizontal) {
+                buttons(compact: false)
+                buttons(compact: true)
+            }
+            .layoutPriority(1)
         }
-        .frame(height: 55)
-        .padding(.bottom, 7)
+        .padding(.horizontal, 16)
+        .frame(height: 54)
+    }
+
+    private func buttons(compact: Bool) -> some View {
+        HStack(spacing: 6) {
+            Button { manager.toggleServerColumn(shown: columns.servers) } label: { label("Серверы", .server, compact) }
+                .winButton(.outline).help("Показать или скрыть колонку «Серверы»")
+            Button { manager.toggleSessionColumn(shown: columns.sessions) } label: {
+                label(manager.liveCount > 0 ? "Сеансы · \(manager.liveCount)" : "Сеансы", .terminal, compact)
+            }.winButton(.outline).help("Показать или скрыть колонку «Сеансы»")
+            Button { manager.editingSettings = true } label: {
+                if compact { GlyphView(glyph: .settings, color: Palette.of(scheme).teal) }
+                else { GlyphLabel(title: "Настройки", glyph: .settings, kind: .quiet) }
+            }.winButton(.quiet).help("Настройки")
+            ThemeButton(manager: manager, compact: compact)
+            Button { manager.addCatalogEntry() } label: { GlyphLabel(title: "Добавить сервер", glyph: .plus, kind: .primary) }
+                .winButton(.primary)
+        }
+        .fixedSize()
+    }
+
+    @ViewBuilder
+    private func label(_ title: String, _ glyph: Glyph, _ compact: Bool) -> some View {
+        if compact { GlyphView(glyph: glyph, color: Palette.of(scheme).teal) } else { GlyphLabel(title: title, glyph: glyph) }
+    }
+}
+
+/// Column title with one action on the right («Каталог», «+»).
+private struct ColumnTitle<Action: View>: View {
+    let title: String
+    @ViewBuilder let action: Action
+
+    var body: some View {
+        HStack(spacing: 6) {
+            Text(title).font(.system(size: 13, weight: .semibold)).lineLimit(1)
+            Spacer(minLength: 4)
+            action
+        }
+        .frame(height: 36)
+    }
+}
+
+/// «Серверы»: protocol switch, search, recent and all servers; opening one returns to its session.
+private struct ServerColumn: View {
+    @ObservedObject var manager: Manager
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            ColumnTitle(title: "Серверы") {
+                Button { manager.showServers() } label: { GlyphLabel(title: "Каталог", glyph: .server, kind: .quiet) }
+                    .winButton(.quiet).help("Таблица подключений")
+            }
+            ServerPicker(manager: manager, onSelected: {})
+        }
+        .padding(.bottom, 8)
+    }
+}
+
+/// «Сеансы»: search, open and ended sessions, «+» for a new one and «Открытые файлы» (docs/ui-spec.md §3).
+private struct SessionColumn: View {
+    @ObservedObject var manager: Manager
+    @State private var query = ""
+    @FocusState private var searchFocused: Bool
+    @Environment(\.colorScheme) private var scheme
+
+    var body: some View {
+        let palette = Palette.of(scheme)
+        let entries = manager.entries.filter { entry in
+            let search = query.trimmingCharacters(in: .whitespaces)
+            return search.isEmpty || [entry.title, entry.address, manager.groupName(of: entry), entry.protocolName]
+                .contains { $0.localizedCaseInsensitiveContains(search) }
+        }
+        VStack(alignment: .leading, spacing: 6) {
+            ColumnTitle(title: "Сеансы") {
+                Button { manager.choosingServer = true } label: { GlyphView(glyph: .plus, color: palette.teal) }
+                    .winButton(.quiet).help("Новый сеанс")
+            }
+            SearchField(placeholder: "Найти сеанс", text: $query, focus: $searchFocused) {
+                if let first = entries.first { manager.activate(first.id) }
+            }
+            Text("Открыто: \(manager.liveCount)" + (manager.liveCount == manager.entries.count ? "" : " из \(manager.entries.count)"))
+                .font(.system(size: 12)).foregroundStyle(palette.muted).padding(.leading, 2)
+            ScrollView {
+                LazyVStack(spacing: 0) {
+                    ForEach(entries) { entry in
+                        SessionListRow(entry: entry, color: manager.dotColor(of: entry) ?? palette.teal,
+                                       selected: manager.workspace == .session && entry.id == manager.activeSession, palette: palette)
+                            .contentShape(Rectangle())
+                            .onTapGesture { manager.activate(entry.id) }
+                            .contextMenu { SessionMenu(manager: manager, entry: entry) }
+                    }
+                }
+            }
+            .background(palette.surface)
+            .overlay(Rectangle().strokeBorder(palette.line, lineWidth: 1).allowsHitTesting(false))
+            if !manager.openedFiles.isEmpty {
+                Text("Открытые файлы").font(.system(size: 13, weight: .semibold)).padding(.top, 8).padding(.leading, 2)
+                VStack(spacing: 0) {
+                    ForEach(manager.openedFiles, id: \.profile.id) { files in
+                        FilesRow(files: files, color: manager.group(of: files.profile)?.marker?.color ?? palette.teal,
+                                 selected: manager.workspace == .files(files.profile.id), palette: palette)
+                            .contentShape(Rectangle())
+                            .onTapGesture { manager.showFiles(files) }
+                            .contextMenu {
+                                Button { manager.showFiles(files) } label: { Label("Открыть", systemImage: "folder") }
+                                Button(role: .destructive) { manager.closeFiles(files) } label: { Label("Закрыть файлы", systemImage: "xmark") }
+                            }
+                    }
+                }
+                .background(palette.surface)
+                .overlay(Rectangle().strokeBorder(palette.line, lineWidth: 1).allowsHitTesting(false))
+            }
+        }
+        .padding(.bottom, 8)
+        .onReceive(NotificationCenter.default.publisher(for: .focusSessionSearch)) { _ in searchFocused = true }
+    }
+}
+
+/// «Открытые файлы» row: the server and «Файлы · SFTP» once connected.
+private struct FilesRow: View {
+    @ObservedObject var files: FilesController
+    let color: Color
+    let selected: Bool
+    let palette: Palette
+
+    var body: some View {
+        RowLayout(title: files.profile.alias, subtitle: files.online ? "Файлы · SFTP" : "Файлы", color: color, selected: selected, palette: palette)
+    }
+}
+
+/// The catalog table, the active session or a «Файлы» panel.
+private struct WorkspaceArea: View {
+    @ObservedObject var manager: Manager
+
+    var body: some View {
+        switch manager.workspace {
+        case .catalog:
+            CatalogPage(manager: manager)
+        case .session:
+            VStack(alignment: .leading, spacing: 7) {
+                SessionInfo(manager: manager, entry: manager.activeEntry, groupName: manager.activeEntry.map { manager.groupName(of: $0) } ?? "")
+                SessionContent(manager: manager, entry: manager.activeEntry)
+            }
+            .padding(.bottom, 8)
+        case .files(let id):
+            if let files = manager.openedFiles.first(where: { $0.profile.id == id }) {
+                FilesView(files: files, onClose: { manager.closeFiles(files) }).id(id).padding(.bottom, 8)
+            } else {
+                Color.clear
+            }
+        }
+    }
+}
+
+private extension Manager {
+    func groupName(of entry: SessionEntry) -> String {
+        switch entry {
+        case .ssh(let session): group(of: session.profile)?.name ?? ""
+        case .rdp(let session): group(of: session.profile)?.name ?? ""
+        case .vnc(let session): group(of: session.profile)?.name ?? ""
+        }
+    }
+
+    func dotColor(of entry: SessionEntry) -> Color? {
+        switch entry {
+        case .ssh(let session): group(of: session.profile)?.marker?.color
+        case .rdp(let session): group(of: session.profile)?.marker?.color
+        case .vnc(let session): group(of: session.profile)?.marker?.color
+        }
     }
 }
 
 private struct ThemeButton: View {
     @ObservedObject var manager: Manager
+    var compact = false
     @Environment(\.colorScheme) private var scheme
 
     var body: some View {
         let dark = scheme == .dark
         Button {
             manager.updateSettings { $0.appearance = dark ? .light : .dark }
-        } label: { GlyphLabel(title: dark ? "Светлая тема" : "Тёмная тема", glyph: dark ? .sun : .moon) }
+        } label: {
+            if compact { GlyphView(glyph: dark ? .sun : .moon, color: Palette.of(scheme).teal) }
+            else { GlyphLabel(title: dark ? "Светлая тема" : "Тёмная тема", glyph: dark ? .sun : .moon) }
+        }
             .winButton(.outline)
-            .frame(minWidth: 130)
+            .help(dark ? "Светлая тема" : "Тёмная тема")
     }
 }
 
@@ -239,7 +458,7 @@ private struct Footer: View {
             .disabled(updates.checking || updates.installing)
         }
         .font(.system(size: 12))
-        .padding(.horizontal, 24)
+        .padding(.horizontal, 16)
         .frame(height: 47)
     }
 }
@@ -318,20 +537,6 @@ private struct CatalogPage: View {
         let query = manager.catalogQuery
         let model = CatalogModel(manager: manager, query: query)
         VStack(alignment: .leading, spacing: 0) {
-            PageHeader(title: manager.catalogProtocol.rawValue + "-подключения") {
-                Button { manager.editingSettings = true } label: {
-                    ViewThatFits(in: .horizontal) {
-                        GlyphLabel(title: "Настройки", glyph: .settings, kind: .quiet)
-                        GlyphView(glyph: .settings, color: Palette.of(scheme).teal)
-                    }
-                }.winButton(.quiet).help("Настройки")
-                ThemeButton(manager: manager)
-                Button { manager.showSessionsPage() } label: {
-                    GlyphLabel(title: manager.liveCount > 0 ? "Сеансы · \(manager.liveCount)" : "Сеансы", glyph: .terminal)
-                }.winButton(.outline).frame(minWidth: 116)
-                Button { manager.addCatalogEntry() } label: { GlyphLabel(title: "Добавить сервер", glyph: .plus, kind: .primary) }
-                    .winButton(.primary).frame(minWidth: 158)
-            }
             HStack(spacing: 4) {
                 ForEach(ConnectionProtocol.allCases) { kind in
                     Button {
@@ -343,14 +548,12 @@ private struct CatalogPage: View {
                         .frame(minWidth: 86)
                 }
                 Spacer(minLength: 12)
-                QuickConnectField(manager: manager)
             }.padding(.bottom, 6)
             TabStrip(manager: manager)
             tools(model: model)
             ServerTable(manager: manager, model: model, selection: $selection, query: query)
         }
-        .padding(.horizontal, 24)
-        .padding(.top, 15)
+        .padding(.bottom, 8)
         // ⌘F, ⌘E and ⌘⌫ / Delete, like Ctrl+F, F2 and Delete in the Windows app.
         .onReceive(NotificationCenter.default.publisher(for: .focusCatalogSearch)) { _ in searchFocused = true }
         .onReceive(NotificationCenter.default.publisher(for: .editCatalogRow)) { _ in
@@ -764,98 +967,6 @@ private struct ServerTable: View {
 
 // MARK: - Sessions
 
-private struct SessionsPage: View {
-    @ObservedObject var manager: Manager
-    @State private var query = ""
-    @State private var showingServers = false
-    @FocusState private var searchFocused: Bool
-    @Environment(\.colorScheme) private var scheme
-
-    var body: some View {
-        let palette = Palette.of(scheme)
-        let entries = manager.entries.filter { entry in
-            let search = query.trimmingCharacters(in: .whitespaces)
-            return search.isEmpty || [entry.title, entry.address, groupName(entry), entry.protocolName]
-                .contains { $0.localizedCaseInsensitiveContains(search) }
-        }
-        VStack(alignment: .leading, spacing: 0) {
-            PageHeader(title: "Сеансы") {
-                ThemeButton(manager: manager)
-                Button { manager.showServers() } label: { GlyphLabel(title: "К серверам", glyph: .moveLeft) }
-                    .winButton(.outline).frame(minWidth: 126)
-                Button { manager.choosingServer = true } label: { GlyphLabel(title: "Новый сеанс", glyph: .plus, kind: .primary) }
-                    .winButton(.primary).frame(minWidth: 132)
-            }
-            HStack(alignment: .top, spacing: 12) {
-                VStack(alignment: .leading, spacing: 6) {
-                    HStack(spacing: 4) {
-                        Button("Сеансы") { showingServers = false }
-                            .winButton(showingServers ? .tab : .selectedTab)
-                        Button("Серверы") { showingServers = true }
-                            .winButton(showingServers ? .selectedTab : .tab)
-                    }
-                    if showingServers {
-                        ServerPicker(manager: manager, onSelected: { showingServers = false })
-                    } else {
-                        sessionList(entries, palette: palette)
-                    }
-                }
-                .frame(width: 234)
-                VStack(alignment: .leading, spacing: 7) {
-                    SessionInfo(manager: manager, entry: manager.activeEntry, groupName: manager.activeEntry.map(groupName) ?? "")
-                    SessionContent(manager: manager, entry: manager.activeEntry)
-                }
-            }
-        }
-        .padding(.horizontal, 24)
-        .padding(.top, 15)
-        .padding(.bottom, 8)
-        .onReceive(NotificationCenter.default.publisher(for: .focusSessionSearch)) { _ in
-            if !showingServers { searchFocused = true }
-        }
-    }
-
-    private func sessionList(_ entries: [SessionEntry], palette: Palette) -> some View {
-        VStack(alignment: .leading, spacing: 6) {
-            SearchField(placeholder: "Найти сеанс", text: $query, focus: $searchFocused) {
-                if let first = entries.first { manager.activate(first.id) }
-            }
-            Text("Открыто: \(manager.liveCount)" + (manager.liveCount == manager.entries.count ? "" : " из \(manager.entries.count)")).font(.system(size: 12)).foregroundStyle(palette.muted).padding(.leading, 2)
-            ScrollView {
-                LazyVStack(spacing: 0) {
-                    ForEach(entries) { entry in
-                        SessionListRow(entry: entry, color: dotColor(entry, palette: palette),
-                                       selected: entry.id == manager.activeSession, palette: palette)
-                            .contentShape(Rectangle())
-                            .onTapGesture { manager.activate(entry.id) }
-                            .contextMenu { SessionMenu(manager: manager, entry: entry) }
-                    }
-                }
-            }
-            .background(palette.surface)
-            .overlay(Rectangle().strokeBorder(palette.line, lineWidth: 1).allowsHitTesting(false))
-        }
-    }
-
-    private func groupName(_ entry: SessionEntry) -> String {
-        switch entry {
-        case .ssh(let session): manager.group(of: session.profile)?.name ?? ""
-        case .rdp(let session): manager.group(of: session.profile)?.name ?? ""
-        case .vnc(let session): manager.group(of: session.profile)?.name ?? ""
-        }
-    }
-
-    private func dotColor(_ entry: SessionEntry, palette: Palette) -> Color {
-        let marker: GroupMarker?
-        switch entry {
-        case .ssh(let session): marker = manager.group(of: session.profile)?.marker
-        case .rdp(let session): marker = manager.group(of: session.profile)?.marker
-        case .vnc(let session): marker = manager.group(of: session.profile)?.marker
-        }
-        return marker?.color ?? palette.teal
-    }
-}
-
 /// Sidebar row: group dot, title, «SSH · user@host:port» or «… · Сеанс завершён».
 private struct SessionListRow: View {
     let entry: SessionEntry
@@ -1135,7 +1246,7 @@ private struct QuickConnectField: View {
                 .accessibilityLabel("Быстрое подключение")
         }
         .padding(.horizontal, 10)
-        .frame(width: 310, height: 32)
+        .frame(minWidth: 150, maxWidth: 460, minHeight: 32, maxHeight: 32)
         .background(RoundedRectangle(cornerRadius: 7).fill(palette.surface))
         .overlay(RoundedRectangle(cornerRadius: 7).strokeBorder(focused ? palette.teal : palette.line, lineWidth: 1))
         .help("Подключиться без сохранения профиля. Enter — подключиться.")
@@ -1812,8 +1923,8 @@ private struct ServerPicker: View {
             }
         }
         .padding(embedded ? 0 : 20).frame(width: embedded ? nil : 495)
-        .onAppear { kind = manager.catalogProtocol; focused = true }
-        .onReceive(NotificationCenter.default.publisher(for: .focusSessionSearch)) { _ in
+        .onAppear { kind = manager.catalogProtocol; focused = !embedded }
+        .onReceive(NotificationCenter.default.publisher(for: .focusServerSearch)) { _ in
             if embedded { focused = true }
         }
     }

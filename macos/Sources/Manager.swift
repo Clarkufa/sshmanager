@@ -74,10 +74,24 @@ enum SessionEntry: Identifiable {
     }
 }
 
+enum Workspace: Equatable {
+    case catalog, session
+    case files(String)
+}
+
 final class Manager: ObservableObject {
     /// The catalog tab: «Все серверы» or a group.
     @Published var destination: Destination = .all
-    @Published var showingSessions = false
+    /// What the workspace right of the columns shows (docs/ui-spec.md §2).
+    @Published var workspace: Workspace = .catalog
+    var showingSessions: Bool { workspace != .catalog }
+    /// «Серверы» and «Сеансы» columns: the user's choice; «forced» keeps a column on a narrow window.
+    @Published var serverColumn = true
+    @Published var sessionColumn = true
+    @Published var serverColumnForced = false
+    @Published var sessionColumnForced = false
+    /// «Открытые файлы»: SFTP panels shown in the workspace.
+    @Published private(set) var openedFiles: [FilesController] = []
     @Published private(set) var activeSession: UUID?
     @Published private(set) var profiles: [Profile] = []
     @Published private(set) var settings = ManagerSettings() {
@@ -111,7 +125,6 @@ final class Manager: ObservableObject {
     private let catalogQueue = DispatchQueue(label: "sshmanager.catalog", qos: .userInitiated)
     private var order: [UUID] = []
     private var lastSessions: [UUID] = []
-    private var fileWindows: [String: FilesWindow] = [:]
     private var pendingMove: Profile?
 
     init() {
@@ -836,7 +849,7 @@ final class Manager: ObservableObject {
         lastSessions.removeAll { $0 == id }
         lastSessions.insert(id, at: 0)
         activeSession = id
-        showingSessions = true
+        workspace = .session
         if let session = sessions.first(where: { $0.id == id }) { DispatchQueue.main.async { session.focus() } }
     }
 
@@ -846,9 +859,9 @@ final class Manager: ObservableObject {
         activate(id)
     }
 
-    func showServers() { showingSessions = false }
+    func showServers() { workspace = .catalog }
     func showSessionsPage() {
-        showingSessions = true
+        workspace = .session
         if activeSession == nil { activeSession = lastSessions.first ?? order.first }
     }
 
@@ -908,13 +921,37 @@ final class Manager: ObservableObject {
         openFiles(source)
     }
 
+    /// «Файлы» open in the workspace; a server's panel is reused while it is open.
     func openFiles(_ profile: Profile) {
-        let window = fileWindows[profile.id] ?? FilesWindow(profile: profile) { [weak self] in self?.fileWindows[profile.id] = nil }
-        fileWindows[profile.id] = window
-        window.window?.appearance = settings.appearance == .system ? nil : NSAppearance(named: settings.appearance == .dark ? .darkAqua : .aqua)
-        window.showWindow(nil)
-        window.window?.makeKeyAndOrderFront(nil)
+        if !openedFiles.contains(where: { $0.profile.id == profile.id }) {
+            let files = FilesController(profile: profile)
+            openedFiles.append(files)
+            files.connect()
+        }
+        workspace = .files(profile.id)
     }
+
+    func showFiles(_ files: FilesController) { workspace = .files(files.profile.id) }
+
+    func closeFiles(_ files: FilesController) {
+        let finish = { [weak self] in
+            guard let self else { return }
+            files.close()
+            self.openedFiles.removeAll { $0 === files }
+            if self.workspace == .files(files.profile.id) { self.workspace = self.activeSession == nil ? .catalog : .session }
+        }
+        if files.transferring {
+            notice = Notice(title: "Вы уверены?", text: "Прервать передачу и закрыть файлы «\(files.profile.alias)»?", confirm: finish)
+        } else {
+            finish()
+        }
+    }
+
+    /// The header buttons: hide a shown column, or show a folded one even on a narrow window.
+    func toggleServerColumn(shown: Bool) { serverColumn = !shown; serverColumnForced = !shown }
+    func toggleSessionColumn(shown: Bool) { sessionColumn = !shown; sessionColumnForced = !shown }
+    func revealServerColumn() { serverColumn = true; serverColumnForced = true }
+    func revealSessionColumn() { sessionColumn = true; sessionColumnForced = true }
 
     func openConfig() {
         if FileManager.default.fileExists(atPath: config.url.path) {
