@@ -852,11 +852,7 @@ private struct ServerTable: View {
         .contentShape(Rectangle())
         .onTapGesture(count: 2) { edit(row) }
         .onTapGesture { selection = row.id; focused = true }
-        .contextMenu {
-            if let profile = row.ssh { sshMenu(profile) }
-            if let desktop = row.rdp { rdpMenu(desktop) }
-            if let profile = row.vnc { vncMenu(profile) }
-        }
+        .contextMenu { CatalogRowMenu(manager: manager, ssh: row.ssh, rdp: row.rdp, vnc: row.vnc) }
     }
 
     private func cell(_ text: String, width: CGFloat) -> some View {
@@ -885,9 +881,26 @@ private struct ServerTable: View {
         if let desktop = row.rdp { manager.desktopEditor = DesktopEditorState(original: desktop, group: desktop.group) }
         if let profile = row.vnc { manager.editVnc(profile) }
     }
+}
+
+// MARK: - Sessions
+
+
+/// The row menu of the catalog table, also used by the «Серверы» column (docs/ui-spec.md §2.7, §2.8, §8).
+private struct CatalogRowMenu: View {
+    @ObservedObject var manager: Manager
+    var ssh: Profile?
+    var rdp: DesktopProfile?
+    var vnc: VncProfile?
+
+    var body: some View {
+        if let ssh { sshMenu(ssh) }
+        if let rdp { rdpMenu(rdp) }
+        if let vnc { vncMenu(vnc) }
+    }
 
     @ViewBuilder
-    private func sshMenu(_ profile: Profile) -> some View {
+    func sshMenu(_ profile: Profile) -> some View {
         let current = manager.group(of: profile)?.id
         Button { manager.connect(profile) } label: { Label("Подключиться", systemImage: "terminal") }
         Button { manager.connect(profile, new: true) } label: { Label("Новый сеанс", systemImage: "plus") }
@@ -921,7 +934,7 @@ private struct ServerTable: View {
     }
 
     @ViewBuilder
-    private func rdpMenu(_ desktop: DesktopProfile) -> some View {
+    func rdpMenu(_ desktop: DesktopProfile) -> some View {
         Button { manager.connectDesktop(desktop) } label: { Label("Подключиться", systemImage: "server.rack") }
         Button { manager.connectDesktop(desktop, new: true) } label: { Label("Новый сеанс", systemImage: "plus") }
         Button { manager.desktopEditor = DesktopEditorState(original: desktop, group: desktop.group) } label: {
@@ -943,7 +956,7 @@ private struct ServerTable: View {
         Button(role: .destructive) { manager.removeDesktop(desktop) } label: { Label("Удалить", systemImage: "trash") }
     }
     @ViewBuilder
-    private func vncMenu(_ profile: VncProfile) -> some View {
+    func vncMenu(_ profile: VncProfile) -> some View {
         Button { manager.connectVnc(profile) } label: { Label("Подключиться", systemImage: "server.rack") }
         Button { manager.connectVnc(profile, new: true) } label: { Label("Новый сеанс", systemImage: "plus") }
         Button { manager.connectVnc(profile, new: true) } label: { Label("Открыть в отдельном окне", systemImage: "macwindow") }
@@ -962,10 +975,7 @@ private struct ServerTable: View {
         } label: { Label("Переместить во вкладку", systemImage: "arrow.right") }
         Divider()
         Button(role: .destructive) { manager.removeVnc(profile) } label: { Label("Удалить", systemImage: "trash") }
-    }
-}
-
-// MARK: - Sessions
+    }}
 
 /// Sidebar row: group dot, title, «SSH · user@host:port» or «… · Сеанс завершён».
 private struct SessionListRow: View {
@@ -1829,6 +1839,7 @@ private struct ServerPicker: View {
 
     private struct Choice: Identifiable {
         let id, name, address, group: String
+        var groupID: String? = nil
         let color: Color?
         let ssh: Profile?
         let rdp: DesktopProfile?
@@ -1840,20 +1851,20 @@ private struct ServerPicker: View {
             return manager.profiles.map { profile in
                 let group = manager.group(of: profile)
                 return Choice(id: "ssh:" + profile.id, name: profile.alias, address: profile.address, group: group?.name ?? "",
-                              color: group?.marker?.color, ssh: profile, rdp: nil, vnc: nil)
+                              groupID: group?.id, color: group?.marker?.color, ssh: profile, rdp: nil, vnc: nil)
             }
         }
         if kind == .vnc {
             return manager.settings.vnc.map { profile in
                 let group = manager.group(of: profile)
                 return Choice(id: Manager.key(profile), name: profile.name, address: profile.address, group: group?.name ?? "",
-                              color: group?.marker?.color, ssh: nil, rdp: nil, vnc: profile)
+                              groupID: group?.id, color: group?.marker?.color, ssh: nil, rdp: nil, vnc: profile)
             }
         }
         return manager.settings.desktops.map { desktop in
             let group = manager.group(of: desktop)
             return Choice(id: "rdp:" + desktop.id, name: desktop.name, address: desktop.address, group: group?.name ?? "",
-                          color: group?.marker?.color, ssh: nil, rdp: desktop, vnc: nil)
+                          groupID: group?.id, color: group?.marker?.color, ssh: nil, rdp: desktop, vnc: nil)
         }
     }
 
@@ -1871,13 +1882,61 @@ private struct ServerPicker: View {
     }
 
     private var chosen: Choice? {
+        if let selection, let bar = selection.firstIndex(of: "|") {
+            let id = String(selection[selection.index(after: bar)...])
+            return everything.first { $0.id == id }
+        }
         if let selection, selection.hasPrefix("recent:") { return recent.first { "recent:" + $0.id == selection } }
         return visible.first { $0.id == selection } ?? recent.first ?? visible.first
     }
 
-    private func choiceRow(_ choice: Choice, tag: String, palette: Palette) -> some View {
+    /// A group of the «Серверы» column: «Недавние», a catalog tab or «Без вкладки» (docs/ui-spec.md §2.2).
+    private struct ColumnSection: Identifiable {
+        let id, title: String
+        let color: Color?
+        let choices: [Choice]
+    }
+
+    private var sections: [ColumnSection] {
+        let all = visible
+        var result: [ColumnSection] = []
+        let latest = recent
+        if !latest.isEmpty { result.append(ColumnSection(id: "recent", title: "Недавние", color: nil, choices: latest)) }
+        for group in manager.settings.groups {
+            let members = all.filter { $0.groupID == group.id }
+            if !members.isEmpty { result.append(ColumnSection(id: group.id, title: group.name, color: group.marker?.color, choices: members)) }
+        }
+        let loose = all.filter { $0.groupID == nil }
+        if !loose.isEmpty {
+            let grouped = result.count > (latest.isEmpty ? 0 : 1)
+            result.append(ColumnSection(id: "ungrouped", title: grouped ? "Без вкладки" : "Все серверы", color: nil, choices: loose))
+        }
+        return result
+    }
+
+    private func sectionHeader(_ section: ColumnSection, palette: Palette) -> some View {
+        let folded = manager.settings.collapsed.contains(section.id)
+        return HStack(spacing: 6) {
+            Image(systemName: folded ? "chevron.right" : "chevron.down")
+                .font(.system(size: 10, weight: .semibold)).foregroundStyle(palette.muted).frame(width: 12)
+            if let color = section.color { Circle().fill(color).frame(width: 8, height: 8) }
+            Text(section.title).font(.system(size: 13, weight: .semibold)).lineLimit(1)
+            Spacer(minLength: 4)
+            Text("\(section.choices.count)").font(.system(size: 12)).foregroundStyle(palette.muted)
+        }
+        .contentShape(Rectangle())
+        .onTapGesture { manager.toggleCollapsed(section.id) }
+        .contextMenu {
+            Button(folded ? "Развернуть" : "Свернуть") { manager.toggleCollapsed(section.id) }
+        }
+        .help(folded ? "Развернуть" : "Свернуть")
+        .accessibilityAddTraits(.isButton)
+        .accessibilityLabel(section.title + ", \(section.choices.count)" + (folded ? ", свёрнута" : ""))
+    }
+
+    private func choiceRow(_ choice: Choice, tag: String, palette: Palette, dot: Bool = true) -> some View {
         HStack(alignment: .top, spacing: 9) {
-            Circle().fill(choice.color ?? palette.teal).frame(width: 7, height: 7).padding(.top, 5)
+            Circle().fill(choice.color ?? palette.teal).frame(width: 7, height: 7).padding(.top, 5).opacity(dot ? 1 : 0)
             VStack(alignment: .leading, spacing: 1) {
                 Text(choice.name).font(.system(size: 13, weight: .semibold)).lineLimit(1)
                 Text(choice.address + (choice.group.isEmpty ? "" : "  ·  " + choice.group))
@@ -1887,6 +1946,9 @@ private struct ServerPicker: View {
         .tag(tag)
         .contentShape(Rectangle())
         .onTapGesture(count: 2) { choose(choice) }
+        .contextMenu {
+            if embedded { CatalogRowMenu(manager: manager, ssh: choice.ssh, rdp: choice.rdp, vnc: choice.vnc) }
+        }
     }
 
     var body: some View {
@@ -1903,7 +1965,16 @@ private struct ServerPicker: View {
             }
             SearchField(placeholder: "Найти сервер", text: $query, focus: $focused) { if let chosen { choose(chosen) } }
             List(selection: $selection) {
-                if recent.isEmpty {
+                if embedded && query.trimmingCharacters(in: .whitespaces).isEmpty {
+                    ForEach(sections) { section in
+                        sectionHeader(section, palette: palette)
+                        if !manager.settings.collapsed.contains(section.id) {
+                            ForEach(section.choices) { choice in
+                                choiceRow(choice, tag: section.id + "|" + choice.id, palette: palette, dot: section.id == "recent")
+                            }
+                        }
+                    }
+                } else if recent.isEmpty {
                     ForEach(visible) { choice in choiceRow(choice, tag: choice.id, palette: palette) }
                 } else {
                     Section("Недавние") {

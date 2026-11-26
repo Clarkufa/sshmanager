@@ -100,6 +100,8 @@ struct ManagerSettings {
     var vncSort: ServerSort = .original
     var desktops: [DesktopProfile] = []
     var vnc: [VncProfile] = []
+    /// Folded groups of the «Серверы» column: tab ids, «ungrouped» and «recent» (tabs.xml «collapsed»).
+    var collapsed: Set<String> = []
 
     static let url = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
         .appendingPathComponent("SSH Manager/tabs.xml")
@@ -166,6 +168,8 @@ struct ManagerSettings {
         }
         if let startup = root.attribute(forName: "startupTab")?.stringValue,
            settings.groups.contains(where: { $0.id == startup }) { settings.startup = startup }
+        settings.collapsed = Set((root.attribute(forName: "collapsed")?.stringValue ?? "").split(separator: " ").map(String.init)
+            .filter { key in key == "recent" || key == "ungrouped" || settings.groups.contains { $0.id == key } })
         let groups = settings.groups.map(\.id)
         var desktops: Set<String> = []
         for element in root.elements(forName: "rdp") {
@@ -189,6 +193,8 @@ struct ManagerSettings {
         Self.attribute("sshSort", value: sshSort.rawValue, on: root)
         Self.attribute("rdpSort", value: rdpSort.rawValue, on: root)
         Self.attribute("vncSort", value: vncSort.rawValue, on: root)
+        let folded = collapsed.filter { key in key == "recent" || key == "ungrouped" || groups.contains { $0.id == key } }.sorted()
+        if !folded.isEmpty { Self.attribute("collapsed", value: folded.joined(separator: " "), on: root) }
         if !preferences.terminalFont.isEmpty { Self.attribute("terminalFont", value: preferences.terminalFont, on: root) }
         Self.attribute("terminalSize", value: String(preferences.terminalSize), on: root)
         Self.attribute("scrollback", value: String(preferences.scrollback), on: root)

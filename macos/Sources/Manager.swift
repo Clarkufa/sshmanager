@@ -171,6 +171,13 @@ final class Manager: ObservableObject {
         reloadSettings()
     }
 
+    /// Folds or unfolds a group of the «Серверы» column and keeps it in tabs.xml.
+    func toggleCollapsed(_ key: String) {
+        updateSettings { settings in
+            if settings.collapsed.remove(key) == nil { settings.collapsed.insert(key) }
+        }
+    }
+
     func updateSettings(_ change: (inout ManagerSettings) throws -> Void) {
         do {
             var latest = try ManagerSettings.load()
