@@ -93,7 +93,7 @@ namespace SshManager
         private readonly CheckBox reconnect, tray, updates;
         public Preferences Result { get; private set; }
 
-        public SettingsDialog(Preferences current) : base("Настройки", new Size(590, 392), "Сохранить", 230)
+        public SettingsDialog(Preferences current, Action openKnownHosts = null) : base("Настройки", new Size(590, 432), "Сохранить", 230)
         {
             preferences = current.Copy();
             font = new ComboBox { AccessibleName = "Шрифт терминала", Dock = DockStyle.Fill, DropDownStyle = ComboBoxStyle.DropDownList,
@@ -111,6 +111,13 @@ namespace SshManager
             reconnect = AddCheck("Переподключать SSH автоматически", preferences.AutoReconnect);
             tray = AddCheck("Сворачивать в трей при закрытии окна", preferences.CloseToTray);
             updates = AddCheck("Проверять обновления при запуске", preferences.CheckUpdates);
+            if (openKnownHosts != null)
+            {
+                var knownHosts = Theme.Button("Известные хосты…", 176, glyph: Glyph.Key);
+                knownHosts.Anchor = AnchorStyles.Left;
+                knownHosts.Click += (sender, args) => openKnownHosts();
+                AddRow(null, knownHosts, 40);
+            }
             Finish();
         }
 

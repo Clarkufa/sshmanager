@@ -292,6 +292,7 @@ namespace SshManager
                 moveMenu,
                 Theme.MenuItem("Копировать команду SSH", Glyph.Copy, (sender, args) => CopyCommand(menuConnection)),
                 Theme.MenuItem("Скопировать ключ на сервер", Glyph.Key, (sender, args) => CopyKey(menuConnection)),
+                Theme.MenuItem("Известные хосты…", Glyph.Key, (sender, args) => OpenKnownHosts(menuConnection)),
                 new ToolStripSeparator(),
                 Theme.MenuItem("Удалить", Glyph.Delete, (sender, args) => DeleteConnection(menuConnection))
             });
@@ -403,9 +404,28 @@ namespace SshManager
             UpdateGroups(items => items.ToggleFavorite(key), tab, select);
         }
 
+        /// <summary>«Известные хосты» (docs/ui-spec.md §9.2): for a server — its file and its host in the search.</summary>
+        private void OpenKnownHosts(Connection focus)
+        {
+            var connections = document?.Connections().ToList() ?? new List<Connection>();
+            var profileFiles = connections.Where(item => item.Get("userknownhostsfile").Length > 0)
+                .GroupBy(item => item.Get("userknownhostsfile"), StringComparer.OrdinalIgnoreCase)
+                .Select(group => new KeyValuePair<string, string[]>(group.Key, group.Select(item => item.Alias).ToArray()));
+            string path = null, query = "";
+            if (focus != null)
+            {
+                try { path = KnownHostsFile.Resolve(focus.Get("userknownhostsfile")); }
+                catch (Exception error) when (error is ArgumentException || error is NotSupportedException) { path = null; }
+                string host = focus.Get("hostname").Length > 0 ? focus.Get("hostname") : focus.Alias;
+                int port = Int32.TryParse(focus.Get("port"), out var number) && number > 0 && number <= 65535 ? number : 22;
+                query = KnownHostsFile.HostName(host, port);
+            }
+            using (var dialog = new KnownHostsDialog(profileFiles, path, query)) dialog.ShowDialog(this);
+        }
+
         private void EditSettings()
         {
-            using (var dialog = new SettingsDialog(groups.Preferences))
+            using (var dialog = new SettingsDialog(groups.Preferences, () => OpenKnownHosts(null)))
             {
                 if (dialog.ShowDialog(this) != DialogResult.OK) return;
                 var chosen = dialog.Result;

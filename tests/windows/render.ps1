@@ -201,7 +201,21 @@ if (Want 'dialogs') {
     $d = New 'ServerPickerDialog' @($typed, $groups, (Kind 'Ssh')); Show-Form $d; Snap $d 'dlg-picker'; $d.Dispose()
     $d = New 'ServerPickerDialog' @($typed, $groups, (Kind 'Vnc')); Show-Form $d; Snap $d 'dlg-picker-vnc'; $d.Dispose()
     if (Want 'stage2') {
-        $d = New 'SettingsDialog' @($groups.Preferences); Show-Form $d; Snap $d 'dlg-settings'; $d.Dispose()
+        $d = New 'SettingsDialog' @($groups.Preferences, [Action]{ }); Show-Form $d; Snap $d 'dlg-settings'; $d.Dispose()
+        # «Известные хосты» on a test file (example keys, never the real ~/.ssh/known_hosts)
+        $kh = Join-Path $data 'known_hosts_demo'
+        @(
+            '# demo',
+            'web.example.com,192.168.10.21 ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl',
+            '[db.internal.example.com]:2222 ecdsa-sha2-nistp256 AAAAE2VjZHNhLXNoYTItbmlzdHAyNTYAAAAIbmlzdHAyNTYAAABBBEmKSENjQEezOmxkZMy7opKgwFB9nkt5YRrYMjNuG5N87uRgg6CLrbo5wAdT/y6v0mKV0U2w0WZ2YB/++Tpockg=',
+            '|1|JfKTdBh7rNbXkVAQCRp4OQoPfmI=|USECr3SWf1JUPsms5AqfD5QfxkM= ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABAQC8',
+            '@cert-authority *.corp.example ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl'
+        ) | Set-Content -Encoding ASCII $kh
+        $pairType = [Collections.Generic.KeyValuePair``2].MakeGenericType([string], [string[]])
+        $files = [Array]::CreateInstance($pairType, 1)
+        $files[0] = [Activator]::CreateInstance($pairType, @('~/.ssh/known_hosts_work', [string[]]@('sshm-db')))
+        $d = New 'KnownHostsDialog' @($files, $kh, ''); Show-Form $d -KeepShown; Snap $d 'dlg-known-hosts'; $d.Dispose()
+        $d = New 'HostKeyDialog' @('[db.internal.example.com]:2222'); Show-Form $d; Snap $d 'dlg-host-key'; $d.Dispose()
         $aliases = [string[]]@($connections | ForEach-Object { $_.Alias })
         $save = [Action`3].MakeGenericType((T 'VncProfile'), [string], [bool])
         $d = New 'VncDialog' @($null, $null, $false, $aliases, ([scriptblock]{ } -as $save)); Show-Form $d; Snap $d 'dlg-vnc-new'; $d.Dispose()

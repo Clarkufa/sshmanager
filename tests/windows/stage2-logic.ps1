@@ -161,5 +161,58 @@ Throws 'name with folder rejected' { Call (T 'SshKeys') 'Generate' @($keyDir, '.
 Set-Content (Join-Path $dir 'bad.pub') "ssh-ed25519 AAAA'; rm -rf ~ '"
 Throws 'quote in key rejected' { Call (T 'SshKeys') 'CopyCommand' @((Join-Path $dir 'bad.pub')) }
 
+# --- known_hosts (docs/ui-spec.md §9)
+$kh = Join-Path $dir 'known_hosts'
+$openssh = Join-Path $env:WINDIR 'System32\OpenSSH'
+$keyLine = (Get-Content "$private.pub").Split(' ')
+@(
+    "# comment stays",
+    "plain.example,10.9.9.9 $($keyLine[0]) $($keyLine[1])",
+    "[port.example]:2200 $($keyLine[0]) $($keyLine[1])",
+    "@cert-authority *.corp $($keyLine[0]) $($keyLine[1])"
+) -join "`n" | Set-Content -NoNewline -Encoding ASCII $kh
+Add-Content -Encoding ASCII $kh "`n"
+$file = Call (T 'KnownHostsFile') 'Load' @($kh)
+Check 'known_hosts: three entries, comment skipped' ($file.Entries.Count -eq 3 -and $file.Entries[2].Marker -eq '@cert-authority')
+$expected = ((& "$openssh\ssh-keygen.exe" -l -f "$private.pub") -split ' ')[1]
+Check "known_hosts: fingerprint like ssh-keygen ($expected)" ($file.Entries[0].Fingerprint -eq $expected)
+Check 'known_hosts: plain search' ((Call $file 'Search' @('plain')).Count -eq 1 -and (Call $file 'Search' @('')).Count -eq 3)
+$hashed = Join-Path $dir 'hashed_hosts'
+Copy-Item $kh $hashed
+& { $ErrorActionPreference = 'Continue'; & "$openssh\ssh-keygen.exe" -H -f $hashed 2>&1 | Out-Null }  # warns about the *.corp wildcard
+$hfile = Call (T 'KnownHostsFile') 'Load' @($hashed)
+Check 'known_hosts: ssh-keygen -H hashed the names' (($hfile.Entries | Where-Object { $_.Hashed }).Count -ge 2)
+$hit = Call $hfile 'Search' @('port.example:2200')
+Check 'known_hosts: hashed entry found by host:port and revealed' ($hit.Count -eq 1 -and $hit[0].Display -eq '[port.example]:2200')
+Check 'known_hosts: hashed entry not found by a substring' ((Call $hfile 'Search' @('port.exam')).Count -eq 0)
+$drop = [Activator]::CreateInstance([Collections.Generic.List`1].MakeGenericType((T 'KnownHostEntry'))); $drop.Add($file.Entries[0])
+Call $file 'Remove' @(,$drop) | Out-Null
+$after = Get-Content $kh
+Check 'known_hosts: removal keeps comments and other lines, .old written' ($after[0] -eq '# comment stays' -and -not ($after -match 'plain.example') -and ($after -match 'port.example') -and (Test-Path "$kh.old"))
+$file = Call (T 'KnownHostsFile') 'Load' @($kh)
+$lines = New-Object 'Collections.Generic.List[string]'; $lines.Add("[port.example]:2200 ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl")
+Call $file 'Replace' @('[port.example]:2200', $lines) | Out-Null
+$file = Call (T 'KnownHostsFile') 'Load' @($kh)
+$ports = @($file.Entries | Where-Object { $_.Hosts -eq '[port.example]:2200' })
+Check 'known_hosts: replace swaps the host key' ($ports.Count -eq 1 -and $ports[0].Key -like 'AAAAC3NzaC1lZDI1NTE5AAAAIOMqq*')
+Check 'known_hosts: host names like ssh' ((Call (T 'KnownHostsFile') 'HostName' @('h', 22)) -eq 'h' -and (Call (T 'KnownHostsFile') 'HostName' @('h', 2200)) -eq '[h]:2200')
+Check 'known_hosts: paths' ((Call (T 'KnownHostsFile') 'IsValidSetting' @('~/.ssh/known_hosts_work')) -and (Call (T 'KnownHostsFile') 'IsValidSetting' @('C:\keys\hosts')) -and -not (Call (T 'KnownHostsFile') 'IsValidSetting' @('relative\hosts')))
+Check 'known_hosts: ~ resolves to the profile folder' ((Call (T 'KnownHostsFile') 'Resolve' @('~/.ssh/kh')) -eq (Join-Path $env:USERPROFILE '.ssh\kh'))
+$khDoc = New 'ConfigDocument' @("Host web`r`n    HostName 10.0.0.5`r`n")
+$khValues = Values 'web' '10.0.0.5' '' '' '' @()
+$khValues.GetType().GetField('KnownHostsFile').SetValue($khValues, 'C:\My Keys\known_hosts')
+Call $khDoc 'Update' @(@($khDoc.Connections())[0], $khValues) | Out-Null
+$khWeb = @((New 'ConfigDocument' @($khDoc.ToString())).Connections())[0]
+Check 'UserKnownHostsFile written quoted and read back' ($khDoc.ToString() -match 'UserKnownHostsFile "C:' -and $khWeb.Get('userknownhostsfile') -eq 'C:\My Keys\known_hosts')
+$khValues.GetType().GetField('KnownHostsFile').SetValue($khValues, '')
+$khDoc2 = New 'ConfigDocument' @($khDoc.ToString())
+Call $khDoc2 'Update' @(@($khDoc2.Connections())[0], $khValues) | Out-Null
+Check 'empty field removes UserKnownHostsFile' ($khDoc2.ToString() -notmatch 'UserKnownHostsFile')
+Throws 'relative known_hosts path rejected' { $x = New 'ConfigDocument' @(''); $v = Values 'z' 'h' '' '' '' @(); $v.GetType().GetField('KnownHostsFile').SetValue($v, 'hosts.txt'); Call $x 'Update' @($null, $v) }
+try {
+    $scanned = @(Call (T 'KnownHostsFile') 'Scan' @('127.0.0.1', 2223))
+    Check "ssh-keyscan of the xrdp bench: $($scanned.Count) keys named [127.0.0.1]:2223" ($scanned.Count -ge 1 -and $scanned[0].StartsWith('[127.0.0.1]:2223 '))
+} catch { $inner = $_.Exception; while ($inner.InnerException) { $inner = $inner.InnerException }; "info  ssh-keyscan skipped: $($inner.Message)" }
+
 Remove-Item -Recurse -Force $dir
 "failures: $failures"

@@ -163,6 +163,10 @@ namespace SshManager
             if (Changed(connection, "proxyjump", values.ProxyJump ?? "") && !String.IsNullOrEmpty(values.ProxyJump) && !JumpPattern.IsMatch(values.ProxyJump))
                 throw new ArgumentException("Укажите переходной сервер как псевдоним или user@host:port, несколько — через запятую.");
 
+            if (Changed(connection, "userknownhostsfile", values.KnownHostsFile ?? "") && !String.IsNullOrEmpty(values.KnownHostsFile) &&
+                !SshManager.KnownHostsFile.IsValidSetting(values.KnownHostsFile))
+                throw new ArgumentException("Укажите полный путь к файлу known_hosts или путь от ~, например ~/.ssh/known_hosts_work.");
+
             var existing = connection?.Forwards ?? new List<string>();
             foreach (var forward in values.Forwards ?? new List<string>())
                 if (!existing.Contains(forward) && !IsForward(forward))
@@ -198,6 +202,7 @@ namespace SshManager
             WriteSetting(connection, ref insert, indent, "User", values.User);
             WriteSetting(connection, ref insert, indent, "Port", values.Port);
             if (values.ProxyJump != null) WriteSetting(connection, ref insert, indent, "ProxyJump", values.ProxyJump);
+            if (values.KnownHostsFile != null) WriteSetting(connection, ref insert, indent, "UserKnownHostsFile", values.KnownHostsFile);
 
             var previousKeys = connection.Keys;
             if (previousKeys.Count > 0) insert = lines.IndexOf(connection.Body[previousKeys.Last().LineIndex]) + 1;
@@ -257,6 +262,7 @@ namespace SshManager
             if (values.User.Length > 0) Insert(ref insert, "    User " + Quote(values.User));
             if (values.Port.Length > 0) Insert(ref insert, "    Port " + Quote(values.Port));
             if (!String.IsNullOrEmpty(values.ProxyJump)) Insert(ref insert, "    ProxyJump " + Quote(values.ProxyJump));
+            if (!String.IsNullOrEmpty(values.KnownHostsFile)) Insert(ref insert, "    UserKnownHostsFile " + Quote(values.KnownHostsFile));
             foreach (var key in values.Keys) Insert(ref insert, "    IdentityFile " + Quote(key.Value));
             foreach (var forward in values.Forwards ?? new List<string>()) Insert(ref insert, "    " + forward);
             if (insert < lines.Count && lines[insert].Content.Trim().Length > 0) Insert(ref insert, "");
@@ -453,6 +459,8 @@ namespace SshManager
         public List<Identity> Keys;
         /// <summary>null leaves the setting as it is.</summary>
         public string ProxyJump;
+        /// <summary>UserKnownHostsFile (docs/ui-spec.md §9.1); null leaves the setting as it is.</summary>
+        public string KnownHostsFile;
         public List<string> Forwards;
     }
 }
