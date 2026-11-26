@@ -143,6 +143,45 @@ namespace SshManager
             };
         }
 
+        /// <summary>
+        /// Scales a control built in 96-DPI units to the current DPI. Windows already scales fonts, but WinForms
+        /// auto-scaling runs when AutoScaleDimensions is assigned, before the children exist, and never for
+        /// controls created later, so every form and lazily created page calls this once after it is built.
+        /// </summary>
+        public static void ScaleToDpi(Control control)
+        {
+            float factor = control.DeviceDpi / 96f;
+            if (factor == 1f) return;
+            control.Scale(new SizeF(factor, factor));
+            if (control is Form form && form.TopLevel)
+            {
+                var area = Screen.FromPoint(Cursor.Position).WorkingArea.Size;
+                form.MinimumSize = new Size(Math.Min(form.MinimumSize.Width, area.Width), Math.Min(form.MinimumSize.Height, area.Height));
+                form.Size = new Size(Math.Min(form.Width, area.Width), Math.Min(form.Height, area.Height));
+            }
+        }
+
+        public static int Scaled(Control control, int logical) => (logical * control.DeviceDpi + 48) / 96;
+
+        /// <summary>Draws a control's own scroll bars dark whatever the app theme, for areas that are always dark.</summary>
+        public static void DarkScrollBars(Control control)
+        {
+            void Apply(object sender, EventArgs args) => SetWindowTheme(control.Handle, "DarkMode_Explorer", null);
+            control.HandleCreated += Apply;
+            if (control.IsHandleCreated) Apply(control, EventArgs.Empty);
+        }
+
+        /// <summary>Shows a grey hint inside an empty text box.</summary>
+        public static void SetCue(TextBox box, string cue)
+        {
+            void Apply(object sender, EventArgs args) => SendMessage(box.Handle, 0x1501, new IntPtr(1), cue); // EM_SETCUEBANNER
+            box.HandleCreated += Apply;
+            if (box.IsHandleCreated) Apply(box, EventArgs.Empty);
+        }
+
+        [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+        private static extern IntPtr SendMessage(IntPtr window, int message, IntPtr wParam, string lParam);
+
         public static Panel Frame(Control editor, Padding margin)
         {
             var field = new Panel { Dock = DockStyle.Fill, BackColor = Line, Margin = margin, Padding = new Padding(1) };
@@ -284,7 +323,7 @@ namespace SshManager
                     case Glyph.Move: g.DrawLine(p, 2, 8, 14, 8); Trace(g, p, 10, 4, 14, 8, 10, 12); break;
                     case Glyph.MoveLeft: g.DrawLine(p, 2, 8, 14, 8); Trace(g, p, 6, 4, 2, 8, 6, 12); break;
                     case Glyph.Copy: g.DrawRectangle(p, 5, 5, 9, 9); Trace(g, p, 2, 11, 2, 2, 11, 2); break;
-                    case Glyph.Key: g.DrawEllipse(p, 2, 2, 7, 7); Trace(g, p, 8, 8, 14, 14, 14, 11); break;
+                    case Glyph.Key: g.DrawEllipse(p, 1.5f, 1.5f, 6, 6); g.DrawLine(p, 6.5f, 6.5f, 14, 14); g.DrawLine(p, 11, 11, 13, 9); g.DrawLine(p, 9, 9, 10.5f, 7.5f); break;
                     case Glyph.Browse: g.DrawEllipse(p, 2, 2, 8, 8); g.DrawLine(p, 9, 9, 14, 14); break;
                     case Glyph.Moon:
                         using (var moon = new GraphicsPath())
@@ -411,7 +450,7 @@ namespace SshManager
             }
 
             int icon = (Marker.HasValue ? 11 : Symbol == Glyph.None ? 0 : 16) * DeviceDpi / 96;
-            int gap = icon == 0 ? 0 : 6 * DeviceDpi / 96;
+            int gap = icon == 0 || Text.Length == 0 ? 0 : 6 * DeviceDpi / 96;
             using (var format = new StringFormat(StringFormat.GenericTypographic)
             {
                 LineAlignment = StringAlignment.Center, Trimming = StringTrimming.EllipsisCharacter,
@@ -420,7 +459,7 @@ namespace SshManager
             using (var ink = new SolidBrush(textColor))
             {
                 graphics.TextRenderingHint = System.Drawing.Text.TextRenderingHint.ClearTypeGridFit;
-                float textWidth = Math.Min(Width - icon - gap - 8, graphics.MeasureString(Text, Font, Width, format).Width + 1);
+                float textWidth = Text.Length == 0 ? 0 : Math.Min(Width - icon - gap - 8, graphics.MeasureString(Text, Font, Width, format).Width + 1);
                 float start = (Width - textWidth - icon - gap) / 2;
                 if (icon > 0)
                 {
@@ -430,6 +469,17 @@ namespace SshManager
                 var text = new RectangleF(start + icon + gap, 0, textWidth, Height);
                 graphics.DrawString(Text, Font, ink, text, format);
             }
+        }
+    }
+
+    /// <summary>A one-line label that shortens a file path in the middle instead of wrapping it.</summary>
+    internal sealed class PathLabel : Label
+    {
+        protected override void OnPaint(PaintEventArgs e)
+        {
+            using (var fill = new SolidBrush(BackColor)) e.Graphics.FillRectangle(fill, ClientRectangle);
+            TextRenderer.DrawText(e.Graphics, Text, Font, ClientRectangle, ForeColor, TextFormatFlags.SingleLine |
+                TextFormatFlags.PathEllipsis | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPrefix | TextFormatFlags.NoPadding);
         }
     }
 

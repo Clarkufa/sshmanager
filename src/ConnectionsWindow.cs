@@ -38,7 +38,8 @@ namespace SshManager
         private readonly TableLayoutPanel catalog;
         private readonly ContextMenuStrip backupMenu;
         private readonly BackupCommands backup;
-        private readonly Label source;
+        private readonly PathLabel source;
+        private readonly ToolTip hints = new ToolTip();
         private readonly Label status;
         private readonly Label empty;
         private readonly Label catalogTitle;
@@ -76,12 +77,13 @@ namespace SshManager
             ForeColor = Theme.Ink;
             BackColor = Theme.Canvas;
             StartPosition = FormStartPosition.CenterScreen;
-            AutoScaleMode = AutoScaleMode.Dpi;
-            AutoScaleDimensions = new SizeF(96, 96);
+            SuspendLayout();
+            AutoScaleMode = AutoScaleMode.None;
             ClientSize = new Size(980, 570);
             MinimumSize = new Size(800, 480);
 
             var frame = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 2 };
+            frame.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
             frame.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
             frame.RowStyles.Add(new RowStyle(SizeType.Absolute, 47));
             pages = new Panel { Dock = DockStyle.Fill, Margin = Padding.Empty };
@@ -89,6 +91,7 @@ namespace SshManager
             Controls.Add(frame);
 
             var layout = new TableLayoutPanel { Dock = DockStyle.Fill, Padding = new Padding(24, 15, 24, 0), ColumnCount = 1, RowCount = 5 };
+            layout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
             catalog = layout;
             layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 62));
             layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 39));
@@ -155,6 +158,16 @@ namespace SshManager
             search = serverSearch.Input;
             search.TextChanged += (sender, args) => RefreshList(null);
             filter.Controls.Add(serverSearch);
+            filter.Resize += (sender, args) =>
+            {
+                if (filter.IsHandleCreated)
+                    serverSearch.Width = Math.Max(Theme.Scaled(this, 140), Math.Min(Theme.Scaled(this, 265), filter.ClientSize.Width - 2));
+            };
+            search.KeyDown += (sender, args) =>
+            {
+                if (args.KeyCode == Keys.Escape && search.TextLength > 0) { search.Clear(); args.SuppressKeyPress = true; }
+                else if (args.KeyCode == Keys.Down && grid.Rows.Count > 0) { grid.Focus(); args.SuppressKeyPress = true; }
+            };
             tools.Controls.Add(filter, 0, 0);
 
             var actions = new FlowLayoutPanel { AutoSize = true, WrapContents = false, Margin = new Padding(0) };
@@ -170,11 +183,15 @@ namespace SshManager
             delete.Click += (sender, args) => { if (showRdp) DeleteDesktop(SelectedDesktop); else DeleteConnection(Selected); };
             refresh.Click += (sender, args) => Reload();
             actions.Controls.AddRange(new Control[] { backupButton, refresh, edit, delete });
+            hints.SetToolTip(add, "Ctrl+N");
+            hints.SetToolTip(refresh, "Перечитать SSH config и настройки (F5)");
+            hints.SetToolTip(edit, "Изменить выбранное подключение (F2)");
+            hints.SetToolTip(delete, "Удалить выбранное подключение (Delete)");
             tools.Controls.Add(actions, 1, 0);
 
             var list = new Panel { Dock = DockStyle.Fill, Margin = new Padding(0), Padding = new Padding(1), BackColor = Theme.Line };
             layout.Controls.Add(list, 0, 4);
-            grid = MakeGrid();
+            grid = MakeGrid(DeviceDpi);
             grid.SelectionChanged += (sender, args) => UpdateActions();
             grid.CellMouseClick += (sender, args) =>
             {
@@ -200,6 +217,8 @@ namespace SshManager
             grid.KeyDown += (sender, args) =>
             {
                 if (grid.CurrentRow?.Tag == null) return;
+                if (args.KeyCode == Keys.Delete && args.Modifiers == Keys.None) { args.Handled = true; delete.PerformClick(); return; }
+                if (args.KeyCode == Keys.F2 && args.Modifiers == Keys.None) { args.Handled = true; EditRow(grid.CurrentRow.Tag); return; }
                 if ((args.KeyCode == Keys.Enter || args.KeyCode == Keys.Space) &&
                     RunGridAction(grid.CurrentCell.OwningColumn, grid.CurrentRow.Tag))
                 {
@@ -265,7 +284,8 @@ namespace SshManager
             footer.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
             footer.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
             footer.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
-            source = new Label { Text = path, Dock = DockStyle.Fill, TextAlign = ContentAlignment.MiddleLeft, AutoEllipsis = true, ForeColor = Theme.Muted, Margin = Padding.Empty };
+            source = new PathLabel { Text = path, Dock = DockStyle.Fill, ForeColor = Theme.Muted, Margin = Padding.Empty };
+            hints.SetToolTip(source, path);
             status = new Label { Anchor = AnchorStyles.Right, AutoSize = true, ForeColor = Theme.Muted, Margin = new Padding(10, 0, 12, 0) };
             updateButton = Theme.Button("Обновления", 170, glyph: Glyph.Refresh);
             updateButton.Anchor = AnchorStyles.Right;
@@ -275,6 +295,8 @@ namespace SshManager
             footer.Controls.Add(updateButton, 2, 0);
             frame.Controls.Add(footer, 0, 1);
 
+            Theme.ScaleToDpi(this);
+            ResumeLayout();
             Shown += (sender, args) => Reload(openStartupTab: true);
             Shown += async (sender, args) => await CheckUpdates(interactive: false);
         }
@@ -294,6 +316,7 @@ namespace SshManager
             grid.Columns[TerminalColumn].HeaderText = rdp ? "Рабочий стол" : "Терминал";
             grid.Columns[FilesColumn].Visible = !rdp;
             source.Text = rdp ? settingsPath : Path.Combine(sshDirectory, "config");
+            hints.SetToolTip(source, source.Text);
             search.Clear();
             RefreshList(null);
         }
@@ -979,6 +1002,7 @@ namespace SshManager
         {
             if (sessions != null) return sessions;
             sessions = new SessionsPage { Visible = false };
+            Theme.ScaleToDpi(sessions);
             sessions.ThemeRequested += ToggleTheme;
             sessions.ShowFiles += OpenFiles;
             sessions.PickServer += () =>
@@ -1035,6 +1059,12 @@ namespace SshManager
 
         protected override bool ProcessCmdKey(ref Message msg, Keys keyData)
         {
+            if (catalog.Visible)
+            {
+                if (keyData == (Keys.Control | Keys.F)) { search.Focus(); search.SelectAll(); return true; }
+                if (keyData == (Keys.Control | Keys.N)) { add.PerformClick(); return true; }
+                if (keyData == Keys.F5) { Reload(); return true; }
+            }
             if (sessions != null && sessions.Visible)
             {
                 if (keyData == (Keys.Shift | Keys.Escape)) { ShowServers(); return true; }
@@ -1046,7 +1076,7 @@ namespace SshManager
 
         private static string Dash(string value) { return value.Length == 0 ? "—" : value; }
 
-        private static DataGridView MakeGrid()
+        private static DataGridView MakeGrid(int dpi)
         {
             var list = new DataGridView
             {
@@ -1057,22 +1087,22 @@ namespace SshManager
                 CellBorderStyle = DataGridViewCellBorderStyle.SingleHorizontal, EnableHeadersVisualStyles = false,
                 ColumnHeadersBorderStyle = DataGridViewHeaderBorderStyle.None,
                 ColumnHeadersHeightSizeMode = DataGridViewColumnHeadersHeightSizeMode.DisableResizing,
-                ColumnHeadersHeight = 37, RowTemplate = { Height = 45 },
+                ColumnHeadersHeight = GridPixels(37, dpi), RowTemplate = { Height = GridPixels(45, dpi) },
                 ColumnHeadersDefaultCellStyle = new DataGridViewCellStyle { BackColor = Theme.Canvas, ForeColor = Theme.Muted, Padding = new Padding(8, 0, 4, 0) },
                 DefaultCellStyle = new DataGridViewCellStyle { Padding = new Padding(8, 0, 4, 0) },
                 RowsDefaultCellStyle = new DataGridViewCellStyle { BackColor = Theme.Surface, ForeColor = Theme.Ink,
                     SelectionBackColor = Theme.Selection, SelectionForeColor = Theme.Ink }
             };
-            list.Columns.Add(MakeColumn("Псевдоним", 30, 103));
-            list.Columns.Add(MakeColumn("Адрес", 34, 105));
+            list.Columns.Add(MakeColumn("Псевдоним", 36, GridPixels(140, dpi)));
+            list.Columns.Add(MakeColumn("Адрес", 30, GridPixels(100, dpi)));
             for (int column = 0; column <= 1; column++)
             {
                 list.Columns[column].SortMode = DataGridViewColumnSortMode.Programmatic;
                 list.Columns[column].HeaderCell.ToolTipText = "Нажмите для сортировки";
             }
-            list.Columns.Add(MakeColumn("Пользователь", 23, 103));
+            list.Columns.Add(MakeColumn("Пользователь", 21, GridPixels(85, dpi)));
             list.Columns.Add(new DataGridViewTextBoxColumn { Name = PortColumn, HeaderText = "Порт", Width = 64, SortMode = DataGridViewColumnSortMode.NotSortable });
-            list.Columns.Add(MakeColumn("Вкладка", 22, 79));
+            list.Columns.Add(MakeColumn("Вкладка", 20, GridPixels(65, dpi)));
             list.Columns.Add(new DataGridViewButtonColumn
             {
                 Name = FilesColumn, HeaderText = "SFTP", Width = 100, FlatStyle = FlatStyle.Flat, Resizable = DataGridViewTriState.False
@@ -1169,6 +1199,7 @@ namespace SshManager
                 desktopMenu?.Dispose();
                 if (backupMenu != null) backupMenu.Dispose();
                 if (tabMenu != null) tabMenu.Dispose();
+                hints.Dispose();
             }
             base.Dispose(disposing);
         }

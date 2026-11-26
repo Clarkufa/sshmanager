@@ -26,8 +26,8 @@ namespace SshManager
             ForeColor = Theme.Ink;
             BackColor = Theme.Canvas;
             StartPosition = FormStartPosition.CenterParent;
-            AutoScaleMode = AutoScaleMode.Dpi;
-            AutoScaleDimensions = new SizeF(96, 96);
+            SuspendLayout();
+            AutoScaleMode = AutoScaleMode.None;
             ClientSize = new Size(495, 389);
             MinimumSize = new Size(430, 305);
             ShowInTaskbar = MaximizeBox = MinimizeBox = false;
@@ -53,7 +53,7 @@ namespace SshManager
             search = filter.Input;
             layout.Controls.Add(filter, 0, 1);
             list = new ListBox { AccessibleName = "Список серверов", Dock = DockStyle.Fill, Margin = new Padding(0),
-                IntegralHeight = false, DrawMode = DrawMode.OwnerDrawFixed, ItemHeight = 43, BorderStyle = BorderStyle.FixedSingle };
+                IntegralHeight = false, DrawMode = DrawMode.OwnerDrawFixed, ItemHeight = Theme.Scaled(this, 43), BorderStyle = BorderStyle.FixedSingle };
             list.DrawItem += DrawChoice;
             list.SelectedIndexChanged += (sender, args) => connect.Enabled = list.SelectedItem != null;
             list.MouseDoubleClick += (sender, args) => { if (list.IndexFromPoint(args.Location) >= 0) Submit(); };
@@ -81,6 +81,8 @@ namespace SshManager
                 args.SuppressKeyPress = true;
             };
             SelectProtocol(preferRdp);
+            Theme.ScaleToDpi(this);
+            ResumeLayout();
         }
 
         public Connection SelectedConnection { get; private set; }
@@ -129,9 +131,10 @@ namespace SshManager
             var row = args.Bounds;
             using (var fill = new SolidBrush((args.State & DrawItemState.Selected) != 0 ? Theme.Selection : Theme.Surface))
                 args.Graphics.FillRectangle(fill, row);
-            using (var dot = new SolidBrush(choice.Target.Color)) args.Graphics.FillEllipse(dot, row.X + 11, row.Y + 10, 7, 7);
-            var title = new Rectangle(row.X + 24, row.Y + 2, row.Width - 32, 22);
-            var detail = new Rectangle(row.X + 24, row.Y + 22, row.Width - 32, 18);
+            int S(int logical) => Theme.Scaled(list, logical);
+            using (var dot = new SolidBrush(choice.Target.Color)) args.Graphics.FillEllipse(dot, row.X + S(11), row.Y + S(10), S(7), S(7));
+            var title = new Rectangle(row.X + S(24), row.Y + S(2), row.Width - S(32), S(22));
+            var detail = new Rectangle(row.X + S(24), row.Y + S(22), row.Width - S(32), S(18));
             const TextFormatFlags flags = TextFormatFlags.EndEllipsis | TextFormatFlags.NoPrefix | TextFormatFlags.SingleLine | TextFormatFlags.VerticalCenter;
             TextRenderer.DrawText(args.Graphics, choice.Target.Alias, Theme.Emphasis, title, Theme.Ink, flags);
             string subtitle = choice.Target.Address + (choice.Target.Group.Length == 0 ? "" : "  ·  " + choice.Target.Group);

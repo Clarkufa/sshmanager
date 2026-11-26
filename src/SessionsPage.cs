@@ -132,6 +132,8 @@ namespace SshManager
 
     internal sealed class SessionsPage : UserControl
     {
+        private const string FullScreenHint = "Ctrl+Alt+Break переключает полноэкранный режим внутри сеанса";
+        private const string WindowHint = "Переоткрыть RDP-сеанс в отдельном окне";
         private readonly List<TerminalSession> sessions = new List<TerminalSession>();
         private readonly Func<SessionTarget, Size, PseudoTerminal> startProcess;
         private readonly NativeTerminalView terminal;
@@ -143,6 +145,10 @@ namespace SshManager
         private readonly SurfaceButton themeButton;
         private readonly ContextMenuStrip sessionMenu;
         private readonly ToolTip hints;
+        private readonly TableLayoutPanel info;
+        private readonly Dictionary<Button, string> labels = new Dictionary<Button, string>();
+        private readonly Dictionary<Button, int> fullWidths = new Dictionary<Button, int>();
+        private bool fittingButtons;
         private readonly Timer timer;
         private TerminalSession active;
         private long activationOrder;
@@ -211,7 +217,7 @@ namespace SshManager
             count = new Label { Dock = DockStyle.Fill, TextAlign = ContentAlignment.MiddleLeft, ForeColor = Theme.Muted, Margin = new Padding(2, 0, 0, 0) };
             sidebar.Controls.Add(count, 0, 1);
             list = new ListBox { AccessibleName = "Список сеансов", Dock = DockStyle.Fill, Margin = new Padding(0), IntegralHeight = false,
-                BackColor = Theme.Surface, ForeColor = Theme.Ink, BorderStyle = BorderStyle.FixedSingle, DrawMode = DrawMode.OwnerDrawFixed, ItemHeight = 46 };
+                BackColor = Theme.Surface, ForeColor = Theme.Ink, BorderStyle = BorderStyle.FixedSingle, DrawMode = DrawMode.OwnerDrawFixed, ItemHeight = Theme.Scaled(this, 46) };
             list.DrawItem += DrawSession;
             list.SelectedIndexChanged += (sender, args) =>
             {
@@ -259,13 +265,14 @@ namespace SshManager
             layout.Controls.Add(sidebar, 0, 1);
 
             var workspace = new TableLayoutPanel { Dock = DockStyle.Fill, Margin = new Padding(0), ColumnCount = 1, RowCount = 2 };
+            workspace.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
             workspace.RowStyles.Add(new RowStyle(SizeType.Absolute, 65));
             workspace.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
-            var info = new TableLayoutPanel { Dock = DockStyle.Fill, Margin = new Padding(0, 0, 0, 7), ColumnCount = 2, RowCount = 2 };
+            info = new TableLayoutPanel { Dock = DockStyle.Fill, Margin = new Padding(0, 0, 0, 7), ColumnCount = 2, RowCount = 2 };
             info.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
             info.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
-            info.RowStyles.Add(new RowStyle(SizeType.Percent, 54));
-            info.RowStyles.Add(new RowStyle(SizeType.Percent, 46));
+            info.RowStyles.Add(new RowStyle(SizeType.AutoSize)); // As tall as the buttons, so their border is not cut.
+            info.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
             selectedTitle = new Label { Dock = DockStyle.Fill, TextAlign = ContentAlignment.MiddleLeft, AutoEllipsis = true, Font = Theme.Emphasis, ForeColor = Theme.Ink, Margin = new Padding(0) };
             selectedDetail = new Label { Dock = DockStyle.Fill, TextAlign = ContentAlignment.MiddleLeft, AutoEllipsis = true, ForeColor = Theme.Muted, Margin = new Padding(0) };
             info.Controls.Add(selectedTitle, 0, 0);
@@ -285,10 +292,16 @@ namespace SshManager
             reconnectButton = Theme.Button("Переподключить", 150, glyph: Glyph.Refresh);
             reconnectButton.Click += (sender, args) => active?.Desktop?.Reconnect();
             hints = new ToolTip();
-            hints.SetToolTip(fullScreenButton, "Ctrl+Alt+Break переключает полноэкранный режим внутри сеанса");
-            hints.SetToolTip(windowButton, "Переоткрыть RDP-сеанс в отдельном окне");
+            hints.SetToolTip(fullScreenButton, FullScreenHint);
+            hints.SetToolTip(windowButton, WindowHint);
             buttons.Controls.AddRange(new Control[] { files, reconnectButton, windowButton, fullScreenButton, duplicate, close });
+            foreach (var button in new[] { files, reconnectButton, windowButton, fullScreenButton, duplicate })
+            {
+                labels[button] = button.Text;
+                fullWidths[button] = button.Width; // Logical width; FitButtons scales it.
+            }
             info.Controls.Add(buttons, 1, 0);
+            info.Resize += (sender, args) => FitButtons();
             workspace.Controls.Add(info, 0, 0);
 
             display = new Panel { Dock = DockStyle.Fill, Margin = new Padding(0), BackColor = NativeTerminalView.Background };
@@ -308,6 +321,18 @@ namespace SshManager
         }
 
         public void RefreshThemeButton() { Theme.RefreshSwitcher(themeButton); }
+
+        protected override void OnHandleCreated(EventArgs e)
+        {
+            base.OnHandleCreated(e);
+            FitButtons();
+        }
+
+        protected override void OnVisibleChanged(EventArgs e)
+        {
+            base.OnVisibleChanged(e);
+            if (Visible) FitButtons();
+        }
 
         public int CountOpen(string alias = null)
         {
@@ -387,6 +412,7 @@ namespace SshManager
         {
             var previous = active;
             var view = new RdpDesktop { Visible = false };
+            Theme.ScaleToDpi(view);
             var opened = new TerminalSession(target, view, number);
             sessions.Add(opened);
             try
@@ -479,7 +505,8 @@ namespace SshManager
                 list.SelectedItem = active;
             }
             finally { list.EndUpdate(); refreshingList = false; }
-            count.Text = "Открыто: " + CountOpen();
+            int open = CountOpen();
+            count.Text = "Открыто: " + open + (open == sessions.Count ? "" : " из " + sessions.Count);
         }
 
         private void RefreshDetails()
@@ -494,6 +521,40 @@ namespace SshManager
             windowButton.Visible = reconnectButton.Visible = fullScreenButton.Visible = active?.Desktop != null;
             fullScreenButton.Enabled = active?.Desktop?.IsConnected == true;
             empty.Visible = active == null;
+            FitButtons();
+        }
+
+        /// <summary>
+        /// Keeps room for the session title: when the buttons do not fit, "Новый сеанс этого сервера" and then the
+        /// other buttons show only their icons, with the label in a tooltip.
+        /// </summary>
+        private void FitButtons()
+        {
+            // Runs only after the page has been scaled to the DPI, which happens before its handle exists.
+            if (fittingButtons || !IsHandleCreated) return;
+            fittingButtons = true;
+            try
+            {
+                foreach (var button in labels.Keys) SetCompact(button, false);
+                var shown = new List<Control> { duplicate, close };
+                if (active?.Desktop != null) shown.InsertRange(0, new Control[] { reconnectButton, windowButton, fullScreenButton });
+                else if (active != null) shown.Insert(0, files);
+                int available = info.ClientSize.Width - Theme.Scaled(this, 160);
+                int Needed() => shown.Sum(button => button.Width + button.Margin.Horizontal);
+                if (Needed() > available) SetCompact(duplicate, true);
+                if (Needed() > available) foreach (var button in labels.Keys) SetCompact(button, true);
+            }
+            finally { fittingButtons = false; }
+        }
+
+        private void SetCompact(Button button, bool compact)
+        {
+            if (compact == (button.Text.Length == 0)) return;
+            string label = labels[button];
+            button.Text = compact ? "" : label;
+            button.Width = Theme.Scaled(this, compact ? 38 : fullWidths[button]);
+            button.AccessibleName = label;
+            hints.SetToolTip(button, compact ? label : button == fullScreenButton ? FullScreenHint : button == windowButton ? WindowHint : null);
         }
 
         private void OpenFiles()
@@ -508,9 +569,10 @@ namespace SshManager
             var bounds = args.Bounds;
             bool selected = (args.State & DrawItemState.Selected) != 0;
             using (var fill = new SolidBrush(selected ? Theme.Selection : Theme.Surface)) args.Graphics.FillRectangle(fill, bounds);
-            using (var dot = new SolidBrush(session.IsOpen ? session.Target.Color : Theme.Line)) args.Graphics.FillEllipse(dot, bounds.X + 9, bounds.Y + 12, 7, 7);
-            var title = new Rectangle(bounds.X + 20, bounds.Y + 4, bounds.Width - 26, 21);
-            var subtitle = new Rectangle(bounds.X + 20, bounds.Y + 24, bounds.Width - 26, 19);
+            int S(int logical) => Theme.Scaled(list, logical);
+            using (var dot = new SolidBrush(session.IsOpen ? session.Target.Color : Theme.Line)) args.Graphics.FillEllipse(dot, bounds.X + S(9), bounds.Y + S(12), S(7), S(7));
+            var title = new Rectangle(bounds.X + S(20), bounds.Y + S(4), bounds.Width - S(26), S(21));
+            var subtitle = new Rectangle(bounds.X + S(20), bounds.Y + S(24), bounds.Width - S(26), S(19));
             const TextFormatFlags flags = TextFormatFlags.EndEllipsis | TextFormatFlags.NoPrefix | TextFormatFlags.SingleLine | TextFormatFlags.VerticalCenter;
             TextRenderer.DrawText(args.Graphics, session.Title, Theme.Emphasis, title, Theme.Ink, flags);
             TextRenderer.DrawText(args.Graphics, session.Target.Protocol + " · " + (session.IsOpen ? session.Target.Address : "Сеанс завершён"),

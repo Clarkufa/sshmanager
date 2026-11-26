@@ -153,11 +153,12 @@ namespace SshManager
             StartPosition = FormStartPosition.CenterParent;
             ShowInTaskbar = MaximizeBox = MinimizeBox = false;
             FormBorderStyle = FormBorderStyle.FixedDialog;
-            AutoScaleMode = AutoScaleMode.Dpi;
-            AutoScaleDimensions = new SizeF(96, 96);
+            SuspendLayout();
+            AutoScaleMode = AutoScaleMode.None;
             ClientSize = new Size(460, creating ? 221 : 133);
 
             var layout = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, Padding = new Padding(20, 14, 20, 12) };
+            layout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
             Controls.Add(layout);
             password = AddField(layout, "Пароль");
             TextBox confirmation = creating ? AddField(layout, "Повторите пароль") : null;
@@ -165,7 +166,7 @@ namespace SshManager
             {
                 int row = layout.RowStyles.Count;
                 layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 28));
-                layout.Controls.Add(new Label { Text = "Защищённая копия включает сохранённые SSH-пароли.",
+                layout.Controls.Add(new Label { Text = "Защищённая копия включает сохранённые пароли SSH и RDP.",
                     AutoSize = true, ForeColor = Theme.Muted, Margin = new Padding(0) }, 0, row);
             }
             var buttons = new FlowLayoutPanel { Dock = DockStyle.Fill, FlowDirection = FlowDirection.RightToLeft, WrapContents = false };
@@ -187,6 +188,8 @@ namespace SshManager
             AcceptButton = submit;
             CancelButton = cancel;
             ActiveControl = password;
+            Theme.ScaleToDpi(this);
+            ResumeLayout();
         }
 
         public string Password { get { return password.Text; } }

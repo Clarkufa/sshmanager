@@ -32,8 +32,9 @@ namespace SshManager
         private const int ResizeDelay = 450, RetryDelay = 1500, MaxRetries = 6;
         private static readonly Guid EventInterface = new Guid("336d5562-efa8-482e-8cb3-c5c0fc7a7db6");
         private readonly List<KeyValuePair<int, Delegate>> handlers = new List<KeyValuePair<int, Delegate>>();
-        private readonly Panel overlay;
+        private readonly Panel overlay, overlayReason;
         private readonly Label overlayTitle, overlayDetail;
+        private readonly FlowLayoutPanel overlayActions;
         private readonly Timer resizeTimer;
         private RdpClientHost host;
         private object client;
@@ -52,31 +53,27 @@ namespace SshManager
             BackColor = NativeTerminalView.Background;
             AccessibleName = "Удалённый рабочий стол";
 
+            // Laid out by FitOverlay: centred when it fits, otherwise the title and buttons stay visible and
+            // only the reason scrolls (the RDP client's descriptions run to several paragraphs).
             overlay = new Panel { Dock = DockStyle.Fill, BackColor = NativeTerminalView.Background, Visible = false };
-            var layout = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 3, RowCount = 5, BackColor = NativeTerminalView.Background };
-            layout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50));
-            layout.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
-            layout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50));
-            layout.RowStyles.Add(new RowStyle(SizeType.Percent, 50));
-            layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-            layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-            layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-            layout.RowStyles.Add(new RowStyle(SizeType.Percent, 50));
-            overlayTitle = new Label { AutoSize = true, Font = Theme.Title, ForeColor = Color.Gainsboro, Anchor = AnchorStyles.None,
-                Margin = new Padding(0, 0, 0, 6) };
-            overlayDetail = new Label { AutoSize = true, MaximumSize = new Size(560, 0), ForeColor = Color.DarkGray, Anchor = AnchorStyles.None,
-                TextAlign = ContentAlignment.MiddleCenter, Margin = new Padding(0, 0, 0, 16) };
-            var actions = new FlowLayoutPanel { AutoSize = true, WrapContents = false, Anchor = AnchorStyles.None, Margin = Padding.Empty,
+            overlayTitle = new Label { AutoSize = true, Font = Theme.Title, ForeColor = Color.Gainsboro };
+            overlayDetail = new Label { AutoSize = true, MaximumSize = new Size(560, 0), ForeColor = Color.DarkGray,
+                TextAlign = ContentAlignment.MiddleCenter, Margin = Padding.Empty };
+            overlayReason = new Panel { AutoScroll = true, BackColor = NativeTerminalView.Background };
+            overlayReason.Controls.Add(overlayDetail);
+            Theme.DarkScrollBars(overlayReason);
+            overlayActions = new FlowLayoutPanel { AutoSize = true, WrapContents = false, Margin = Padding.Empty,
                 BackColor = NativeTerminalView.Background };
             var reconnect = Theme.Button("Переподключить", 160, true, Glyph.Refresh);
             reconnect.Click += (sender, args) => Reconnect();
             var close = Theme.Button("Закрыть сеанс", 140);
             close.Click += (sender, args) => CloseRequested?.Invoke();
-            actions.Controls.AddRange(new Control[] { reconnect, close });
-            layout.Controls.Add(overlayTitle, 1, 1);
-            layout.Controls.Add(overlayDetail, 1, 2);
-            layout.Controls.Add(actions, 1, 3);
-            overlay.Controls.Add(layout);
+            // The buttons clear their corners with their own BackColor (Canvas by default).
+            reconnect.BackColor = close.BackColor = NativeTerminalView.Background;
+            overlayActions.Controls.AddRange(new Control[] { reconnect, close });
+            overlay.Controls.AddRange(new Control[] { overlayTitle, overlayReason, overlayActions });
+            overlay.Resize += (sender, args) => FitOverlay();
+            overlay.VisibleChanged += (sender, args) => FitOverlay();
             Controls.Add(overlay);
 
             resizeTimer = new Timer { Interval = ResizeDelay };
@@ -171,7 +168,13 @@ namespace SshManager
             // The client shows full screen in a window of its own, so the session follows that window, not ours.
             Listen(5, new Action(() => { fullScreenMode = true; ScheduleSync(); }));
             Listen(6, new Action(() => { fullScreenMode = false; ScheduleSync(); }));
-            Listen(10, new Action<int>(code => ShowEnded("Ошибка RDP-клиента", "Код ошибки: " + code)));
+            Listen(10, new Action<int>(code =>
+            {
+                loggedIn = false;
+                resizeTimer.Stop();
+                ShowEnded("Ошибка RDP-клиента", "Код ошибки: " + code);
+                UpdateStatus("ошибка подключения", false);
+            }));
             UpdateStatus("подключение", true);
             Call(client, "Connect");
         }
@@ -221,6 +224,38 @@ namespace SshManager
             if (host != null) host.Visible = false;
             overlay.Visible = true;
             overlay.BringToFront();
+            FitOverlay();
+        }
+
+        /// <summary>
+        /// Centres the title, the reason and the buttons. When they do not fit, the reason gets the height that is
+        /// left and scrolls, so «Переподключить» and «Закрыть сеанс» are always on screen.
+        /// </summary>
+        private void FitOverlay()
+        {
+            if (IsDisposed) return;
+            var area = overlay.ClientSize;
+            int edge = Theme.Scaled(this, 12), small = Theme.Scaled(this, 6), large = Theme.Scaled(this, 16);
+            int width = Math.Min(Theme.Scaled(this, 560), area.Width - Theme.Scaled(this, 48));
+            overlayDetail.MaximumSize = new Size(Math.Max(Theme.Scaled(this, 200), width), 0);
+            var title = overlayTitle.PreferredSize;
+            var detail = overlayDetail.GetPreferredSize(Size.Empty);
+            var buttons = overlayActions.PreferredSize;
+            int fixedHeight = title.Height + small + large + buttons.Height;
+            int reasonHeight = Math.Max(0, Math.Min(detail.Height, area.Height - 2 * edge - fixedHeight));
+            bool scrolls = reasonHeight < detail.Height;
+            int reasonWidth = detail.Width + (scrolls ? SystemInformation.VerticalScrollBarWidth : 0);
+            int top = Math.Max(edge, (area.Height - fixedHeight - reasonHeight) / 2);
+            int Centre(int itemWidth) => Math.Max(0, (area.Width - itemWidth) / 2);
+
+            overlay.SuspendLayout();
+            overlayTitle.Location = new Point(Centre(title.Width), top);
+            top += title.Height + small;
+            overlayReason.Bounds = new Rectangle(Centre(reasonWidth), top, reasonWidth, reasonHeight);
+            overlayDetail.Location = new Point(0, overlayReason.AutoScrollPosition.Y);
+            top += reasonHeight + large;
+            overlayActions.Location = new Point(Centre(buttons.Width), top);
+            overlay.ResumeLayout(false);
         }
 
         private void UpdateStatus(string status, bool open)

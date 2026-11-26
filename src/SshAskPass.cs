@@ -220,6 +220,8 @@ namespace SshManager
                 FormBorderStyle = FormBorderStyle.FixedDialog;
                 StartPosition = FormStartPosition.CenterScreen;
                 MinimizeBox = MaximizeBox = false;
+                SuspendLayout();
+                AutoScaleMode = AutoScaleMode.None;
                 ClientSize = new Size(500, 175);
                 var layout = new TableLayoutPanel { Dock = DockStyle.Fill, Padding = new Padding(18, 12, 18, 12), ColumnCount = 1, RowCount = 3 };
                 layout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
@@ -229,7 +231,7 @@ namespace SshManager
                     TextAlign = ContentAlignment.MiddleLeft }, 0, 0);
                 response = new TextBox { UseSystemPasswordChar = true, AccessibleName = "Ответ на запрос SSH", MaxLength = SshPasswords.MaxBytes };
                 layout.Controls.Add(Theme.Frame(response, new Padding(0, 0, 0, 5)), 0, 1);
-                var actions = new FlowLayoutPanel { Dock = DockStyle.Fill, FlowDirection = FlowDirection.RightToLeft };
+                var actions = new FlowLayoutPanel { Dock = DockStyle.Fill, FlowDirection = FlowDirection.RightToLeft, Margin = Padding.Empty };
                 var send = Theme.Button("Продолжить", 118, true);
                 send.Click += (sender, args) =>
                 {
@@ -244,6 +246,8 @@ namespace SshManager
                 AcceptButton = send;
                 CancelButton = cancel;
                 ActiveControl = response;
+                Theme.ScaleToDpi(this);
+                ResumeLayout();
             }
         }
     }

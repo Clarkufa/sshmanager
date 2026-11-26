@@ -33,8 +33,8 @@ namespace SshManager
             ShowInTaskbar = false;
             MinimizeBox = false;
             MaximizeBox = false;
-            AutoScaleMode = AutoScaleMode.Dpi;
-            AutoScaleDimensions = new SizeF(96, 96);
+            SuspendLayout();
+            AutoScaleMode = AutoScaleMode.None;
             ClientSize = new Size(724, 526);
             MinimumSize = new Size(720, 549);
 
@@ -94,7 +94,7 @@ namespace SshManager
             {
                 AccessibleName = "Доступные ключи", Dock = DockStyle.Fill, DropDownStyle = ComboBoxStyle.DropDownList,
                 Margin = new Padding(0, 5, 0, 0), MaxDropDownItems = 12,
-                DrawMode = DrawMode.OwnerDrawFixed, ItemHeight = 19
+                DrawMode = DrawMode.OwnerDrawFixed, ItemHeight = Theme.Scaled(this, 19)
             };
             available.DrawItem += Theme.DrawChoice;
             picker.Controls.Add(available, 0, 0);
@@ -169,6 +169,8 @@ namespace SshManager
             AcceptButton = commit;
             CancelButton = cancel;
             ActiveControl = alias;
+            Theme.ScaleToDpi(this);
+            ResumeLayout();
         }
 
         public string Alias { get { return alias.Text.Trim(); } }

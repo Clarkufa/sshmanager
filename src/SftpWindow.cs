@@ -33,8 +33,8 @@ namespace SshManager
             ForeColor = Theme.Ink;
             BackColor = Theme.Canvas;
             StartPosition = FormStartPosition.CenterParent;
-            AutoScaleMode = AutoScaleMode.Dpi;
-            AutoScaleDimensions = new SizeF(96, 96);
+            SuspendLayout();
+            AutoScaleMode = AutoScaleMode.None;
             ClientSize = new Size(1090, 620);
             MinimumSize = new Size(800, 440);
 
@@ -158,6 +158,8 @@ namespace SshManager
             };
             connectionWatch.Start();
             UpdateActions();
+            Theme.ScaleToDpi(this);
+            ResumeLayout();
         }
 
         private bool Ready => operation == null && client != null && client.Connected && remote.DirectoryPath.Length > 0;
@@ -507,6 +509,7 @@ namespace SshManager
                 Margin = margin;
                 ColumnCount = 1;
                 RowCount = 4;
+                ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
                 RowStyles.Add(new RowStyle(SizeType.Absolute, 29));
                 RowStyles.Add(new RowStyle(SizeType.Absolute, 38));
                 RowStyles.Add(new RowStyle(SizeType.Absolute, 39));
@@ -532,14 +535,14 @@ namespace SshManager
                     RowHeadersVisible = false, SelectionMode = DataGridViewSelectionMode.FullRowSelect,
                     AllowUserToAddRows = false, AllowUserToDeleteRows = false, AllowUserToResizeRows = false,
                     EnableHeadersVisualStyles = false, MultiSelect = true,
-                    CellBorderStyle = DataGridViewCellBorderStyle.SingleHorizontal, ColumnHeadersHeight = 33,
+                    CellBorderStyle = DataGridViewCellBorderStyle.SingleHorizontal, ColumnHeadersHeight = Theme.Scaled(this, 33),
                     ColumnHeadersHeightSizeMode = DataGridViewColumnHeadersHeightSizeMode.DisableResizing,
                     DefaultCellStyle = new DataGridViewCellStyle { Padding = new Padding(6, 0, 5, 0) },
-                    RowTemplate = { Height = 30 }, AccessibleName = title
+                    RowTemplate = { Height = Theme.Scaled(this, 30) }, AccessibleName = title
                 };
-                Files.Columns.Add(new DataGridViewTextBoxColumn { HeaderText = "Имя", MinimumWidth = 85, AutoSizeMode = DataGridViewAutoSizeColumnMode.Fill });
-                Files.Columns.Add(new DataGridViewTextBoxColumn { HeaderText = "Размер", Width = 79 });
-                Files.Columns.Add(new DataGridViewTextBoxColumn { HeaderText = "Изменён", Width = 122 });
+                Files.Columns.Add(new DataGridViewTextBoxColumn { HeaderText = "Имя", MinimumWidth = Theme.Scaled(this, 85), AutoSizeMode = DataGridViewAutoSizeColumnMode.Fill });
+                Files.Columns.Add(new DataGridViewTextBoxColumn { HeaderText = "Размер", Width = Theme.Scaled(this, 79) });
+                Files.Columns.Add(new DataGridViewTextBoxColumn { HeaderText = "Изменён", Width = Theme.Scaled(this, 122) });
                 foreach (DataGridViewColumn column in Files.Columns) column.SortMode = DataGridViewColumnSortMode.NotSortable;
                 Files.SelectionChanged += (sender, args) => SelectionChanged?.Invoke();
                 Files.CellDoubleClick += (sender, args) => { if (args.RowIndex >= 0) Open?.Invoke((RemoteFile)Files.Rows[args.RowIndex].Tag); };
@@ -619,8 +622,11 @@ namespace SshManager
                 Font = Theme.Body;
                 ForeColor = Theme.Ink;
                 BackColor = Theme.Canvas;
+                SuspendLayout();
+                AutoScaleMode = AutoScaleMode.None;
                 ClientSize = new Size(570, 153);
                 var layout = new TableLayoutPanel { Dock = DockStyle.Fill, Padding = new Padding(18, 13, 18, 12), ColumnCount = 1 };
+                layout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
                 layout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
                 layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 39));
                 layout.Controls.Add(new Label { Text = "Элемент с таким именем уже есть:\n" + destination,
@@ -642,6 +648,8 @@ namespace SshManager
                 if (canReplace) Add("Заменить", 104, FileConflict.Replace);
                 layout.Controls.Add(buttons, 0, 1);
                 Controls.Add(layout);
+                Theme.ScaleToDpi(this);
+                ResumeLayout();
             }
         }
     }

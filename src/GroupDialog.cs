@@ -21,13 +21,15 @@ namespace SshManager
             ForeColor = Theme.Ink;
             StartPosition = FormStartPosition.CenterParent;
             FormBorderStyle = FormBorderStyle.FixedDialog;
-            AutoScaleMode = AutoScaleMode.Dpi;
-            AutoScaleDimensions = new SizeF(96, 96);
+            SuspendLayout();
+            AutoScaleMode = AutoScaleMode.None;
             MinimizeBox = MaximizeBox = ShowInTaskbar = false;
             ClientSize = new Size(410, 150);
 
             var layout = new TableLayoutPanel { Dock = DockStyle.Fill, Padding = new Padding(18, 14, 18, 14), ColumnCount = 1 };
+            layout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
             layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 29));
+            layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 38));
             layout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
             layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 38));
             var label = new Label { Text = labelText, AutoSize = true, Font = Theme.Emphasis, Margin = new Padding(0) };
@@ -53,12 +55,14 @@ namespace SshManager
                 }
             };
             actions.Controls.AddRange(new Control[] { commit, cancel });
-            layout.Controls.Add(actions, 0, 2);
+            layout.Controls.Add(actions, 0, 3);
             Controls.Add(layout);
             AcceptButton = commit;
             CancelButton = cancel;
             ActiveControl = name;
             name.SelectAll();
+            Theme.ScaleToDpi(this);
+            ResumeLayout();
         }
     }
 }

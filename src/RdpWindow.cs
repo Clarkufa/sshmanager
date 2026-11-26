@@ -25,8 +25,8 @@ namespace SshManager
             Font = Theme.Body;
             ForeColor = Theme.Ink;
             BackColor = Theme.Canvas;
-            AutoScaleMode = AutoScaleMode.Dpi;
-            AutoScaleDimensions = new SizeF(96, 96);
+            SuspendLayout();
+            AutoScaleMode = AutoScaleMode.None;
             StartPosition = FormStartPosition.WindowsDefaultLocation;
 
             var toolbar = new TableLayoutPanel { Dock = DockStyle.Top, Height = 46, ColumnCount = 2, Padding = new Padding(10, 6, 10, 6), BackColor = Theme.Canvas };
@@ -51,13 +51,15 @@ namespace SshManager
             Controls.Add(desktop);
             Controls.Add(toolbar);
 
+            MinimumSize = new Size(480, 360);
+            Theme.ScaleToDpi(this);
+            // A fixed remote resolution is in device pixels, so size the window after scaling the toolbar.
             var area = Screen.FromPoint(Cursor.Position).WorkingArea;
-            int toolbarHeight = toolbar.Height * DeviceDpi / 96;
-            var wanted = profile.Width != 0 ? new Size(profile.Width, profile.Height + toolbarHeight)
+            var wanted = profile.Width != 0 ? new Size(profile.Width, profile.Height + toolbar.Height)
                 : new Size(area.Width * 4 / 5, area.Height * 4 / 5);
             ClientSize = new Size(Math.Min(wanted.Width, area.Width - 40), Math.Min(wanted.Height, area.Height - 60));
-            MinimumSize = new Size(480, 360);
             RefreshState();
+            ResumeLayout();
         }
 
         public static void Open(RdpProfile profile, RdpCredential credential = null, IWin32Window owner = null)
@@ -80,6 +82,14 @@ namespace SshManager
                     (error.InnerException ?? error).Message, error));
                 Close();
             }
+        }
+
+        protected override void OnFormClosing(FormClosingEventArgs args)
+        {
+            if (args.CloseReason == CloseReason.UserClosing && desktop.IsConnected &&
+                MessageBox.Show(this, "Закрыть RDP-сеанс «" + profile.Name + "»?", "Вы уверены?", MessageBoxButtons.YesNo,
+                    MessageBoxIcon.Question, MessageBoxDefaultButton.Button2) != DialogResult.Yes) args.Cancel = true;
+            base.OnFormClosing(args);
         }
 
         private void RefreshState()

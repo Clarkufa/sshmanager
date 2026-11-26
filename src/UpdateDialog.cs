@@ -18,10 +18,11 @@ namespace SshManager
             StartPosition = FormStartPosition.CenterParent;
             ShowInTaskbar = MinimizeBox = MaximizeBox = false;
             ClientSize = new Size(460, 190);
-            AutoScaleMode = AutoScaleMode.Dpi;
-            AutoScaleDimensions = new SizeF(96, 96);
+            SuspendLayout();
+            AutoScaleMode = AutoScaleMode.None;
 
             var layout = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 4, Padding = new Padding(18, 13, 17, 13) };
+            layout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
             layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 44));
             layout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
             layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 30));
@@ -45,6 +46,8 @@ namespace SshManager
             Controls.Add(layout);
             AcceptButton = download;
             CancelButton = cancel;
+            Theme.ScaleToDpi(this);
+            ResumeLayout();
         }
 
         public static void OpenLink(IWin32Window owner, string url)

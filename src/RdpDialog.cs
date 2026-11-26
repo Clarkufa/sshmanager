@@ -17,8 +17,8 @@ namespace SshManager
             StartPosition = FormStartPosition.CenterParent;
             FormBorderStyle = FormBorderStyle.FixedDialog;
             ShowInTaskbar = MinimizeBox = MaximizeBox = false;
-            AutoScaleMode = AutoScaleMode.Dpi;
-            AutoScaleDimensions = new SizeF(96, 96);
+            SuspendLayout();
+            AutoScaleMode = AutoScaleMode.None;
             ClientSize = new Size(545, 450);
             string id = profile?.Id ?? Guid.NewGuid().ToString("N");
 
@@ -51,7 +51,11 @@ namespace SshManager
             var width = Field(layout, 7, "Ширина экрана", profile?.Width > 0 ? profile.Width.ToString() : "", 4);
             var height = Field(layout, 8, "Высота экрана", profile?.Height > 0 ? profile.Height.ToString() : "", 4);
             foreach (var size in new[] { width, height })
+            {
                 size.AccessibleDescription = "Оставьте пустым, чтобы разрешение подстраивалось под размер окна.";
+                Theme.SetCue(size, "по размеру окна");
+                tips.SetToolTip(size, size.AccessibleDescription);
+            }
             var clipboard = new CheckBox { Text = "Общий буфер обмена", Checked = profile?.Clipboard == true, AutoSize = true, Anchor = AnchorStyles.Left };
             layout.Controls.Add(clipboard, 1, 9);
             var fullScreen = new CheckBox { Text = "Открывать на весь экран", Checked = profile?.FullScreen == true, AutoSize = true, Anchor = AnchorStyles.Top | AnchorStyles.Left };
@@ -87,6 +91,8 @@ namespace SshManager
             layout.SetColumnSpan(buttons, 2);
             AcceptButton = commit;
             CancelButton = cancel;
+            Theme.ScaleToDpi(this);
+            ResumeLayout();
         }
 
         private static int Number(TextBox input, int fallback)
@@ -100,9 +106,8 @@ namespace SshManager
         private static TextBox Field(TableLayoutPanel layout, int row, string label, string value, int limit)
         {
             layout.Controls.Add(new Label { Text = label, AutoSize = true, Anchor = AnchorStyles.Left }, 0, row);
-            var field = new TextBox { AccessibleName = label, Text = value ?? "", MaxLength = limit,
-                Dock = DockStyle.Fill, BackColor = Theme.Surface, ForeColor = Theme.Ink };
-            layout.Controls.Add(field, 1, row);
+            var field = new TextBox { AccessibleName = label.Replace("&", ""), Text = value ?? "", MaxLength = limit };
+            layout.Controls.Add(Theme.Frame(field, new Padding(0, 2, 0, 2)), 1, row); // Same frame as the SSH dialog.
             return field;
         }
     }
@@ -120,8 +125,8 @@ namespace SshManager
             StartPosition = FormStartPosition.CenterParent;
             FormBorderStyle = FormBorderStyle.FixedDialog;
             ShowInTaskbar = MinimizeBox = MaximizeBox = false;
-            AutoScaleMode = AutoScaleMode.Dpi;
-            AutoScaleDimensions = new SizeF(96, 96);
+            SuspendLayout();
+            AutoScaleMode = AutoScaleMode.None;
             ClientSize = new Size(460, 214);
 
             var layout = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2, RowCount = 5, Padding = new Padding(18, 14, 18, 12) };
@@ -161,14 +166,15 @@ namespace SshManager
             AcceptButton = commit;
             CancelButton = cancel;
             Shown += (sender, args) => (account.Text.Length == 0 ? account : password).Focus();
+            Theme.ScaleToDpi(this);
+            ResumeLayout();
         }
 
         private static TextBox AddField(TableLayoutPanel layout, int row, string label, string value)
         {
             layout.Controls.Add(new Label { Text = label, AutoSize = true, Anchor = AnchorStyles.Left }, 0, row);
-            var field = new TextBox { AccessibleName = label.Replace("&", ""), Text = value ?? "", MaxLength = 257,
-                Dock = DockStyle.Fill, BackColor = Theme.Surface, ForeColor = Theme.Ink };
-            layout.Controls.Add(field, 1, row);
+            var field = new TextBox { AccessibleName = label.Replace("&", ""), Text = value ?? "", MaxLength = 257 };
+            layout.Controls.Add(Theme.Frame(field, new Padding(0, 2, 0, 2)), 1, row); // Same frame as the SSH dialog.
             return field;
         }
 
