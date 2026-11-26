@@ -1246,7 +1246,7 @@ private struct QuickConnectField: View {
                 .accessibilityLabel("Быстрое подключение")
         }
         .padding(.horizontal, 10)
-        .frame(minWidth: 150, maxWidth: 460, minHeight: 32, maxHeight: 32)
+        .frame(minWidth: 240, maxWidth: 460, minHeight: 32, maxHeight: 32)
         .background(RoundedRectangle(cornerRadius: 7).fill(palette.surface))
         .overlay(RoundedRectangle(cornerRadius: 7).strokeBorder(focused ? palette.teal : palette.line, lineWidth: 1))
         .help("Подключиться без сохранения профиля. Enter — подключиться.")
