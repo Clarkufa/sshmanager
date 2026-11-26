@@ -117,17 +117,34 @@ private final class UpdateRedirects: NSObject, URLSessionTaskDelegate {
     }
 }
 
+/// Why the app could not replace itself; `permission` means macOS «Управление приложениями» blocked it.
+struct UpdateInstallError: LocalizedError {
+    let message: String
+    var permission = false
+    var errorDescription: String? { message }
+}
+
 struct MacBundleReplacement {
+    static let appManagementSettings = URL(string:
+        "x-apple.systempreferences:com.apple.settings.PrivacySecurity.extension?Privacy_AppBundles")!
     let live: URL
     private let stage: URL
     private let previous: URL
 
     static func install(_ image: URL, version: UpdateVersion, at live: URL) throws -> Self {
         let fm = FileManager.default
+        // An app opened right from a download runs from a read-only random path (App Translocation).
+        if live.path.contains("/AppTranslocation/") || live.path.hasPrefix("/Volumes/") {
+            throw UpdateInstallError(message: "SSH Manager запущен не из папки «Программы». "
+                                     + "Перенесите его в «Программы», запустите оттуда и повторите обновление.")
+        }
         guard live.pathExtension.lowercased() == "app", live.resolvingSymlinksInPath().path == live.path,
-              let installed = try LocalFiles.item(live),
-              installed.kind == .directory, fm.isWritableFile(atPath: live.deletingLastPathComponent().path) else {
-            throw ManagerError("Для замены приложения нужна доступная для записи папка.")
+              let installed = try LocalFiles.item(live), installed.kind == .directory else {
+            throw UpdateInstallError(message: "Не удалось найти установленное приложение SSH Manager.")
+        }
+        guard fm.isWritableFile(atPath: live.deletingLastPathComponent().path) else {
+            throw UpdateInstallError(message: "Нет прав на запись в папку «\(live.deletingLastPathComponent().path)». "
+                                     + "Войдите как администратор или установите обновление из DMG.")
         }
         let original = try info(live)
         guard let identity = original["CFBundleIdentifier"] as? String,
@@ -135,7 +152,6 @@ struct MacBundleReplacement {
               let current = UpdateVersion(installedVersion), current < version else {
             throw ManagerError("Эта версия уже установлена или устарела.")
         }
-        try run("/usr/bin/codesign", ["--verify", "--deep", "--strict", "--all-architectures", live.path])
         let mount = image.deletingLastPathComponent().appendingPathComponent("volume")
         try fm.createDirectory(at: mount, withIntermediateDirectories: false)
         try run("/usr/bin/hdiutil", ["attach", "-readonly", "-nobrowse", "-noautoopen", "-mountpoint", mount.path, image.path])
@@ -184,7 +200,13 @@ struct MacBundleReplacement {
 
     private static func swap(_ a: URL, _ b: URL) throws {
         guard renamex_np(a.path, b.path, UInt32(RENAME_SWAP)) == 0 else {
-            throw ManagerError("Не удалось заменить приложение: \(String(cString: strerror(errno))).")
+            let code = errno
+            if code == EPERM || code == EACCES {
+                throw UpdateInstallError(message: "macOS не разрешил SSH Manager заменить приложение. Включите SSH Manager в "
+                                         + "«Системные настройки → Конфиденциальность и безопасность → Управление приложениями» "
+                                         + "и нажмите «Повторить».", permission: true)
+            }
+            throw UpdateInstallError(message: "Не удалось заменить приложение: \(String(cString: strerror(code))).")
         }
     }
 
@@ -192,12 +214,17 @@ struct MacBundleReplacement {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: command)
         process.arguments = arguments
+        let errors = Pipe()
         process.standardOutput = FileHandle.nullDevice
-        process.standardError = FileHandle.nullDevice
+        process.standardError = errors
         try process.run()
+        let output = errors.fileHandleForReading.readDataToEndOfFile()
         process.waitUntilExit()
         guard process.terminationStatus == 0 else {
-            throw ManagerError("Не удалось проверить или установить приложение (\(process.executableURL!.lastPathComponent)).")
+            let detail = String(decoding: output.prefix(2048), as: UTF8.self)
+                .split(separator: "\n").last.map { ": " + $0.trimmingCharacters(in: .whitespaces) } ?? ""
+            throw UpdateInstallError(message: "Не удалось проверить или установить приложение "
+                                     + "(\(process.executableURL!.lastPathComponent)\(detail)).")
         }
     }
 }
@@ -210,6 +237,8 @@ final class MacUpdates: ObservableObject {
     @Published private(set) var installing = false
     @Published private(set) var message: String?
     @Published private(set) var manualImage: URL?
+    /// macOS «Управление приложениями» blocked the replacement: the window offers its settings and «Повторить».
+    @Published private(set) var needsPermission = false
     private var automaticCheckStarted = false
 
     func check(manual: Bool) {
@@ -237,33 +266,53 @@ final class MacUpdates: ObservableObject {
         installing = true
         message = nil
         manualImage = nil
+        needsPermission = false
         Task {
             defer { installing = false }
             do {
                 let image = try await available.download()
-                let live = Bundle.main.bundleURL.absoluteURL.standardizedFileURL
-                do {
-                    let replacement = try await Task.detached(priority: .utility) {
-                        try MacBundleReplacement.install(image, version: available.version, at: live)
-                    }.value
-                    let configuration = NSWorkspace.OpenConfiguration()
-                    configuration.createsNewApplicationInstance = true
-                    do {
-                        _ = try await NSWorkspace.shared.openApplication(at: live, configuration: configuration)
-                    } catch {
-                        try replacement.rollback()
-                        throw error
-                    }
-                    replacement.clean()
-                    try? FileManager.default.removeItem(at: image.deletingLastPathComponent())
-                    NSApp.terminate(nil)
-                } catch {
-                    manualImage = image
-                    message = "Файл скачан и проверен. Для ручной установки откройте DMG. \(error.localizedDescription)"
-                }
+                await replace(with: image, version: available.version)
             } catch {
                 message = "Не удалось скачать обновление. \(error.localizedDescription)"
             }
+        }
+    }
+
+    /// «Повторить» with the image that was already downloaded and checked.
+    func retry() {
+        guard let available, let image = manualImage, !installing, !checking else { return }
+        installing = true
+        message = nil
+        needsPermission = false
+        Task {
+            defer { installing = false }
+            await replace(with: image, version: available.version)
+        }
+    }
+
+    private func replace(with image: URL, version: UpdateVersion) async {
+        let live = Bundle.main.bundleURL.absoluteURL.standardizedFileURL
+        do {
+            let replacement = try await Task.detached(priority: .utility) {
+                try MacBundleReplacement.install(image, version: version, at: live)
+            }.value
+            let configuration = NSWorkspace.OpenConfiguration()
+            configuration.createsNewApplicationInstance = true
+            do {
+                _ = try await NSWorkspace.shared.openApplication(at: live, configuration: configuration)
+            } catch {
+                try replacement.rollback()
+                throw UpdateInstallError(message: "Новая версия установлена, но не запустилась, поэтому возвращена прежняя. "
+                                         + error.localizedDescription)
+            }
+            replacement.clean()
+            try? FileManager.default.removeItem(at: image.deletingLastPathComponent())
+            NSApp.terminate(nil)
+        } catch {
+            manualImage = image
+            needsPermission = (error as? UpdateInstallError)?.permission == true
+            message = needsPermission ? error.localizedDescription
+                : "Не удалось установить автоматически. \(error.localizedDescription) Файл скачан и проверен: можно открыть DMG и перенести SSH Manager в «Программы»."
         }
     }
 }
@@ -293,9 +342,14 @@ struct MacUpdateView: View {
             }
             HStack {
                 Spacer()
-                if let image = updates.manualImage {
+                if let image = updates.manualImage, !updates.installing {
                     Button("Закрыть") { dismiss() }.keyboardShortcut(.cancelAction).winButton(.outline)
-                    Button("Открыть DMG") { NSWorkspace.shared.open(image) }.winButton(.primary)
+                    Button("Открыть DMG") { NSWorkspace.shared.open(image) }.winButton(.outline)
+                    if updates.needsPermission {
+                        Button("Открыть настройки") { NSWorkspace.shared.open(MacBundleReplacement.appManagementSettings) }
+                            .winButton(.outline)
+                    }
+                    Button("Повторить") { updates.retry() }.keyboardShortcut(.defaultAction).winButton(.primary)
                 } else if updates.available != nil && !updates.installing {
                     Button("Позже") { dismiss() }.keyboardShortcut(.cancelAction).winButton(.outline)
                     Button { confirming = true } label: { GlyphLabel(title: "Скачать обновление", glyph: .refresh, kind: .primary) }
