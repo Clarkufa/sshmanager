@@ -11,9 +11,12 @@ rm -f build/rdp-shared/size
 docker run -d --name sshm-xrdp --network sshm-net -v "$PWD/build/rdp-shared:/shared" sshm-xrdp-test >/dev/null
 sleep 3
 docker exec -d sshm-xrdp sh -c 'while true; do su tester -c remote-size > /shared/size.tmp 2>/dev/null && mv /shared/size.tmp /shared/size; sleep 0.5; done'
+# The check's own exit code decides the result; the log is filtered only for reading.
 status=0
 docker run --rm --network sshm-net -v "$PWD:/work" sshm-linux-dev sh -c \
     'timeout 180 xvfb-run -a -s "-screen 0 1280x800x24" dbus-run-session python3 -B tests/linux-ui/rdp_embedded.py sshm-xrdp' \
-    2>&1 | grep -v -E "AT-SPI|dbus-daemon|^$" || status=$?
+    > build/rdp-check.log 2>&1 || status=$?
+grep -v -E "AT-SPI|dbus-daemon|^$" build/rdp-check.log || true
 docker rm -f sshm-xrdp >/dev/null
+[ "$status" -eq 0 ] && echo "PASS embedded RDP" || echo "FAIL embedded RDP (exit $status)"
 exit $status

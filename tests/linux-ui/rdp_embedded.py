@@ -52,7 +52,6 @@ window.move(0, 0)
 window.resize(1000, 640)
 desktop = window.desktop_profiles()[0]
 MemoryVault.items[desktop.secret.key] = "Rdp-Test-2026"
-results = []
 
 
 def wait(predicate, seconds):
@@ -77,6 +76,45 @@ def remote():
         return "?"
 
 
+def remote_size():
+    parts = remote().replace(" ", "").split("x")
+    try:
+        return int(parts[0]), int(parts[1])
+    except (ValueError, IndexError):
+        return None
+
+
+failures = []
+
+
+def check(label, condition):
+    print(("ok    " if condition else "FAIL  ") + label, flush=True)
+    if not condition:
+        failures.append(label)
+
+
+def follows(session, seconds=15):
+    """The remote desktop takes the size of the area it is embedded in (dynamic resolution)."""
+    def matches():
+        area = session.area.get_allocation()
+        size = remote_size()
+        return size is not None and abs(size[0] - area.width) <= 8 and abs(size[1] - area.height) <= 8
+    return wait(matches, seconds)
+
+
+def area_changes(session, previous, seconds=8):
+    """Waits for the window's new size to reach the embedded area before comparing resolutions."""
+    def changed():
+        area = session.area.get_allocation()
+        return (area.width, area.height) != previous
+    return wait(changed, seconds)
+
+
+def area(session):
+    allocation = session.area.get_allocation()
+    return allocation.width, allocation.height
+
+
 def shot(name):
     root = Gdk.get_default_root_window()
     Gdk.pixbuf_get_from_window(root, 0, 0, root.get_width(), root.get_height()).savev(str(OUT / f"{name}.png"), "png", [], [])
@@ -84,50 +122,61 @@ def shot(name):
 
 def report(label, session):
     area = session.area.get_allocation()
-    line = f"{label}: area {area.width}x{area.height} -> remote {remote()} · status {session.status}"
-    print(line, flush=True)
-    results.append(line)
+    print(f"{label}: area {area.width}x{area.height} -> remote {remote()} · status {session.status}", flush=True)
 
 
 def scenario():
-    window.select_protocol("rdp")
-    window.connect_profile(desktop)
-    session = next(item for item in window.sessions if isinstance(item, RdpSession))
-    print("embedded:", session.embedded, flush=True)
-    if not wait(lambda: session.status == "подключён" or not session.live, 60):
-        print("FAIL: not connected; status", session.status, flush=True)
-    pump(6)
-    report("window", session)
-    shot("20-rdp-embedded")
-    window.resize(1200, 760)
-    pump(6)
-    report("resized", session)
-    window.enter_full_screen(session)
-    window.resize(1280, 800)  # no window manager under Xvfb: make the window as large as the screen
-    pump(6)
-    report("full screen", session)
-    shot("21-rdp-full-screen")
-    window.leave_full_screen()
-    window.resize(1000, 640)
-    pump(6)
-    report("left full screen", session)
-    window.detach_session(session)
-    detached = next(item for item in window.sessions if isinstance(item, RdpSession))
-    wait(lambda: detached.status == "подключён" or not detached.live, 30)
-    pump(4)
-    print("separate window:", detached.embedded is False, detached.status, "· sessions", len(window.sessions), flush=True)
-    shot("23-rdp-separate-window")
-    import os as _os
-    import signal as _signal
-    _os.kill(detached.pid, _signal.SIGKILL)
-    wait(lambda: not detached.live, 10)
-    pump(1)
-    print("after kill:", detached.status, "|", detached.ended_title.get_text(), flush=True)
-    shot("22-rdp-ended")
-    window.close_session(detached, confirm_close=False)
+    try:
+        steps()
+    except Exception as error:  # a broken step must fail the check, not hang it
+        import traceback
+        traceback.print_exc()
+        failures.append(f"exception: {error}")
     application.quit()
     return False
 
 
+def steps():
+    window.select_protocol("rdp")
+    window.connect_profile(desktop)
+    session = next(item for item in window.sessions if isinstance(item, RdpSession))
+    check("RDP opens embedded under X11", session.embedded)
+    check("connected to xrdp", wait(lambda: session.status == "подключён", 60))
+    check("remote desktop matches the window", follows(session))
+    report("window", session)
+    shot("20-rdp-embedded")
+    before = area(session)
+    window.resize(1200, 760)
+    check("remote desktop follows a resize", area_changes(session, before) and follows(session))
+    report("resized", session)
+    before = area(session)
+    window.enter_full_screen(session)
+    window.resize(1280, 800)  # no window manager under Xvfb: make the window as large as the screen
+    check("full screen uses the whole screen",
+          area_changes(session, before) and follows(session) and (remote_size() or (0, 0))[0] >= 1270)
+    report("full screen", session)
+    shot("21-rdp-full-screen")
+    before = area(session)
+    window.leave_full_screen()
+    window.resize(1000, 640)
+    check("leaving full screen shrinks it back",
+          area_changes(session, before) and follows(session) and (remote_size() or (9999, 0))[0] < 1100)
+    report("left full screen", session)
+    window.detach_session(session)
+    detached = next(item for item in window.sessions if isinstance(item, RdpSession))
+    check("«В окне» reconnects in a separate window",
+          wait(lambda: detached.status == "подключён", 30) and detached.embedded is False and len(window.sessions) == 1)
+    shot("23-rdp-separate-window")
+    import signal
+    os.kill(detached.pid, signal.SIGKILL)
+    check("a killed client ends the session", wait(lambda: not detached.live, 10))
+    pump(1)
+    check(f"overlay explains it: {detached.ended_title.get_text()}", bool(detached.ended_title.get_text()))
+    shot("22-rdp-ended")
+    window.close_session(detached, confirm_close=False)
+
+
 GLib.timeout_add(800, scenario)
 application.run([])
+print("failures:", len(failures), flush=True)
+sys.exit(1 if failures else 0)
