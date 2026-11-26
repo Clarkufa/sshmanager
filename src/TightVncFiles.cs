@@ -186,10 +186,10 @@ namespace SshManager
                 {
                     ulong size = reader.Read64(), milliseconds = reader.Read64();
                     ushort flags = reader.Read16();
-                    string name = reader.ReadText();
+                    string name = reader.ReadText(tight: true);
                     if (name == "." || name == "..") continue;
                     if (name.Length == 0 || name.IndexOfAny(new[] { '/', '\\', '\0' }) >= 0 || size > Int64.MaxValue) throw BadReply();
-                    DateTime? modified = milliseconds > 253402300799999 ? (DateTime?)null : Epoch.AddMilliseconds(milliseconds);
+                    DateTime? modified = milliseconds == 0 || milliseconds > 253402300799999 ? (DateTime?)null : Epoch.AddMilliseconds(milliseconds);
                     entries.Add(new RemoteFile(name, new FileMetadata((flags & 1) != 0, false, (long)size, modified)));
                 }
                 if (data.Position != data.Length) throw BadReply();
@@ -259,10 +259,11 @@ namespace SshManager
         public void Upload(string path, Stream source, Action<long, long> progress, CancellationToken token, Action created, uint? permissions)
         {
             token.ThrowIfCancellationRequested();
+            if (Info(path) != null) throw new IOException("Временный файл уже существует на сервере.");
             Send(UploadStart, request =>
             {
                 request.WriteText(path);
-                request.WriteByte(0); // Create; existing files remain intact.
+                request.WriteByte(1); // TightVNC creates or truncates the unique staging path.
                 request.Write64(0);
             });
             Reply(UploadStart + 1);
@@ -335,7 +336,7 @@ namespace SshManager
                 }
                 if (type != 0xfc) throw BadReply();
                 uint code = ((uint)type << 24) | ((uint)wire.ReadByte() << 16) | wire.Read16();
-                if (code == Failed) throw new IOException(wire.ReadText());
+                if (code == Failed) throw new IOException(wire.ReadText(tight: true));
                 if (code == expected || code == alternative) return code;
                 throw BadReply();
             }
@@ -385,9 +386,12 @@ namespace SshManager
                 catch (IOException) { disconnected?.Invoke(); throw; }
             }
 
-            public string ReadText()
+            public string ReadText(bool tight = false)
             {
-                try { return Utf8.GetString(Bytes(Read32(), 64 * 1024)); }
+                var data = Bytes(Read32(), 64 * 1024);
+                int length = data.Length;
+                if (tight && length > 0 && data[length - 1] == 0) length--;
+                try { return Utf8.GetString(data, 0, length); }
                 catch (DecoderFallbackException) { throw BadReply(); }
             }
             public void Write(byte[] data) => Write(data, data.Length);
@@ -403,8 +407,9 @@ namespace SshManager
             public void WriteText(string text)
             {
                 var data = Utf8.GetBytes(text);
-                Write32((uint)data.Length);
+                Write32((uint)data.Length + 1);
                 Write(data);
+                WriteByte(0);
             }
         }
     }

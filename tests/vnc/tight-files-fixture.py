@@ -24,8 +24,8 @@ def pack(format, *values):
     return struct.pack(">" + format, *values)
 
 
-def string(value):
-    data = value.encode("utf-8")
+def string(value, tight=True):
+    data = value.encode("utf-8") + (b"\0" if tight else b"")
     return pack("I", len(data)) + data
 
 
@@ -50,7 +50,9 @@ def serve(sock, mode):
         return struct.unpack(">" + format, read(struct.calcsize(">" + format)))
 
     def path():
-        return read(unpack("I")[0]).decode("utf-8")
+        data = read(unpack("I")[0])
+        assert data.endswith(b"\0")
+        return data[:-1].decode("utf-8")
 
     def reply(code, payload=b""):
         sock.sendall(pack("I", PREFIX | code) + payload)
@@ -66,7 +68,7 @@ def serve(sock, mode):
     assert read(1) == bytes([16])
     sock.sendall(pack("III", 0, 0, 0))
     assert read(1) == bytes([1])  # Shared session.
-    sock.sendall(pack("HH", 640, 480) + bytes(16) + string("Fixture"))
+    sock.sendall(pack("HH", 640, 480) + bytes(16) + string("Fixture", tight=False))
     if mode == "absent":
         sock.sendall(pack("HHHH", 0, 0, 0, 0))
         assert stream.read(1) == b""
@@ -103,7 +105,7 @@ def serve(sock, mode):
             reply(0x112)
         elif code == 0x106:
             upload = path()
-            assert upload not in entries and unpack("BQ") == (0, 0)
+            assert upload not in entries and unpack("BQ") == (1, 0)
             entries[upload] = b""
             reply(0x107)
         elif code == 0x108:
