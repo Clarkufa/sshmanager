@@ -45,7 +45,8 @@ struct SSHManagerApp: App {
                     manager.showServers()
                     NotificationCenter.default.post(name: .focusQuickConnect, object: nil)
                 }.keyboardShortcut("l", modifiers: .command)
-                Button("Резервные копии…") { manager.managingBackups = true }
+                Button("Экспорт архива…") { manager.exportBackup() }
+                Button("Импорт архива…") { manager.importBackup() }
                 Button("Импорт из других программ…") { manager.importing = true }
                 Button("Обновления…") { updates.check(manual: true) }
                 Divider()
@@ -106,7 +107,7 @@ private struct ManagerView: View {
         }
         .sheet(item: $manager.logonRequest) { request in LogonSheet(request: request) }
         .sheet(isPresented: $manager.choosingServer) { ServerPicker(manager: manager) }
-        .sheet(isPresented: $manager.managingBackups) { BackupView(manager: manager) }
+        .sheet(item: $manager.backupPassword) { request in BackupPasswordSheet(request: request) }
         .sheet(isPresented: $updates.presented) { MacUpdateView(updates: updates) }
         .sheet(isPresented: $manager.editingSettings) {
             SettingsSheet(preferences: manager.settings.preferences) { try manager.savePreferences($0) }
@@ -204,14 +205,14 @@ private struct Footer: View {
                 Text(manager.catalogProtocol == .ssh ? manager.configPath : "~/Library/Application Support/SSH Manager/tabs.xml")
                     .foregroundStyle(palette.muted).lineLimit(1).truncationMode(.middle)
                 Spacer()
-                Text(CatalogModel(manager: manager).statusText).foregroundStyle(palette.muted)
+                Text(CatalogModel(manager: manager, query: manager.catalogQuery).statusText).foregroundStyle(palette.muted)
             } else {
                 Spacer()
             }
             Button {
                 if updates.available != nil { updates.presented = true } else { updates.check(manual: true) }
             } label: {
-                GlyphLabel(title: updates.checking ? "Проверка…" :
+                GlyphLabel(title: updates.checking ? "Проверка…" : updates.installing ? "Загрузка…" :
                             updates.available.map { "Обновить до \($0.version)" } ?? "Обновления", glyph: .refresh)
             }
             .winButton(.outline)
@@ -265,19 +266,20 @@ private struct CatalogModel {
 
     var statusText: String {
         let total = manager.catalogProtocol == .ssh ? groupProfiles.count : groupDesktops.count
-        return "Подключений: \(total)"
+        let shown = manager.catalogProtocol == .ssh ? profiles.count : desktops.count
+        return shown == total ? "Подключений: \(total)" : "Найдено: \(shown) из \(total)"
     }
 }
 
 private struct CatalogPage: View {
     @ObservedObject var manager: Manager
-    @State private var query = ""
     @State private var selection: String?
     @FocusState private var searchFocused: Bool
     @Environment(\.colorScheme) private var scheme
 
     var body: some View {
         let rdp = manager.catalogProtocol == .rdp
+        let query = manager.catalogQuery
         let model = CatalogModel(manager: manager, query: query)
         VStack(alignment: .leading, spacing: 0) {
             PageHeader(title: rdp ? "RDP-подключения" : "SSH-подключения") {
@@ -298,7 +300,7 @@ private struct CatalogPage: View {
                 ForEach(ConnectionProtocol.allCases) { kind in
                     Button {
                         manager.catalogProtocol = kind
-                        query = ""
+                        manager.catalogQuery = ""
                         selection = nil
                     } label: { GlyphLabel(title: kind.rawValue, glyph: kind == .ssh ? .terminal : .server) }
                         .winButton(manager.catalogProtocol == kind ? .selectedTab : .tab)
@@ -317,11 +319,11 @@ private struct CatalogPage: View {
 
     private func tools(rdp: Bool, model: CatalogModel) -> some View {
         HStack(spacing: 4) {
-            SearchField(placeholder: "Найти сервер", text: $query, focus: $searchFocused).frame(width: 265)
+            SearchField(placeholder: "Найти сервер", text: $manager.catalogQuery, focus: $searchFocused).frame(width: 265)
             Spacer()
             Menu {
-                Button("Экспорт архива…") { manager.managingBackups = true }
-                Button("Импорт архива…") { manager.managingBackups = true }
+                Button("Экспорт архива…") { manager.exportBackup() }
+                Button("Импорт архива…") { manager.importBackup() }
                 Divider()
                 Button("Импорт из других программ…") { manager.importing = true }
             } label: { GlyphLabel(title: "Резервные копии", glyph: .folder) }
@@ -695,7 +697,7 @@ private struct SessionsPage: View {
                     SearchField(placeholder: "Найти сеанс", text: $query, focus: $searchFocused) {
                         if let first = entries.first { manager.activate(first.id) }
                     }
-                    Text("Открыто: \(manager.liveCount)").font(.system(size: 12)).foregroundStyle(palette.muted).padding(.leading, 2)
+                    Text("Открыто: \(manager.liveCount)" + (manager.liveCount == manager.entries.count ? "" : " из \(manager.entries.count)")).font(.system(size: 12)).foregroundStyle(palette.muted).padding(.leading, 2)
                     ScrollView {
                         LazyVStack(spacing: 0) {
                             ForEach(entries) { entry in

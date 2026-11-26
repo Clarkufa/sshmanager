@@ -21,7 +21,6 @@ final class FilesController: ObservableObject {
     @Published var remoteItems: [FileRow] = []
     @Published var localSelection = Set<String>()
     @Published var remoteSelection = Set<String>()
-    @Published var collision: Collision = .keepBoth
     @Published var busy = false
     @Published var online = false
     @Published var transfer: String?
@@ -103,11 +102,10 @@ final class FilesController: ObservableObject {
         let remoteDirectory = remote
         let selected = remoteItems.filter { remoteSelection.contains($0.id) }
         let sources = dropped ?? localItems.filter { localSelection.contains($0.id) }.map { localDirectory.appendingPathComponent($0.name) }
-        let choice = collision
         transfer = "Подготовка передачи…"
         run { [weak self] token in
             var last = Date.distantPast
-            let copy = FileTransfer(client, collision: choice, check: token.check) { name, bytes in
+            let copy = FileTransfer(client, decide: Self.askCollision, check: token.check) { name, bytes in
                 guard Date().timeIntervalSince(last) >= 0.12 else { return }
                 last = Date()
                 let size = ByteCountFormatter.string(fromByteCount: Int64(clamping: bytes), countStyle: .file)
@@ -150,6 +148,32 @@ final class FilesController: ObservableObject {
     }
 
     enum RemoteAction { case create, rename(String), delete(Bool) }
+
+    /// «Файл уже существует»: «Сохранить оба» (default), «Заменить», «Пропустить» or «Отмена», asked on the main thread.
+    private static func askCollision(_ path: String) throws -> Collision {
+        let answer: Collision? = DispatchQueue.main.sync {
+            let alert = NSAlert()
+            alert.messageText = "Файл уже существует"
+            alert.informativeText = "Элемент с таким именем уже есть:\n" + path
+            for title in ["Сохранить оба", "Заменить", "Пропустить", "Отмена"] { alert.addButton(withTitle: title) }
+            switch alert.runModal() {
+            case .alertFirstButtonReturn: return .keepBoth
+            case .alertSecondButtonReturn: return .replace
+            case .alertThirdButtonReturn: return .skip
+            default: return nil
+            }
+        }
+        guard let answer else { throw CancellationError() }
+        return answer
+    }
+
+    func reconnect() {
+        guard !busy else { return }
+        close()
+        connect()
+    }
+
+    var transferring: Bool { transfer != nil }
 
     private func run(recoverConnection: Bool = false, _ task: @escaping (Cancellation) throws -> (FilesController) -> Void) {
         guard !busy else { return }
@@ -201,10 +225,10 @@ final class FilesWindow: NSWindowController, NSWindowDelegate {
     init(profile: Profile, didClose: @escaping () -> Void) {
         files = FilesController(profile: profile)
         self.didClose = didClose
-        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1040, height: 620),
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1090, height: 620),
                               styleMask: [.titled, .closable, .miniaturizable, .resizable], backing: .buffered, defer: false)
-        window.title = "Файлы · " + profile.alias
-        window.minSize = NSSize(width: 760, height: 440)
+        window.title = "Файлы — " + profile.alias + " · " + profile.address
+        window.minSize = NSSize(width: 800, height: 440)
         window.isReleasedWhenClosed = false
         window.contentView = NSHostingView(rootView: FilesView(files: files))
         super.init(window: window)
@@ -215,6 +239,15 @@ final class FilesWindow: NSWindowController, NSWindowDelegate {
 
     required init?(coder: NSCoder) { nil }
 
+    func windowShouldClose(_ sender: NSWindow) -> Bool {
+        guard files.transferring else { return true }
+        let alert = NSAlert()
+        alert.messageText = "Прервать передачу и закрыть окно?"
+        alert.addButton(withTitle: "Нет")
+        alert.addButton(withTitle: "Да")
+        return alert.runModal() == .alertSecondButtonReturn
+    }
+
     func windowWillClose(_ notification: Notification) {
         files.close()
         didClose()
@@ -223,6 +256,7 @@ final class FilesWindow: NSWindowController, NSWindowDelegate {
 
 private struct FilesView: View {
     @ObservedObject var files: FilesController
+    @Environment(\.colorScheme) private var scheme
     @State private var localPath = ""
     @State private var remotePathText = ""
     @State private var prompt: FileRow?
@@ -230,27 +264,25 @@ private struct FilesView: View {
     @State private var name = ""
     @State private var removing: FileRow?
 
+    private static let dates: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "dd.MM.yy HH:mm"
+        return formatter
+    }()
+
     var body: some View {
-        VStack(spacing: 0) {
-            HStack(alignment: .center, spacing: 14) {
-                VStack(alignment: .leading, spacing: 4) {
-                    Text(files.profile.alias).font(.title2.weight(.semibold))
-                    Text(files.profile.address).font(.system(.caption, design: .monospaced)).foregroundStyle(.secondary)
-                }
-                Spacer()
-                Picker("При совпадении имён", selection: $files.collision) {
-                    ForEach(Collision.allCases) { Text($0.rawValue).tag($0) }
-                }.fixedSize()
-                Button { files.transferFiles(upload: true) } label: { Label("На сервер", systemImage: "arrow.right") }
-                    .disabled(!files.online || files.busy || files.localSelection.isEmpty)
-                Button { files.transferFiles(upload: false) } label: { Label("На Mac", systemImage: "arrow.left") }
-                    .disabled(!files.online || files.busy || files.remoteSelection.isEmpty)
-            }.padding(16)
-            Divider()
-            HStack(spacing: 0) {
-                pane("Этот Mac", remote: false, path: $localPath, rows: files.localItems, selection: $files.localSelection)
-                Divider()
-                pane("Сервер", remote: true, path: $remotePathText, rows: files.remoteItems, selection: $files.remoteSelection)
+        let palette = Palette.of(scheme)
+        VStack(alignment: .leading, spacing: 0) {
+            HStack(spacing: 8) {
+                Text("Файлы · " + files.profile.alias).font(.system(size: 21, weight: .semibold)).lineLimit(1)
+                Spacer(minLength: 12)
+                Button { files.reconnect() } label: { GlyphLabel(title: "Переподключить", glyph: .refresh) }
+                    .winButton(.outline).disabled(files.busy)
+            }
+            .padding(.horizontal, 22).padding(.top, 16).padding(.bottom, 10)
+            HStack(alignment: .top, spacing: 16) {
+                pane(remote: false, path: $localPath, rows: files.localItems, selection: $files.localSelection, palette: palette)
+                pane(remote: true, path: $remotePathText, rows: files.remoteItems, selection: $files.remoteSelection, palette: palette)
                     .dropDestination(for: URL.self) { urls, _ in
                         let filesOnly = urls.filter(\.isFileURL)
                         guard files.online, !files.busy, !filesOnly.isEmpty else { return false }
@@ -258,16 +290,21 @@ private struct FilesView: View {
                         return true
                     }
             }
-            Divider()
+            .padding(.horizontal, 22)
             HStack(spacing: 8) {
-                if files.busy { ProgressView().controlSize(.small) }
-                Text(files.transfer ?? (files.online ? (files.busy ? "Загрузка…" : "Подключено по SFTP") : (files.busy ? "Подключение…" : "SFTP отключён")))
-                    .lineLimit(1)
+                Button { files.transferFiles(upload: true) } label: { GlyphLabel(title: "На сервер", glyph: .move, kind: .primary) }
+                    .winButton(.primary).disabled(!files.online || files.busy || files.localSelection.isEmpty)
+                Button { files.transferFiles(upload: false) } label: { GlyphLabel(title: "На компьютер", glyph: .moveLeft) }
+                    .winButton(.outline).disabled(!files.online || files.busy || files.remoteSelection.isEmpty)
+                Button("Отменить") { files.cancelTransfer() }.winButton(.outline).disabled(!files.transferring)
+                if files.busy { ProgressView().controlSize(.small).padding(.leading, 6) }
+                Text(status).foregroundStyle(palette.muted).lineLimit(1).truncationMode(.middle)
                 Spacer()
-                if files.transfer != nil { Button("Отменить передачу") { files.cancelTransfer() } }
-                if !files.online && !files.busy { Button("Подключиться") { files.connect() } }
-            }.font(.callout).foregroundStyle(.secondary).padding(.horizontal, 16).frame(minHeight: 40)
+            }
+            .padding(.horizontal, 22).frame(height: 56)
         }
+        .background(palette.canvas)
+        .foregroundStyle(palette.ink)
         .onAppear { localPath = files.local; remotePathText = files.remote }
         .onChange(of: files.local) { _, path in localPath = path }
         .onChange(of: files.remote) { _, path in remotePathText = path }
@@ -287,62 +324,60 @@ private struct FilesView: View {
         } message: { Text("Элемент будет удалён с сервера.") }
     }
 
-    private func pane(_ title: String, remote: Bool, path: Binding<String>, rows: [FileRow], selection: Binding<Set<String>>) -> some View {
-        VStack(alignment: .leading, spacing: 0) {
-            HStack {
-                Label(title, systemImage: remote ? "server.rack" : "desktopcomputer").font(.headline)
-                Spacer()
-                if remote {
-                    Button { prompt = nil; name = ""; promptOpen = true } label: { Image(systemName: "folder.badge.plus") }
-                        .help("Новая папка").accessibilityLabel("Новая папка")
-                } else {
-                    Button { files.selectLocalFolder() } label: { Image(systemName: "folder") }
-                        .help("Выбрать папку").accessibilityLabel("Выбрать папку")
-                }
-            }.padding(.horizontal, 12).padding(.vertical, 10)
-            HStack(spacing: 8) {
+    private var status: String {
+        if let transfer = files.transfer { return transfer }
+        if files.online { return files.busy ? "Загрузка…" : "" }
+        return files.busy ? "Подключение…" : "SFTP отключён. Нажмите «Переподключить»."
+    }
+
+    private func pane(remote: Bool, path: Binding<String>, rows: [FileRow], selection: Binding<Set<String>>, palette: Palette) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text(remote ? files.profile.address : "Компьютер").font(.system(size: 13, weight: .semibold)).lineLimit(1)
+            TextField("", text: path)
+                .textFieldStyle(.roundedBorder)
+                .onSubmit { if remote { files.loadRemote(path.wrappedValue) } else { files.loadLocal(path.wrappedValue) } }
+                .accessibilityLabel(remote ? "Путь на сервере" : "Путь на компьютере")
+            HStack(spacing: 4) {
                 Button {
                     if remote { files.loadRemote(remotePath(files.remote, "..")) } else { files.upLocal() }
-                } label: { Image(systemName: "arrow.up") }.help("Родительская папка").accessibilityLabel("Родительская папка")
-                TextField("Путь к папке", text: path).font(.system(.callout, design: .monospaced))
-                    .onSubmit { if remote { files.loadRemote(path.wrappedValue) } else { files.loadLocal(path.wrappedValue) } }
+                } label: { GlyphLabel(title: "Вверх", glyph: .moveLeft) }.winButton(.quiet)
                 Button {
                     if remote { files.loadRemote(files.remote) } else { files.loadLocal(files.local) }
-                } label: { Image(systemName: "arrow.clockwise") }.help("Обновить").accessibilityLabel("Обновить")
-            }.padding(.horizontal, 12).padding(.bottom, 10)
-            Divider()
-            List(rows, selection: selection) { row in
-                HStack(spacing: 8) {
-                    Image(systemName: icon(row.kind)).foregroundStyle(row.kind == .directory ? Color.accentColor : .secondary)
-                        .frame(width: 16).accessibilityHidden(true)
-                    Text(row.name).lineLimit(1)
-                    Spacer()
-                    if row.kind == .file, let size = row.size {
-                        Text(ByteCountFormatter.string(fromByteCount: Int64(clamping: size), countStyle: .file))
-                            .font(.caption).foregroundStyle(.secondary).monospacedDigit()
+                } label: { GlyphLabel(title: "Обновить", glyph: .refresh) }.winButton(.quiet)
+                if remote {
+                    Button { prompt = nil; name = ""; promptOpen = true } label: { GlyphLabel(title: "Новая папка", glyph: .plus) }.winButton(.quiet)
+                } else {
+                    Button { files.selectLocalFolder() } label: { GlyphLabel(title: "Выбрать папку…", glyph: .browse) }.winButton(.quiet)
+                }
+            }
+            Table(rows, selection: selection) {
+                TableColumn("Имя") { row in
+                    HStack(spacing: 8) {
+                        GlyphView(glyph: row.kind == .directory ? .folder : .copy, color: row.kind == .directory ? palette.teal : palette.muted)
+                        Text(row.name).lineLimit(1)
                     }
                 }
-                .contentShape(Rectangle())
-                .onTapGesture(count: 2) { files.open(row, remote: remote) }
-                .contextMenu {
-                    if row.kind == .directory { Button("Открыть") { files.open(row, remote: remote) } }
-                    if remote {
-                        Button("Переименовать") { prompt = row; name = row.name; promptOpen = true }
-                        Button("Удалить", role: .destructive) { removing = row }
-                    }
+                TableColumn("Размер") { row in
+                    Text(row.kind == .file ? row.size.map { ByteCountFormatter.string(fromByteCount: Int64(clamping: $0), countStyle: .file) } ?? "—" : "—")
+                        .monospacedDigit()
+                }.width(min: 70, ideal: 90, max: 130)
+                TableColumn("Изменён") { row in
+                    Text(row.date.map { Self.dates.string(from: $0) } ?? "—").monospacedDigit()
+                }.width(min: 100, ideal: 120, max: 150)
+            }
+            .contextMenu(forSelectionType: String.self) { ids in
+                if remote, let row = rows.first(where: { ids.count == 1 && ids.contains($0.id) }) {
+                    Button("Скачать") { files.remoteSelection = [row.id]; files.transferFiles(upload: false) }
+                    Button("Переименовать") { prompt = row; name = row.name; promptOpen = true }
+                    Button("Удалить", role: .destructive) { removing = row }
+                } else if remote, !ids.isEmpty {
+                    Button("Скачать") { files.remoteSelection = ids; files.transferFiles(upload: false) }
                 }
-                .tag(row.id)
-            }.listStyle(.inset(alternatesRowBackgrounds: true))
+            } primaryAction: { ids in
+                if ids.count == 1, let row = rows.first(where: { ids.contains($0.id) }) { files.open(row, remote: remote) }
+            }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .disabled(files.busy || (remote && !files.online))
-    }
-
-    private func icon(_ kind: FileRow.Kind) -> String {
-        switch kind {
-        case .directory: "folder.fill"
-        case .link: "link"
-        case .file, .other: "doc"
-        }
     }
 }

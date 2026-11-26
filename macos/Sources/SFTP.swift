@@ -468,14 +468,15 @@ enum LocalFiles {
 
 final class FileTransfer {
     private let connection: SFTPConnection
-    private let collision: Collision
+    /// Asked for every name that already exists: «Заменить», «Сохранить оба» or «Пропустить»; throws to cancel.
+    private let decide: (String) throws -> Collision
     private let check: () throws -> Void
     private let progress: (String, UInt64) -> Void
 
-    init(_ connection: SFTPConnection, collision: Collision, check: @escaping () throws -> Void,
+    init(_ connection: SFTPConnection, decide: @escaping (String) throws -> Collision, check: @escaping () throws -> Void,
          progress: @escaping (String, UInt64) -> Void) {
         self.connection = connection
-        self.collision = collision
+        self.decide = decide
         self.check = check
         self.progress = progress
     }
@@ -484,7 +485,8 @@ final class FileTransfer {
         try check()
         guard depth <= 64 else { throw ManagerError("Достигнут предел вложенности папок.") }
         guard let entry = try LocalFiles.item(source), entry.kind == .directory || entry.kind == .file else { return }
-        guard let name = try availableName(entry, checkExisting: { try connection.stat(remotePath(folder, $0)) }) else { return }
+        guard case let (name, replace)? = try availableName(entry, place: remotePath(folder, entry.name),
+                                                      checkExisting: { try connection.stat(remotePath(folder, $0)) }) else { return }
         let target = remotePath(folder, name)
         if entry.kind == .directory {
             if let current = try connection.stat(target) {
@@ -500,7 +502,7 @@ final class FileTransfer {
             try connection.upload(source, to: stage, created: { created = true }) { try check(); progress(entry.name, $0) }
             try check()
             let existing = try connection.stat(target)
-            guard existing == nil || (collision == .replace && existing?.kind == .file)
+            guard existing == nil || (replace && existing?.kind == .file)
             else { throw ManagerError("Файл «\(name)» появился во время передачи.") }
             try connection.rename(stage, to: target, replacing: existing != nil)
             created = false
@@ -511,7 +513,8 @@ final class FileTransfer {
         try check()
         guard depth <= 64 else { throw ManagerError("Достигнут предел вложенности папок.") }
         guard SFTPConnection.valid(entry.name), entry.kind == .directory || entry.kind == .file else { return }
-        guard let name = try availableName(entry, checkExisting: { try LocalFiles.item(localFolder.appendingPathComponent($0)) }) else { return }
+        guard case let (name, replace)? = try availableName(entry, place: localFolder.appendingPathComponent(entry.name).path,
+                                                      checkExisting: { try LocalFiles.item(localFolder.appendingPathComponent($0)) }) else { return }
         let source = remotePath(folder, entry.name)
         let target = localFolder.appendingPathComponent(name)
         if entry.kind == .directory {
@@ -530,7 +533,7 @@ final class FileTransfer {
             try connection.download(source, to: stage) { try check(); progress(entry.name, $0) }
             try check()
             let existing = try LocalFiles.item(target)
-            if collision == .replace && existing?.kind == .file {
+            if replace && existing?.kind == .file {
                 guard rename(stage.path, target.path) == 0 else { throw ManagerError("Не удалось заменить «\(name)».") }
             } else {
                 guard renamex_np(stage.path, target.path, UInt32(RENAME_EXCL)) == 0
@@ -539,16 +542,20 @@ final class FileTransfer {
         }
     }
 
-    private func availableName(_ entry: FileRow, checkExisting: (String) throws -> FileRow?) throws -> String? {
-        guard let existing = try checkExisting(entry.name) else { return entry.name }
-        if collision == .skip { return nil }
-        if collision == .replace && existing.kind == entry.kind { return entry.name }
+    private func availableName(_ entry: FileRow, place: String,
+                               checkExisting: (String) throws -> FileRow?) throws -> (String, Bool)? {
+        guard let existing = try checkExisting(entry.name) else { return (entry.name, false) }
+        // A folder goes into the folder of the same name, as in the Windows app.
+        if entry.kind == .directory && existing.kind == .directory { return (entry.name, false) }
+        let choice = try decide(place)
+        if choice == .skip { return nil }
+        if choice == .replace && existing.kind == entry.kind { return (entry.name, true) }
         let original = entry.name as NSString
         let ext = entry.kind == .file ? original.pathExtension : ""
         let stem = ext.isEmpty ? entry.name : original.deletingPathExtension
         for suffix in 2...10_000 {
             let candidate = "\(stem) (\(suffix))" + (ext.isEmpty ? "" : "." + ext)
-            if try checkExisting(candidate) == nil { return candidate }
+            if try checkExisting(candidate) == nil { return (candidate, false) }
         }
         throw ManagerError("Не удалось подобрать свободное имя для «\(entry.name)».")
     }

@@ -268,37 +268,50 @@ final class MacUpdates: ObservableObject {
     }
 }
 
+/// «Обновление SSH Manager» (docs/ui-spec.md §4.7).
 struct MacUpdateView: View {
     @ObservedObject var updates: MacUpdates
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.colorScheme) private var scheme
+    @State private var confirming = false
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            Text("Обновления SSH Manager").font(.title2.weight(.semibold))
-            if updates.checking || updates.installing {
-                ProgressView(updates.checking ? "Проверяем релиз…" : "Загружаем и устанавливаем…")
-            } else {
-                if let available = updates.available {
-                    Text("Доступна версия \(available.version.description).").font(.headline)
-                    if updates.manualImage == nil {
-                        Text("После установки приложение перезапустится и закроет активные SSH-сеансы и передачи файлов.")
-                            .foregroundStyle(.secondary)
-                    }
-                }
-                if let message = updates.message { Text(message).textSelection(.enabled) }
-                HStack {
-                    Link("Страница релиза", destination: MacUpdate.releasePage)
-                    Spacer()
-                    Button("Закрыть") { dismiss() }.keyboardShortcut(.cancelAction)
-                    if let image = updates.manualImage {
-                        Button("Открыть DMG") { NSWorkspace.shared.open(image) }
-                    } else if updates.available != nil {
-                        Button("Установить и перезапустить", action: updates.install).buttonStyle(.borderedProminent)
-                    }
-                }
+        let palette = Palette.of(scheme)
+        VStack(alignment: .leading, spacing: 8) {
+            if updates.checking {
+                ProgressView("Проверка…").padding(.vertical, 8)
+            } else if updates.installing {
+                ProgressView("Загрузка и установка…").padding(.vertical, 8)
+            } else if let available = updates.available {
+                Text("Доступна версия \(available.version.description)").font(.system(size: 21, weight: .semibold))
+                Text("У вас версия \(MacUpdate.current)").foregroundStyle(palette.muted)
+                Text("Пакет обновления DMG").foregroundStyle(palette.muted)
+                Link("Что нового на GitHub", destination: MacUpdate.releasePage).padding(.top, 6)
             }
+            if let message = updates.message {
+                Text(message).textSelection(.enabled).fixedSize(horizontal: false, vertical: true).padding(.top, 4)
+            }
+            HStack {
+                Spacer()
+                if let image = updates.manualImage {
+                    Button("Закрыть") { dismiss() }.keyboardShortcut(.cancelAction).winButton(.outline)
+                    Button("Открыть DMG") { NSWorkspace.shared.open(image) }.winButton(.primary)
+                } else if updates.available != nil && !updates.installing {
+                    Button("Позже") { dismiss() }.keyboardShortcut(.cancelAction).winButton(.outline)
+                    Button { confirming = true } label: { GlyphLabel(title: "Скачать обновление", glyph: .refresh, kind: .primary) }
+                        .keyboardShortcut(.defaultAction).winButton(.primary)
+                } else if !updates.installing {
+                    Button("ОК") { dismiss() }.keyboardShortcut(.defaultAction).winButton(.primary)
+                }
+            }.padding(.top, 10)
         }
-        .padding(22).frame(width: 500)
+        .padding(22).frame(width: 460)
         .interactiveDismissDisabled(updates.installing)
+        .alert("Установить обновление", isPresented: $confirming) {
+            Button("Нет", role: .cancel) {}
+            Button("Да") { updates.install() }
+        } message: {
+            Text("Установить версию \(updates.available?.version.description ?? "") и перезапустить SSH Manager?\n\nОткрытые сеансы SSH и окна SFTP будут закрыты.")
+        }
     }
 }

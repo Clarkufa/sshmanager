@@ -222,6 +222,9 @@ struct BackupRestore {
     private var passwords: [(account: String, secret: String, desktop: Bool)] = []
     var fileCount: Int { changes.count }
     var replaced: [String] { changes.filter { $0.before != nil }.map { $0.destination.path } }
+    /// Files whose content actually changes, as in the Windows summary.
+    var changedCount: Int { changes.filter { $0.before != $0.data }.count }
+    var changedReplacements: [String] { changes.filter { $0.before != nil && $0.before != $0.data }.map { $0.destination.path } }
     var passwordCount: Int { passwords.count }
     var desktopPasswordCount: Int { passwords.filter { $0.desktop }.count }
     let recoveryURL: URL

@@ -84,7 +84,9 @@ final class Manager: ObservableObject {
     @Published var catalogProtocol: ConnectionProtocol = .ssh
     @Published var desktopEditor: DesktopEditorState?
     @Published var choosingServer = false
-    @Published var managingBackups = false
+    @Published var backupPassword: BackupPasswordRequest?
+    /// «Найти сервер»: shared with the footer for «Найдено: X из N».
+    @Published var catalogQuery = ""
     @Published var logonRequest: DesktopLogonRequest?
     @Published var renaming: SessionEntry.ID?
     private let config = ConfigStore.standard
