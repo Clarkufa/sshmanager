@@ -44,6 +44,12 @@ namespace SshManager
     {
         private Choice[] choices = new Choice[0];
         private string[] recent = new string[0];
+        private readonly bool grouped;
+        private Groups groups;
+        /// <summary>A group header was clicked: fold or unfold it (key: tab id, «ungrouped» or «recent»).</summary>
+        public event Action<string> SectionToggled;
+        /// <summary>Right click on a server: the Connection, RdpProfile or VncProfile, where and at which point.</summary>
+        public event Action<object, Control, Point> MenuRequested;
         private readonly TextBox search;
         private readonly ListBox list;
         private readonly Button connect;
@@ -58,6 +64,7 @@ namespace SshManager
 
         public ServerPickerPanel(bool compact)
         {
+            grouped = compact;
             Dock = DockStyle.Fill;
             Margin = Padding.Empty;
             BackColor = Theme.Canvas;
@@ -89,10 +96,46 @@ namespace SshManager
                 BackColor = Theme.Surface, ForeColor = Theme.Ink,
                 IntegralHeight = false, DrawMode = DrawMode.OwnerDrawVariable, BorderStyle = BorderStyle.FixedSingle };
             list.DrawItem += DrawChoice;
-            list.MeasureItem += (sender, args) => args.ItemHeight = Theme.Scaled(list, list.Items[args.Index] is Choice ? 43 : 26);
+            list.MeasureItem += (sender, args) => args.ItemHeight = Theme.Scaled(list,
+                list.Items[args.Index] is Choice ? 43 : list.Items[args.Index] is Section section && section.Key != null ? 32 : 26);
             list.SelectedIndexChanged += (sender, args) => connect.Enabled = list.SelectedItem is Choice;
-            list.MouseDoubleClick += (sender, args) => { if (list.IndexFromPoint(args.Location) >= 0) Submit(); };
-            list.KeyDown += (sender, args) => { if (args.KeyCode == Keys.Enter) { args.SuppressKeyPress = true; Submit(); } };
+            list.MouseDoubleClick += (sender, args) => { if (list.IndexFromPoint(args.Location) >= 0 && list.SelectedItem is Choice) Submit(); };
+            list.MouseDown += (sender, args) =>
+            {
+                int index = list.IndexFromPoint(args.Location);
+                if (index < 0 || index >= list.Items.Count) return;
+                if (list.Items[index] is Section section && section.Key != null && args.Button == MouseButtons.Left)
+                {
+                    SectionToggled?.Invoke(section.Key);
+                    return;
+                }
+                if (args.Button == MouseButtons.Right && list.Items[index] is Choice choice)
+                {
+                    list.SelectedIndex = index;
+                    MenuRequested?.Invoke(choice.Profile, list, args.Location);
+                }
+            };
+            list.KeyDown += (sender, args) =>
+            {
+                var section = list.SelectedItem as Section;
+                if (args.KeyCode == Keys.Enter || args.KeyCode == Keys.Space)
+                {
+                    args.SuppressKeyPress = true;
+                    if (section?.Key != null) SectionToggled?.Invoke(section.Key);
+                    else if (args.KeyCode == Keys.Enter) Submit();
+                }
+                else if ((args.KeyCode == Keys.Left || args.KeyCode == Keys.Right) && section?.Key != null)
+                {
+                    args.SuppressKeyPress = true;
+                    if (section.Folded == (args.KeyCode == Keys.Right)) SectionToggled?.Invoke(section.Key);
+                }
+                else if ((args.KeyCode == Keys.Apps || args.KeyData == (Keys.Shift | Keys.F10)) && list.SelectedItem is Choice choice)
+                {
+                    args.SuppressKeyPress = true;
+                    var bounds = list.GetItemRectangle(list.SelectedIndex);
+                    MenuRequested?.Invoke(choice.Profile, list, new Point(bounds.Left + 12, bounds.Bottom));
+                }
+            };
             layout.Controls.Add(Theme.Frame(list, Padding.Empty), 0, 2);
             status = new Label { Dock = DockStyle.Fill, TextAlign = ContentAlignment.MiddleLeft, ForeColor = Theme.Muted, Margin = new Padding(0) };
             layout.Controls.Add(status, 0, 3);
@@ -132,6 +175,7 @@ namespace SshManager
 
         public void UpdateServers(IEnumerable<Connection> connections, Groups groups)
         {
+            this.groups = groups;
             recent = groups.Recent.Select(entry => entry.Key).ToArray();
             choices = connections.Select(connection => new Choice(connection, groups.ForAlias(connection.Alias)))
                 .Concat(groups.Desktops.Select(profile => new Choice(profile, groups.Find(profile.GroupId))))
@@ -161,6 +205,11 @@ namespace SshManager
             var candidates = choices.Where(choice => choice.Kind == kind).ToArray();
             var visible = candidates.Where(choice => new[] { choice.Target.Alias, choice.Target.Address, choice.Target.Group }
                 .Any(value => value.IndexOf(query, StringComparison.OrdinalIgnoreCase) >= 0)).ToArray();
+            if (grouped && groups != null && query.Length == 0)
+            {
+                FillGroups(candidates, visible);
+                return;
+            }
             // «Недавние» (up to 5) before the full list while the search is empty (docs/ui-spec.md §7).
             var latest = query.Length == 0 ? recent.Select(key => candidates.FirstOrDefault(choice =>
                 String.Equals(choice.Key, key, StringComparison.OrdinalIgnoreCase))).Where(choice => choice != null).Take(5).ToArray()
@@ -183,10 +232,82 @@ namespace SshManager
             status.Text = visible.Length == 0 ? (candidates.Length == 0 ? "Сохранённых серверов пока нет." : "Серверы не найдены.") : "Серверов: " + visible.Length;
         }
 
+        /// <summary>«Серверы» column: «Недавние», then each catalog tab, then «Без вкладки»; folded groups stay folded
+        /// (tabs.xml «collapsed», docs/ui-spec.md §2.2).</summary>
+        private void FillGroups(Choice[] candidates, Choice[] visible)
+        {
+            var selectedKey = (list.SelectedItem as Choice)?.Key;
+            var selectedSection = (list.SelectedItem as Section)?.Key;
+            var latest = recent.Select(key => visible.FirstOrDefault(choice =>
+                String.Equals(choice.Key, key, StringComparison.OrdinalIgnoreCase))).Where(choice => choice != null).Take(5).ToArray();
+            var sections = new List<KeyValuePair<Section, Choice[]>>();
+            if (latest.Length > 0)
+                sections.Add(new KeyValuePair<Section, Choice[]>(new Section("Недавние", Groups.RecentSection, null, latest.Length), latest));
+            foreach (var group in groups.Items)
+            {
+                var members = visible.Where(choice => choice.GroupId == group.Id).ToArray();
+                if (members.Length > 0)
+                    sections.Add(new KeyValuePair<Section, Choice[]>(new Section(group.Name, group.Id, TabColor.Find(group.ColorId)?.Swatch, members.Length),
+                        members.Select(choice => choice.Indented()).ToArray()));
+            }
+            var loose = visible.Where(choice => choice.GroupId == null).ToArray();
+            if (loose.Length > 0)
+            {
+                bool anyGroup = sections.Count > (latest.Length > 0 ? 1 : 0);
+                sections.Add(new KeyValuePair<Section, Choice[]>(new Section(anyGroup ? Groups.UngroupedName : "Все серверы",
+                    Groups.UngroupedSection, null, loose.Length), loose.Select(choice => choice.Indented()).ToArray()));
+            }
+            list.BeginUpdate();
+            try
+            {
+                list.Items.Clear();
+                int select = -1;
+                foreach (var pair in sections)
+                {
+                    pair.Key.Folded = groups.Collapsed.Contains(pair.Key.Key);
+                    list.Items.Add(pair.Key);
+                    if (pair.Key.Key == selectedSection) select = list.Items.Count - 1;
+                    if (pair.Key.Folded) continue;
+                    foreach (var choice in pair.Value)
+                    {
+                        list.Items.Add(choice);
+                        if (select < 0 && selectedKey != null && choice.Key == selectedKey) select = list.Items.Count - 1;
+                    }
+                }
+                if (select < 0) select = list.Items.Cast<object>().ToList().FindIndex(item => item is Choice);
+                if (select >= 0) list.SelectedIndex = select;
+                connect.Enabled = list.SelectedItem is Choice;
+            }
+            finally { list.EndUpdate(); }
+            status.Text = visible.Length == 0 ? (candidates.Length == 0 ? "Сохранённых серверов пока нет." : "Серверы не найдены.") : "Серверов: " + visible.Length;
+        }
+
         private void DrawChoice(object sender, DrawItemEventArgs args)
         {
             if (args.Index < 0) return;
             var row = args.Bounds;
+            if (list.Items[args.Index] is Section group && group.Key != null)
+            {
+                bool chosen = (args.State & DrawItemState.Selected) != 0;
+                using (var fill = new SolidBrush(chosen ? Theme.Selection : Theme.Surface)) args.Graphics.FillRectangle(fill, row);
+                int G(int logical) => Theme.Scaled(list, logical);
+                const TextFormatFlags line = TextFormatFlags.SingleLine | TextFormatFlags.NoPrefix | TextFormatFlags.VerticalCenter;
+                TextRenderer.DrawText(args.Graphics, group.Folded ? "▸" : "▾", Theme.Body,
+                    new Rectangle(row.X + G(6), row.Y, G(14), row.Height), Theme.Muted, line);
+                int left = row.X + G(22);
+                if (group.Color.HasValue)
+                {
+                    using (var dot = new SolidBrush(group.Color.Value)) args.Graphics.FillEllipse(dot, left, row.Y + (row.Height - G(8)) / 2, G(8), G(8));
+                    left += G(14);
+                }
+                string count = group.Count.ToString(System.Globalization.CultureInfo.InvariantCulture);
+                int countWidth = TextRenderer.MeasureText(count, Theme.Body).Width;
+                TextRenderer.DrawText(args.Graphics, count, Theme.Body, new Rectangle(row.Right - countWidth - G(8), row.Y, countWidth, row.Height), Theme.Muted, line);
+                TextRenderer.DrawText(args.Graphics, group.Title, Theme.Emphasis,
+                    new Rectangle(left, row.Y, row.Right - left - countWidth - G(14), row.Height), Theme.Ink, line | TextFormatFlags.EndEllipsis);
+                if ((args.State & DrawItemState.Focus) != 0) args.DrawFocusRectangle();
+                return;
+            }
             if (list.Items[args.Index] is Section section)
             {
                 using (var fill = new SolidBrush(Theme.Surface)) args.Graphics.FillRectangle(fill, row);
@@ -199,7 +320,8 @@ namespace SshManager
             using (var fill = new SolidBrush((args.State & DrawItemState.Selected) != 0 ? Theme.Selection : Theme.Surface))
                 args.Graphics.FillRectangle(fill, row);
             int S(int logical) => Theme.Scaled(list, logical);
-            using (var dot = new SolidBrush(choice.Target.Color)) args.Graphics.FillEllipse(dot, row.X + S(11), row.Y + S(10), S(7), S(7));
+            if (!choice.InGroup)
+                using (var dot = new SolidBrush(choice.Target.Color)) args.Graphics.FillEllipse(dot, row.X + S(11), row.Y + S(10), S(7), S(7));
             var title = new Rectangle(row.X + S(24), row.Y + S(2), row.Width - S(32), S(22));
             var detail = new Rectangle(row.X + S(24), row.Y + S(22), row.Width - S(32), S(18));
             const TextFormatFlags flags = TextFormatFlags.EndEllipsis | TextFormatFlags.NoPrefix | TextFormatFlags.SingleLine | TextFormatFlags.VerticalCenter;
@@ -212,28 +334,54 @@ namespace SshManager
         private sealed class Section
         {
             public readonly string Title;
-            public Section(string title) { Title = title; }
-            public override string ToString() { return Title; }
+            /// <summary>Folding key of a column group; null for the plain captions of the dialog.</summary>
+            public readonly string Key;
+            public readonly Color? Color;
+            public readonly int Count;
+            public bool Folded;
+            public Section(string title, string key = null, Color? color = null, int count = 0)
+            {
+                Title = title;
+                Key = key;
+                Color = color;
+                Count = count;
+            }
+            public override string ToString() { return Title + (Key == null ? "" : " · " + Count + (Folded ? " · свёрнута" : "")); }
         }
 
         private sealed class Choice
         {
             public readonly Connection Connection;
             public readonly SessionTarget Target;
+            public string GroupId { get; private set; }
+            /// <summary>Drawn under a group header: no group dot.</summary>
+            public bool InGroup { get; private set; }
+            public object Profile => Target.Desktop ?? (object)Target.Vnc ?? Connection;
+
+            public Choice Indented()
+            {
+                var copy = (Choice)MemberwiseClone();
+                copy.InGroup = true;
+                return copy;
+            }
+
             public string Key => Target.Desktop != null ? Groups.Key(Target.Desktop) : Target.Vnc != null ? Groups.Key(Target.Vnc) : Groups.Key(Connection.Alias);
             public CatalogKind Kind => Target.Desktop != null ? CatalogKind.Rdp : Target.Vnc != null ? CatalogKind.Vnc : CatalogKind.Ssh;
             public Choice(Connection connection, ServerGroup group)
             {
                 Connection = connection;
                 Target = new SessionTarget(connection, group);
+                GroupId = group?.Id;
             }
             public Choice(RdpProfile profile, ServerGroup group)
             {
                 Target = new SessionTarget(profile, group);
+                GroupId = group?.Id;
             }
             public Choice(VncProfile profile, ServerGroup group)
             {
                 Target = new SessionTarget(profile, group);
+                GroupId = group?.Id;
             }
             public override string ToString() { return Target.Alias; }
         }

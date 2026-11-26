@@ -908,7 +908,7 @@ namespace SshManager
             }
         }
 
-        private void ShowVncMenu(VncProfile profile, Point point)
+        private void ShowVncMenu(VncProfile profile, Control at, Point point)
         {
             desktopMenu?.Dispose();
             desktopMenu = Theme.Menu();
@@ -928,7 +928,7 @@ namespace SshManager
                 new ToolStripSeparator(),
                 Theme.MenuItem("Удалить", Glyph.Delete, (sender, args) => DeleteVnc(profile))
             });
-            desktopMenu.Show(grid, point);
+            desktopMenu.Show(at, point);
 
             void AddDestination(string name, string id)
             {
@@ -1237,11 +1237,15 @@ namespace SshManager
         private void ShowServerMenu(int index, Point point)
         {
             grid.CurrentCell = grid.Rows[index].Cells[0];
-            if (SelectedDesktop is RdpProfile desktop) { ShowDesktopMenu(desktop, point); return; }
-            if (SelectedVnc is VncProfile vnc) { ShowVncMenu(vnc, point); return; }
-            menuConnection = Selected;
-            if (menuConnection == null) return;
-            var connection = menuConnection;
+            if (SelectedDesktop is RdpProfile desktop) { ShowDesktopMenu(desktop, grid, point); return; }
+            if (SelectedVnc is VncProfile vnc) { ShowVncMenu(vnc, grid, point); return; }
+            if (Selected != null) ShowConnectionMenu(Selected, grid, point);
+        }
+
+        /// <summary>The SSH row menu for the catalog table and the «Серверы» column (docs/ui-spec.md §2.7).</summary>
+        private void ShowConnectionMenu(Connection connection, Control at, Point point)
+        {
+            menuConnection = connection;
             favoriteItem.Text = groups.IsFavorite(Groups.Key(connection.Alias)) ? "Убрать из избранного" : "В избранное";
             foreach (ToolStripItem item in moveMenu.DropDownItems.Cast<ToolStripItem>().ToArray()) item.Dispose();
             var assigned = groups.ForAlias(connection.Alias);
@@ -1264,10 +1268,10 @@ namespace SshManager
                     RefreshList(connection.Alias);
                 }
             }));
-            serverMenu.Show(grid, point);
+            serverMenu.Show(at, point);
         }
 
-        private void ShowDesktopMenu(RdpProfile profile, Point point)
+        private void ShowDesktopMenu(RdpProfile profile, Control at, Point point)
         {
             desktopMenu?.Dispose();
             desktopMenu = Theme.Menu();
@@ -1293,7 +1297,7 @@ namespace SshManager
                 new ToolStripSeparator(),
                 Theme.MenuItem("Удалить", Glyph.Delete, (sender, args) => DeleteDesktop(profile))
             });
-            desktopMenu.Show(grid, point);
+            desktopMenu.Show(at, point);
 
             void AddDestination(string name, string id)
             {
@@ -1480,6 +1484,18 @@ namespace SshManager
             sessions.ShowVncFiles += OpenVncFiles;
             sessions.LoadServers += picker =>
                 picker.UpdateServers(document == null ? new Connection[0] : document.Connections().ToArray(), groups);
+            sessions.ServerSectionToggled += key =>
+            {
+                try { groups = groupFile.Update(items => items.ToggleCollapsed(key)); }
+                catch (Exception error) when (Theme.IsFileError(error) || error is System.Xml.XmlException) { Theme.ShowError(this, error); }
+                sessions.RefreshServers();
+            };
+            sessions.ServerMenuRequested += (profile, at, point) =>
+            {
+                if (profile is RdpProfile desktop) ShowDesktopMenu(desktop, at, point);
+                else if (profile is VncProfile vnc) ShowVncMenu(vnc, at, point);
+                else if (profile is Connection connection) ShowConnectionMenu(connection, at, point);
+            };
             sessions.OpenServer += target =>
             {
                 if (target.Vnc != null) ConnectVnc(target.Vnc);

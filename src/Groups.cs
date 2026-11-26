@@ -70,6 +70,14 @@ namespace SshManager
         public readonly List<string> Favorites = new List<string>();
         public readonly List<RecentEntry> Recent = new List<RecentEntry>();
         public readonly List<Snippet> Snippets = new List<Snippet>();
+        /// <summary>Folded groups of the «Серверы» column: tab ids, <see cref="UngroupedSection"/> and <see cref="RecentSection"/>.</summary>
+        public readonly HashSet<string> Collapsed = new HashSet<string>(StringComparer.Ordinal);
+        public const string UngroupedSection = "ungrouped", RecentSection = "recent";
+
+        public void ToggleCollapsed(string key)
+        {
+            if (!Collapsed.Remove(key)) Collapsed.Add(key);
+        }
         public Preferences Preferences = new Preferences();
 
         /// <summary>"ssh:alias" (lower case, as on macOS and Linux) or "rdp:id".</summary>
@@ -305,7 +313,16 @@ namespace SshManager
             }
             string startup = (string)root.Attribute("startupTab");
             if (groups.Find(startup) != null) groups.SetStartupTab(startup);
+            foreach (var key in ((string)root.Attribute("collapsed") ?? "").Split(new[] { ' ' }, StringSplitOptions.RemoveEmptyEntries))
+                if (key == Groups.UngroupedSection || key == Groups.RecentSection || groups.Find(key) != null) groups.Collapsed.Add(key);
             return groups;
+        }
+
+        private static XAttribute CollapsedAttribute(Groups latest)
+        {
+            var keys = latest.Collapsed.Where(key => key == Groups.UngroupedSection || key == Groups.RecentSection || latest.Find(key) != null)
+                .OrderBy(key => key, StringComparer.Ordinal).ToArray();
+            return keys.Length == 0 ? null : new XAttribute("collapsed", String.Join(" ", keys));
         }
 
         /// <summary>Stage 2 data (docs/ui-spec.md §7). Unknown or damaged values are skipped, never fatal.</summary>
@@ -386,6 +403,7 @@ namespace SshManager
                         latest.DarkTheme ? new XAttribute("theme", "dark") : null,
                         SortAttribute("sshSort", latest.SshSort), SortAttribute("rdpSort", latest.RdpSort),
                         SortAttribute("vncSort", latest.VncSort),
+                        CollapsedAttribute(latest),
                         WriteExtras(latest),
                         latest.Items.Select(group =>
                         new XElement("tab", new XAttribute("id", group.Id), new XAttribute("name", group.Name),

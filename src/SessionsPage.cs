@@ -213,6 +213,8 @@ namespace SshManager
         public event Action PickServer;
         public event Action<SessionTarget> OpenServer;
         public event Action<ServerPickerPanel> LoadServers;
+        public event Action<string> ServerSectionToggled;
+        public event Action<object, Control, Point> ServerMenuRequested;
         public event Action<bool> CatalogVisibleChanged;
         public event Action<SessionTarget> ShowFiles;
         public event Action<VncProfile, string> ShowVncFiles;
@@ -360,6 +362,8 @@ namespace SshManager
             sessionList.Controls.Add(Theme.Frame(filesList, Padding.Empty), 0, 5);
             serverPicker = new ServerPickerPanel(compact: true);
             serverPicker.Submitted += target => OpenServer?.Invoke(target);
+            serverPicker.SectionToggled += key => ServerSectionToggled?.Invoke(key);
+            serverPicker.MenuRequested += (profile, control, point) => ServerMenuRequested?.Invoke(profile, control, point);
             serverColumn.Controls.Add(serverPicker, 0, 1);
             columns.Controls.Add(sessionList, 1, 0);
 

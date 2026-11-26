@@ -143,6 +143,18 @@ if ((Want 'main') -or (Want 'sessions')) {
         Call $main 'Connect' @($connections[0], $true) | Out-Null; Pump 1
         Call $main 'Connect' @($connections[2], $false) | Out-Null; Pump 1.5
         Snap $main 'sessions-ssh'
+        # «Серверы» column: groups by catalog tab, a folded tab is saved in tabs.xml, right click opens the catalog menu.
+        $picker = Field $page 'serverPicker'
+        Call $picker 'SelectProtocol' @((Kind 'Ssh')); Pump
+        Snap $main 'sessions-servers-grouped'
+        (Field $page 'ServerSectionToggled').Invoke($tabA); Pump
+        Snap $main 'sessions-servers-folded'
+        "COLLAPSED in tabs.xml: " + ([xml](Get-Content $tabsPath -Raw)).tabs.collapsed
+        (Field $page 'ServerSectionToggled').Invoke($tabA); Pump
+        $pickerList = Field $picker 'list'
+        (Field $page 'ServerMenuRequested').Invoke($connections[1], $pickerList, (New-Object Drawing.Point(20, 60))); Pump
+        "SERVER MENU visible: " + (Field $main 'serverMenu').Visible + " for " + (Field $main 'menuConnection').Alias
+        (Field $main 'serverMenu').Close()
         Call $page 'ShowServerList' @($true); Pump
         Call (Field $page 'serverPicker') 'SelectProtocol' @((Kind 'Vnc')); Pump
         Snap $main 'sessions-server-list'
