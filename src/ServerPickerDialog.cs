@@ -86,6 +86,7 @@ namespace SshManager
             search = filter.Input;
             layout.Controls.Add(filter, 0, 1);
             list = new ListBox { AccessibleName = "Список серверов", Dock = DockStyle.Fill, Margin = new Padding(0),
+                BackColor = Theme.Surface, ForeColor = Theme.Ink,
                 IntegralHeight = false, DrawMode = DrawMode.OwnerDrawVariable, BorderStyle = BorderStyle.FixedSingle };
             list.DrawItem += DrawChoice;
             list.MeasureItem += (sender, args) => args.ItemHeight = Theme.Scaled(list, list.Items[args.Index] is Choice ? 43 : 26);
