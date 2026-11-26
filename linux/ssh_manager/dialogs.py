@@ -13,6 +13,7 @@ from .auth import account_for
 from .config import FORWARD_KINDS, Profile
 from .extras import generate_key
 from .rdp import DesktopProfile
+from .vnc import VncProfile
 from .theme import mark
 from .widgets import action_button, chooser, dialog_buttons, themed
 
@@ -355,6 +356,105 @@ class LogonDialog(Gtk.Dialog):
         return user, domain, self.password.get_text(), self.remember.get_active()
 
 
+DIRECT = "Напрямую"
+
+
+class VncDialog(Gtk.Dialog):
+    """VNC connection: fields and texts of src/VncDialog.cs (docs/ui-spec.md §8)."""
+
+    def __init__(self, owner, profile, has_password=False, group="", ssh_aliases=()):
+        super().__init__(title="Изменить VNC-подключение" if profile else "Новое VNC-подключение",
+                         transient_for=owner, modal=True)
+        themed(self)
+        self.set_default_size(545, -1)
+        dialog_buttons(self, "Сохранить")
+        self.profile = profile or VncProfile(uuid.uuid4().hex, "", "", group=group)
+        grid = _grid(self, 150)
+        self.entries = {}
+        rows = (("name", "Название", 80), ("host", "Адрес", 253), ("port", "Порт", 5), ("user", "Пользователь", 128))
+        for row, (key, caption, limit) in enumerate(rows):
+            self.entries[key] = _field(grid, row, caption, getattr(self.profile, key), limit=limit)
+        self.entries["user"].set_placeholder_text("необязательно")
+        self.password = _field(grid, 4, "Пароль", hidden=True)
+        options = Gtk.Box(spacing=12)
+        options.pack_start(_label("Сохранён. Пустое поле — не менять." if has_password else
+                                  "Необязательно. Хранится в системном хранилище.", muted=True), False, False, 0)
+        self.forget = Gtk.CheckButton(label="Удалить пароль")
+        self.forget.connect("toggled", lambda check: self.password.set_sensitive(not check.get_active()))
+        options.pack_start(self.forget, False, False, 0)
+        grid.attach(options, 1, 5, 2, 1)
+        grid.attach(_label("VNC-пароль: учитываются первые 8 символов.", muted=True), 1, 6, 2, 1)
+        grid.attach(_label("Через SSH-сервер"), 0, 7, 1, 1)
+        self.via = Gtk.ComboBoxText(hexpand=True)
+        aliases = sorted(ssh_aliases, key=str.casefold)
+        if self.profile.via and self.profile.via not in aliases:
+            aliases.append(self.profile.via)
+        for value in [DIRECT] + aliases:
+            self.via.append(value, value)
+        self.via.set_active_id(self.profile.via or DIRECT)
+        grid.attach(self.via, 1, 7, 2, 1)
+        grid.attach(_label("Масштаб"), 0, 8, 1, 1)
+        self.scale = Gtk.ComboBoxText(hexpand=True)
+        self.scale.append("fit", "По размеру окна")
+        self.scale.append("native", "Исходный размер")
+        self.scale.set_active_id(self.profile.scale)
+        grid.attach(self.scale, 1, 8, 2, 1)
+        self.view_only = Gtk.CheckButton(label="Только просмотр", active=self.profile.view_only)
+        self.clipboard = Gtk.CheckButton(label="Общий буфер обмена", active=self.profile.clipboard)
+        self.fullscreen = Gtk.CheckButton(label="Открывать на весь экран", active=self.profile.fullscreen)
+        for row, check in enumerate((self.view_only, self.clipboard, self.fullscreen), start=9):
+            grid.attach(check, 1, row, 2, 1)
+        self.error = _label("", wrap=True)
+        mark(self.error, "sshm-danger")
+        grid.attach(self.error, 1, 12, 2, 1)
+        self.show_all()
+        self.forget.set_visible(has_password)
+
+    def values(self):
+        fields = {key: entry.get_text().strip() for key, entry in self.entries.items()}
+        try:
+            fields["port"] = int(fields["port"] or "5900")
+        except ValueError:
+            raise ValueError("Укажите порт от 1 до 65535.") from None
+        host = fields["host"].strip("[]")
+        if not host.isascii():
+            host = host.encode("idna").decode("ascii")
+        fields["host"] = host
+        via = self.via.get_active_id() or DIRECT
+        profile = replace(self.profile, **fields, scale=self.scale.get_active_id() or "fit",
+                          view_only=self.view_only.get_active(), clipboard=self.clipboard.get_active(),
+                          fullscreen=self.fullscreen.get_active(), via="" if via == DIRECT else via).validate()
+        password = "" if self.forget.get_active() else self.password.get_text()
+        if any(char in password for char in "\0\r\n"):
+            raise ValueError("Пароль должен быть одной строкой.")
+        return profile, password, self.forget.get_active()
+
+
+class VncLogonDialog(Gtk.Dialog):
+    """«Вход: имя» when the VNC server asks for a password that is not saved (or was rejected)."""
+
+    def __init__(self, owner, profile, wrong=False):
+        super().__init__(title="Вход: " + profile.name, transient_for=owner, modal=True)
+        themed(self)
+        self.set_default_size(460, -1)
+        dialog_buttons(self, "Подключиться")
+        grid = _grid(self, 120)
+        note = _label("Неверный пароль VNC. Попробуйте ещё раз." if wrong else profile.address, muted=not wrong)
+        if wrong:
+            mark(note, "sshm-danger")
+        grid.attach(note, 0, 0, 3, 1)
+        self.password = _field(grid, 1, "Пароль", hidden=True)
+        self.password.set_activates_default(True)
+        self.set_default_response(Gtk.ResponseType.OK)
+        self.remember = Gtk.CheckButton(label="Сохранить пароль в системном хранилище")
+        grid.attach(self.remember, 1, 2, 2, 1)
+        self.show_all()
+        self.password.grab_focus()
+
+    def values(self):
+        return self.password.get_text(), self.remember.get_active()
+
+
 class ServerPicker(Gtk.Dialog):
     """«Новый сеанс»: protocol switch, search, list with group dots and a status line (src/ServerPickerDialog.cs)."""
 
@@ -372,7 +472,7 @@ class ServerPicker(Gtk.Dialog):
         area.set_border_width(14)
         switch = Gtk.Box(spacing=4)
         self.tabs = {}
-        for kind, caption, icon in (("ssh", "SSH", "terminal"), ("rdp", "RDP", "server")):
+        for kind, caption, icon in (("ssh", "SSH", "terminal"), ("rdp", "RDP", "server"), ("vnc", "VNC", "server")):
             tab = action_button(caption, lambda kind=kind: self.select(kind), "tab", icon=icon, width=86)
             self.tabs[kind] = tab
             switch.pack_start(tab, False, False, 0)
@@ -433,7 +533,9 @@ class ServerPicker(Gtk.Dialog):
 
     @staticmethod
     def key(profile):
-        return ("rdp:" + profile.id) if hasattr(profile, "id") and hasattr(profile, "fullscreen") else "ssh:" + profile.alias.lower()
+        if isinstance(profile, VncProfile):
+            return "vnc:" + profile.id
+        return ("rdp:" + profile.id) if isinstance(profile, DesktopProfile) else "ssh:" + profile.alias.lower()
 
     def row(self, profile, group, color):
         row = Gtk.ListBoxRow()

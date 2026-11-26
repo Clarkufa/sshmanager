@@ -19,6 +19,7 @@ Requires:       /usr/bin/ssh
 Requires:       /usr/bin/secret-tool
 Recommends:     /usr/bin/pkexec
 Recommends:     freerdp
+Recommends:     gtk-vnc2
 Recommends:     libayatana-appindicator-gtk3
 
 %description

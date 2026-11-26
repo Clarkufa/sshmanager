@@ -1,4 +1,4 @@
-"""Sessions page: sidebar list, info bar, SSH terminals and RDP desktops (docs/ui-spec.md §3)."""
+"""Sessions page: sidebar list, info bar, SSH terminals, RDP and VNC desktops (docs/ui-spec.md §3, §8)."""
 
 import os
 import re
@@ -7,12 +7,14 @@ import subprocess
 import threading
 from pathlib import Path
 
+import gi
 from gi.repository import Gdk, Gio, GLib, GObject, Gtk, Pango, Vte
 
 from .auth import AskPass, account_for, ssh_args
-from .dialogs import LogonDialog
+from .dialogs import LogonDialog, VncLogonDialog
 from .theme import TERMINAL, mark, rgba
 from .widgets import Item, action_button, confirm, menu_at, message
+from .vnc import MISSING_CLIENT, SshTunnel, TunnelError
 from .x11 import Display
 
 FORWARDING_ERROR = re.compile(r"cannot\s*listen\s*to\s*port\s*:|could\s*not\s*request\s*local\s*forwarding", re.IGNORECASE)
@@ -551,6 +553,392 @@ class RdpSession(Session):
             self.display = None
 
 
+def load_gtk_vnc():
+    """The GtkVnc module, or None when gir1.2-gtk-vnc-2.0 / gtk-vnc2 is not installed."""
+    try:
+        gi.require_version("GtkVnc", "2.0")
+        from gi.repository import GtkVnc
+    except (ImportError, ValueError):
+        return None
+    return GtkVnc
+
+
+def credential_kinds(values):
+    """The credential types of a vnc-auth-credential signal (a GValueArray or a list, depending on PyGObject)."""
+    if hasattr(values, "n_values"):
+        values = [values.get_nth(index) for index in range(values.n_values)]
+    return [int(value) for value in values]
+
+
+class VncSession(Session):
+    """A gtk-vnc display inside the window (X11 and Wayland), or inside a VncWindow of its own (docs/ui-spec.md §8)."""
+    protocol = "VNC"
+    embedded = True
+
+    def __init__(self, owner, profile, number, credential=None, window=None):
+        super().__init__(owner, profile, number)
+        self.credential = credential  # the VNC password, or None to ask when the server wants one
+        self.window = window
+        self.display = None
+        self.tunnel = None
+        self.generation = 0
+        self.initialized = False
+        self.failure = ""
+        self.wrong_password = False
+        self.full_screen = False
+        self.received = None
+        self.sent = None
+        self.clipboard = Gtk.Clipboard.get(Gdk.SELECTION_CLIPBOARD)
+        self.clipboard_handler = self.clipboard.connect("owner-change", self.clipboard_changed)
+        self.pages = Gtk.Stack()
+        self.pack_start(self.pages, True, True, 0)
+
+        desktop = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        self.bar = Gtk.Box(spacing=8, margin=6)
+        bar_title = Gtk.Label(label=profile.name + "  ·  " + profile.address, xalign=0)
+        mark(bar_title, "sshm-terminal-text")
+        self.bar.pack_start(bar_title, True, True, 0)
+        self.bar.pack_end(action_button("Выйти из полноэкранного режима", self.leave_full_screen, "outline",
+                                        icon="move_left"), False, False, 0)
+        desktop.pack_start(self.bar, False, False, 0)
+        self.holder = Gtk.Box(hexpand=True, vexpand=True)
+        desktop.pack_start(self.holder, True, True, 0)
+        self.pages.add_named(desktop, "desktop")
+
+        ended = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6, valign=Gtk.Align.CENTER, halign=Gtk.Align.CENTER)
+        self.ended_title = Gtk.Label()
+        mark(self.ended_title, "sshm-overlay-title")
+        self.ended_detail = Gtk.Label(wrap=True, justify=Gtk.Justification.CENTER, max_width_chars=70, selectable=True)
+        mark(self.ended_detail, "sshm-overlay-detail")
+        actions = Gtk.Box(spacing=8, halign=Gtk.Align.CENTER, margin_top=12)
+        actions.pack_start(action_button("Переподключить", self.restart, "primary", icon="refresh", width=160), False, False, 0)
+        actions.pack_start(action_button("Закрыть сеанс", self.close_request, "outline", width=140), False, False, 0)
+        for widget in (self.ended_title, self.ended_detail, actions):
+            ended.pack_start(widget, False, False, 0)
+        self.pages.add_named(ended, "ended")
+        self.connect("destroy", self.stop)
+        self.show_all()
+        self.bar.hide()
+
+    @property
+    def address(self):
+        return self.profile.address + (f"  ·  через {self.profile.via}" if self.profile.via else "")
+
+    def focus(self):
+        if self.display is not None and self.live:
+            self.display.grab_focus()
+        return False
+
+    # --- lifecycle ---------------------------------------------------------------------------
+    def start(self):
+        self.generation += 1
+        generation = self.generation
+        self.close_connection()
+        self.live = True
+        self.initialized = False
+        self.failure = ""
+        self.wrong_password = False
+        self.status = "подключение"
+        self.pages.set_visible_child_name("desktop")
+        self.changed()
+        GtkVnc = load_gtk_vnc()
+        if GtkVnc is None:
+            self.ended(MISSING_CLIENT, failed=True)
+            return
+        self.display = self.create_display(GtkVnc, generation)
+        if not self.profile.via:
+            self.open(generation, self.profile.host, self.profile.port)
+            return
+        jump = self.owner.ssh_profile(self.profile.via)
+        if jump is None:
+            self.ended(f"Не удалось открыть SSH-туннель: сервер «{self.profile.via}» не найден в каталоге SSH.", failed=True)
+            return
+        config, vault = self.owner.config, self.owner.vault
+        host, port = self.profile.host, self.profile.port
+
+        def tunnel():
+            try:
+                opened = SshTunnel(jump, config, vault, host, port)
+            except (TunnelError, OSError, RuntimeError) as error:
+                GLib.idle_add(self.tunnel_failed, generation, str(error))
+            else:
+                GLib.idle_add(self.tunnel_ready, generation, opened)
+        threading.Thread(target=tunnel, daemon=True).start()
+
+    def tunnel_ready(self, generation, tunnel):
+        if self.closed or generation != self.generation:
+            tunnel.close()
+            return False
+        self.tunnel = tunnel
+        self.open(generation, "127.0.0.1", tunnel.port)
+        return False
+
+    def tunnel_failed(self, generation, detail):
+        if not self.closed and generation == self.generation:
+            self.ended(detail if detail.startswith("Не удалось") else "Не удалось открыть SSH-туннель: " + detail, failed=True)
+        return False
+
+    def create_display(self, GtkVnc, generation):
+        display = GtkVnc.Display(can_focus=True, hexpand=True, vexpand=True)
+        fit = self.profile.scale == "fit"
+        display.set_scaling(fit)
+        for method, value in (("set_keep_aspect_ratio", True), ("set_allow_resize", fit), ("set_smoothing", True)):
+            if hasattr(display, method):
+                getattr(display, method)(value)
+        display.set_read_only(self.profile.view_only)
+        display.set_shared_flag(True)
+        display.set_pointer_grab(False)
+        display.set_keyboard_grab(self.full_screen)
+        handlers = {
+            "vnc-initialized": self.on_initialized,
+            "vnc-auth-credential": self.on_credential,
+            "vnc-auth-failure": self.on_auth_failure,
+            "vnc-auth-unsupported": self.on_auth_unsupported,
+            "vnc-error": self.on_error,
+            "vnc-disconnected": self.on_disconnected,
+            "vnc-server-cut-text": self.on_server_text,
+        }
+        for signal_name, handler in handlers.items():
+            display.connect(signal_name, lambda widget, *args, handler=handler: handler(generation, *args))
+        display.connect("focus-in-event", lambda *_: self.send_clipboard())
+        display.connect("button-press-event", lambda widget, event: widget.grab_focus() and False)
+        if fit:
+            self.holder.pack_start(display, True, True, 0)
+        else:
+            scroll = Gtk.ScrolledWindow(hexpand=True, vexpand=True)
+            scroll.add(display)
+            self.holder.pack_start(scroll, True, True, 0)
+        self.holder.show_all()
+        return display
+
+    def open(self, generation, host, port):
+        if self.display is None or generation != self.generation:
+            return
+        if not self.display.open_host(host, str(port)):
+            self.ended("Не удалось начать подключение к серверу VNC.", failed=True)
+
+    # --- gtk-vnc signals ---------------------------------------------------------------------
+    def current(self, generation):
+        return not self.closed and generation == self.generation and self.display is not None
+
+    def on_initialized(self, generation):
+        if not self.current(generation):
+            return
+        self.initialized = True
+        self.status = "подключён"
+        self.changed()
+        self.focus()
+        if self.profile.fullscreen and not self.full_screen:
+            self.enter_full_screen()
+
+    def on_credential(self, generation, values):
+        if not self.current(generation):
+            return
+        GtkVnc = load_gtk_vnc()
+        kinds = credential_kinds(values)
+        if int(GtkVnc.DisplayCredential.PASSWORD) in kinds and self.credential is None:
+            GLib.idle_add(self.ask_password, generation, kinds)
+            return
+        self.give_credentials(kinds)
+
+    def give_credentials(self, kinds):
+        GtkVnc = load_gtk_vnc()
+        values = {int(GtkVnc.DisplayCredential.USERNAME): self.profile.user or "",
+                  int(GtkVnc.DisplayCredential.PASSWORD): self.credential or "",
+                  int(GtkVnc.DisplayCredential.CLIENTNAME): "ssh-manager"}
+        for kind in kinds:
+            if kind not in values or self.display.set_credential(kind, values[kind]):
+                self.failure = "Сервер VNC не поддерживает доступный способ входа."
+                self.display.close()
+                return
+
+    def ask_password(self, generation, kinds, wrong=False):
+        if not self.current(generation):
+            return False
+        password = ask_vnc_password(self.owner, self.get_toplevel(), self.profile, wrong)
+        if not self.current(generation):
+            return False
+        if password is None:
+            if kinds is None:
+                self.ended("Неверный пароль VNC.", failed=True)
+            else:
+                self.failure = "Нужен пароль VNC."
+                self.display.close()
+            return False
+        self.credential = password
+        if kinds is None:
+            self.start()
+        else:
+            self.give_credentials(kinds)
+        return False
+
+    def on_auth_failure(self, generation, reason=""):
+        if self.current(generation):
+            self.wrong_password = True
+            self.failure = "Неверный пароль VNC."
+
+    def on_auth_unsupported(self, generation, *_):
+        if self.current(generation):
+            self.failure = "Сервер VNC не поддерживает доступный способ входа."
+
+    def on_error(self, generation, text=""):
+        if self.current(generation) and not self.failure and text:
+            self.failure = text
+
+    def on_disconnected(self, generation):
+        if not self.current(generation):
+            return
+        if self.wrong_password:
+            self.credential = None
+            self.status = "подключение"
+            self.changed()
+            GLib.idle_add(self.ask_password, generation, None, True)
+            return
+        if self.failure:
+            self.ended(self.failure, failed=True)
+        else:
+            self.ended("Сервер VNC закрыл соединение.", failed=not self.initialized)
+
+    def on_server_text(self, generation, text):
+        if self.current(generation) and self.profile.clipboard and not self.profile.view_only and text:
+            self.received = text
+            self.clipboard.set_text(text, -1)
+
+    # --- clipboard to the server ---------------------------------------------------------------
+    def clipboard_changed(self, *_):
+        if self.display is not None and self.display.has_focus():
+            self.send_clipboard()
+
+    def send_clipboard(self):
+        if self.display is None or not self.initialized or not self.profile.clipboard or self.profile.view_only:
+            return False
+        generation = self.generation
+
+        def received(clipboard, text):
+            if text and text != self.received and text != self.sent and self.current(generation) and self.initialized:
+                self.sent = text
+                self.display.client_cut_text(text)
+        self.clipboard.request_text(received)
+        return False
+
+    # --- end, full screen, close -----------------------------------------------------------------
+    def ended(self, detail, failed):
+        self.live = False
+        self.generation += 1
+        if self.full_screen:
+            self.leave_full_screen()
+        self.close_connection()
+        self.status = "отключён (ошибка)" if failed else "отключён"
+        self.ended_title.set_text("Подключение прервано" if failed else "Сеанс завершён")
+        self.ended_detail.set_text(f"{self.profile.name} · {self.address}\n{detail}".strip())
+        self.pages.set_visible_child_name("ended")
+        self.changed()
+
+    def restart(self):
+        self.start()
+
+    def close_connection(self):
+        display, self.display = self.display, None
+        if display is not None:
+            display.close()
+        for child in self.holder.get_children():
+            self.holder.remove(child)
+            child.destroy()
+        tunnel, self.tunnel = self.tunnel, None
+        if tunnel is not None:
+            threading.Thread(target=tunnel.close, daemon=True).start()
+
+    def enter_full_screen(self):
+        if self.window is not None:
+            self.window.set_full_screen(True)
+        else:
+            self.owner.enter_full_screen(self)
+
+    def leave_full_screen(self):
+        if self.window is not None:
+            self.window.set_full_screen(False)
+        else:
+            self.owner.leave_full_screen()
+
+    def set_full_screen(self, value):
+        self.full_screen = value
+        self.bar.set_visible(value)
+        if self.display is not None:
+            self.display.set_keyboard_grab(value)
+
+    def close_request(self):
+        if self.window is not None:
+            self.window.destroy()
+        else:
+            self.owner.close_session(self, confirm_close=False)
+
+    def stop(self, *_):
+        if self.closed:
+            return
+        super().stop()
+        self.generation += 1
+        if self.clipboard_handler:
+            self.clipboard.disconnect(self.clipboard_handler)
+            self.clipboard_handler = 0
+        self.close_connection()
+
+
+class VncWindow(Gtk.Window):
+    """«Открыть в отдельном окне» for VNC: the session in a window of its own (src/VncWindow.cs)."""
+
+    def __init__(self, owner, profile, credential=None):
+        super().__init__(title=profile.name + " — VNC")
+        self.set_default_size(1024, 700)
+        if owner.get_icon_name():
+            self.set_icon_name(owner.get_icon_name())
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        mark(box, "sshm-terminal-area")
+        self.toolbar = Gtk.Box(spacing=6, margin=6)
+        title = Gtk.Label(label=profile.name + "  ·  " + profile.address, xalign=0)
+        mark(title, "sshm-terminal-text")
+        self.toolbar.pack_start(title, True, True, 0)
+        self.session = VncSession(owner, profile, 1, credential, window=self)
+        self.full = action_button("Весь экран", lambda: self.set_full_screen(True), "outline", icon="server", width=116)
+        for widget in (self.full,
+                       action_button("Переподключить", self.session.restart, "outline", icon="refresh", width=150),
+                       action_button("Отключить", self.destroy, "outline", danger=True, width=100)):
+            self.toolbar.pack_start(widget, False, False, 0)
+        box.pack_start(self.toolbar, False, False, 0)
+        box.pack_start(self.session, True, True, 0)
+        self.add(box)
+        self.connect("destroy", lambda *_: self.session.stop())
+        self.show_all()
+        self.session.bar.hide()
+        self.session.start()
+
+    def set_full_screen(self, value):
+        if value and (not self.session.live or not self.session.initialized):
+            return
+        self.toolbar.set_visible(not value)
+        self.session.set_full_screen(value)
+        (self.fullscreen if value else self.unfullscreen)()
+
+
+def ask_vnc_password(owner, parent, profile, wrong=False):
+    """The entered VNC password (saved first when asked to), or None when the user cancels."""
+    dialog = VncLogonDialog(parent if isinstance(parent, Gtk.Window) else owner, profile, wrong)
+    try:
+        while True:
+            if dialog.run() != Gtk.ResponseType.OK:
+                return None
+            password, remember = dialog.values()
+            if password and not any(char in password for char in "\0\r\n"):
+                break
+    finally:
+        dialog.destroy()
+    if remember:
+        try:
+            owner.vault.save(profile.secret, password)
+        except (OSError, RuntimeError, ValueError, subprocess.TimeoutExpired) as error:
+            message(owner, error, Gtk.MessageType.ERROR)
+    return password
+
+
 def embedding_supported():
     display = Gdk.Display.get_default()
     return display is not None and type(display).__name__ == "X11Display"
@@ -650,7 +1038,7 @@ class SessionsPage(Gtk.Box):
         self.files = action_button("Файлы", lambda: self.active and owner.open_files(self.active.profile), icon="folder", width=86)
         self.reconnect = action_button("Переподключить", lambda: self.active and self.active.restart(), icon="refresh", width=150)
         self.detach = action_button("В окне", lambda: self.active and owner.detach_session(self.active), icon="move", width=92,
-                                    tooltip="Переоткрыть RDP-сеанс в отдельном окне")
+                                    tooltip="Переоткрыть сеанс в отдельном окне")
         self.full_screen = action_button("Весь экран", lambda: self.active and owner.enter_full_screen(self.active),
                                          icon="server", width=116)
         self.snippets = action_button("Команды", lambda: self.active and self.snippet_menu(self.snippets), icon="terminal",
@@ -724,7 +1112,7 @@ class SessionsPage(Gtk.Box):
 
     def refresh_details(self):
         session = self.active
-        self.title.set_text(session.title if session else "Сеансы SSH и RDP")
+        self.title.set_text(session.title if session else "Сеансы SSH, RDP и VNC")
         if session is None:
             self.detail.set_text("")
         else:
@@ -739,7 +1127,7 @@ class SessionsPage(Gtk.Box):
             if session.status:
                 parts.append(session.status)
             self.detail.set_text("  ·  ".join(parts))
-        rdp = isinstance(session, RdpSession)
+        rdp = isinstance(session, (RdpSession, VncSession))
         self.files.set_visible(session is not None and not rdp)
         self.snippets.set_visible(session is not None and not rdp)
         for widget in (self.reconnect, self.detach, self.full_screen):
@@ -781,14 +1169,15 @@ class SessionsPage(Gtk.Box):
         session, owner = self.active, self.owner
         if session is None:
             return False
-        rdp = isinstance(session, RdpSession)
+        rdp = isinstance(session, (RdpSession, VncSession))
         items = [Item("Переименовать сеанс", lambda: owner.rename_session(session), icon="edit"),
                  Item("Новый сеанс этого сервера", lambda: owner.duplicate_session(session), icon="plus")]
         if not rdp:
             items.append(Item("Файлы (SFTP)", lambda: owner.open_files(session.profile), icon="folder"))
         else:
             if session.live and session.embedded and session.status == "подключён":
-                items.append(Item("Полноэкранный режим RDP", lambda: owner.enter_full_screen(session), icon="server"))
+                items.append(Item(f"Полноэкранный режим {session.protocol}", lambda: owner.enter_full_screen(session),
+                                  icon="server"))
             items += [Item("Открыть в отдельном окне", lambda: owner.detach_session(session), icon="move"),
                       Item("Переподключить", session.restart, icon="refresh")]
         if session.forwarding_failed:

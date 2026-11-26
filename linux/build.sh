@@ -50,7 +50,7 @@ Priority: optional
 Architecture: all
 Maintainer: SSH Manager contributors <3994042+Clarkufa@users.noreply.github.com>
 Depends: python3 (>= 3.10), python3-gi, gir1.2-gtk-3.0, gir1.2-vte-2.91, python3-paramiko, python3-cryptography, openssh-client, libsecret-tools
-Recommends: pkexec, freerdp3-x11 | freerdp-x11 | freerdp2-x11, gir1.2-ayatanaappindicator3-0.1
+Recommends: pkexec, freerdp3-x11 | freerdp-x11 | freerdp2-x11, gir1.2-gtk-vnc-2.0, gir1.2-ayatanaappindicator3-0.1
 Homepage: https://github.com/Clarkufa/sshmanager
 Description: Native SSH, SFTP and RDP desktop manager
  OpenSSH profiles, embedded VTE sessions, graphical SFTP and RDP profiles

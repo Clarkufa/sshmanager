@@ -11,6 +11,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 
 from .rdp import DesktopProfile, ORDERS
+from .vnc import VncProfile
 
 ALIAS = re.compile(r"[A-Za-z0-9_.][A-Za-z0-9_.-]*\Z")
 # Port forwarding directives: values are several tokens (LocalForward 8080 localhost:80).
@@ -228,7 +229,7 @@ def write(path, contents, mode=0o600):
 
 
 def parse_settings(contents):
-    initial = {"groups": [], "members": {}, "default": "", "dark": True, "desktops": [], "sort": {},
+    initial = {"groups": [], "members": {}, "default": "", "dark": True, "desktops": [], "vnc": [], "sort": {},
                "favorites": [], "recent": [], "snippets": [], "preferences": dict(PREFERENCES)}
     if not contents:
         return initial
@@ -252,7 +253,7 @@ def parse_settings(contents):
     if any(not ALIAS.fullmatch(alias) or not isinstance(group, str) or group not in ids
            for alias, group in initial["members"].items()):
         raise ValueError("Некорректное распределение серверов по вкладкам.")
-    sort_keys = {protocol + ":" + group for protocol in ("ssh", "rdp") for group in ids}
+    sort_keys = {protocol + ":" + group for protocol in ("ssh", "rdp", "vnc") for group in ids}
     orders = dict(ORDERS)
     if not isinstance(initial["sort"], dict) or any(
             key not in sort_keys or not isinstance(order, str) or order not in orders
@@ -260,7 +261,7 @@ def parse_settings(contents):
         raise ValueError("Некорректная сортировка серверов.")
     favorites = initial["favorites"]
     if not isinstance(favorites, list) or len(favorites) > 10000 or any(
-            not isinstance(key, str) or not re.fullmatch(r"(ssh|rdp):[^\s]{1,253}", key) for key in favorites):
+            not isinstance(key, str) or not re.fullmatch(r"(ssh|rdp|vnc):[^\s]{1,253}", key) for key in favorites):
         raise ValueError("Некорректный список избранного.")
     recent = [item for item in initial["recent"] if isinstance(item, dict) and isinstance(item.get("key"), str)
               and isinstance(item.get("at"), (int, float))][:10] if isinstance(initial["recent"], list) else []
@@ -298,6 +299,23 @@ def parse_settings(contents):
         desktop_ids.add(profile.id)
         desktops.append(asdict(profile))
     initial["desktops"] = desktops
+    vnc_ids = set()
+    vnc = []
+    if not isinstance(initial["vnc"], list) or len(initial["vnc"]) > 10000:
+        raise ValueError("Некорректный список VNC-подключений.")
+    for entry in initial["vnc"]:
+        try:
+            if not isinstance(entry, dict):
+                raise TypeError
+            known = {key: value for key, value in entry.items() if key in VncProfile.__dataclass_fields__}
+            profile = VncProfile(**known).validate()
+        except TypeError as error:
+            raise ValueError("Некорректное VNC-подключение.") from error
+        if profile.id in vnc_ids or profile.group not in ids:
+            raise ValueError("Некорректная вкладка или повторяющееся VNC-подключение.")
+        vnc_ids.add(profile.id)
+        vnc.append(asdict(profile))
+    initial["vnc"] = vnc
     return initial
 
 

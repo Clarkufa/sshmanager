@@ -9,12 +9,13 @@ from dataclasses import dataclass
 from pathlib import Path
 
 HOST = r"(?:\[[0-9A-Fa-f:.]+\]|[A-Za-z0-9_.-]+)"
+DEFAULT_PORTS = {"ssh": 22, "rdp": 3389, "vnc": 5900}
 
 
 @dataclass(frozen=True)
 class Found:
     """A connection found in another program."""
-    protocol: str  # "ssh" or "rdp"
+    protocol: str  # "ssh", "rdp" or "vnc"
     name: str
     host: str
     port: int
@@ -24,17 +25,17 @@ class Found:
 
 
 def parse_quick(text):
-    """«user@host:port» → ("ssh", user, host, port); «rdp://[user@]host[:port]» → ("rdp", user, host, port)."""
+    """«user@host:port» → ("ssh", user, host, port); «rdp://[user@]host[:port]» → ("rdp", …); «vnc://…» → ("vnc", …)."""
     text = text.strip()
     protocol = "ssh"
-    for prefix, kind in (("rdp://", "rdp"), ("ssh://", "ssh")):
+    for prefix, kind in (("rdp://", "rdp"), ("vnc://", "vnc"), ("ssh://", "ssh")):
         if text.lower().startswith(prefix):
             protocol, text = kind, text[len(prefix):].rstrip("/")
     match = re.fullmatch(rf"(?:([^@\s:]+)@)?({HOST})(?::([0-9]{{1,5}}))?", text)
     if not match:
-        raise ValueError("Введите адрес как user@host:port или rdp://host:port.")
+        raise ValueError("Введите адрес как user@host:port, rdp://host:port или vnc://host:port.")
     user, host, port = match.groups()
-    port = int(port) if port else (3389 if protocol == "rdp" else 22)
+    port = int(port) if port else DEFAULT_PORTS[protocol]
     if not 1 <= port <= 65535:
         raise ValueError("Порт должен быть числом от 1 до 65535.")
     return protocol, user or "", host.strip("[]"), port
@@ -81,14 +82,14 @@ def mremoteng(path):
     for node in root.iter("Node"):
         if node.get("Type") != "Connection":
             continue
-        protocol = {"SSH2": "ssh", "SSH1": "ssh", "RDP": "rdp"}.get(node.get("Protocol", ""))
+        protocol = {"SSH2": "ssh", "SSH1": "ssh", "RDP": "rdp", "VNC": "vnc"}.get(node.get("Protocol", ""))
         host = node.get("Hostname", "")
         if not protocol or not host:
             continue
         try:
-            port = int(node.get("Port") or (22 if protocol == "ssh" else 3389))
+            port = int(node.get("Port") or DEFAULT_PORTS[protocol])
         except ValueError:
-            port = 22 if protocol == "ssh" else 3389
+            port = DEFAULT_PORTS[protocol]
         found.append(Found(protocol, node.get("Name") or host, host, port, node.get("Username", ""),
                            node.get("Domain", "") if protocol == "rdp" else "", "mRemoteNG"))
     return found
@@ -106,13 +107,13 @@ def mobaxterm(path):
         if not match:
             continue
         kind, host, port, user = match.groups()
-        protocol = {"0": "ssh", "4": "rdp"}.get(kind)
+        protocol = {"0": "ssh", "4": "rdp", "5": "vnc"}.get(kind)
         if not protocol or not host:
             continue
         try:
-            port = int(port) if port else (22 if protocol == "ssh" else 3389)
+            port = int(port) if port else DEFAULT_PORTS[protocol]
         except ValueError:
-            port = 22 if protocol == "ssh" else 3389
+            port = DEFAULT_PORTS[protocol]
         found.append(Found(protocol, name.strip(), host, port, user, source="MobaXterm"))
     return found
 

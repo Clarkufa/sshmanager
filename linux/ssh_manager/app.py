@@ -23,14 +23,15 @@ from . import VERSION
 from .auth import Vault, account_for, ssh_args
 from .catalog import ALL_NAME, UNGROUPED_NAME, CatalogPage, next_order
 from .config import Config, Profile, parse_settings
-from .dialogs import IMPORT_RESPONSE, DesktopDialog, ImportDialog, ProfileDialog, ServerPicker, SettingsDialog
+from .dialogs import IMPORT_RESPONSE, DesktopDialog, ImportDialog, ProfileDialog, ServerPicker, SettingsDialog, VncDialog
 from .extras import copy_key_command, parse_quick, putty_sessions, quick_alias
 from .files import FilesWindow
 from .launch import ssh_command_text, terminal_command
 from .rdp import DesktopProfile, ordered
-from .sessions import (RdpSession, SessionsPage, SshSession, ask_credential, embedding_supported,
+from .sessions import (RdpSession, SessionsPage, SshSession, VncSession, VncWindow, ask_credential, embedding_supported,
                        prepare_terminal_paste, terminal_font)  # noqa: F401 - re-exported for tests
 from .theme import Theme, mark
+from .vnc import VncProfile
 from .tray import Tray
 from .update_ui import UpdateController
 from .widgets import Item, action_button, chooser, confirm, menu_at, message, prompt, set_button_text
@@ -204,9 +205,9 @@ class Window(Gtk.ApplicationWindow):
 
     def select_protocol(self, protocol):
         self.protocol = protocol
-        self.title.set_text("SSH-подключения" if protocol == "ssh" else "RDP-подключения")
+        self.title.set_text({"ssh": "SSH-подключения", "rdp": "RDP-подключения", "vnc": "VNC-подключения"}[protocol])
         self.catalog.set_protocol(protocol)
-        self.add_button.set_sensitive(protocol == "rdp" or self.document is not None)
+        self.add_button.set_sensitive(protocol != "ssh" or self.document is not None)
         self.catalog.render()
 
     # --- data ---------------------------------------------------------------------------------
@@ -217,7 +218,7 @@ class Window(Gtk.ApplicationWindow):
             self.document = None
             if show_error:
                 message(self, error, Gtk.MessageType.ERROR)
-        self.add_button.set_sensitive(self.protocol == "rdp" or self.document is not None)
+        self.add_button.set_sensitive(self.protocol != "ssh" or self.document is not None)
         self.catalog.render_groups()
         self.catalog.render()
 
@@ -226,9 +227,20 @@ class Window(Gtk.ApplicationWindow):
         return [DesktopProfile(**{key: value for key, value in entry.items() if key in fields})
                 for entry in self.settings["desktops"]]
 
+    def vnc_profiles(self):
+        fields = VncProfile.__dataclass_fields__
+        return [VncProfile(**{key: value for key, value in entry.items() if key in fields}) for entry in self.settings["vnc"]]
+
+    def ssh_profile(self, alias):
+        """The SSH profile «Через SSH-сервер» of a VNC connection names."""
+        profiles = self.document.profiles if self.document else []
+        return next((profile for profile in profiles if profile.alias.lower() == alias.lower()), None)
+
     def catalog_profiles(self):
         if self.protocol == "rdp":
             profiles = self.desktop_profiles()
+        elif self.protocol == "vnc":
+            profiles = self.vnc_profiles()
         else:
             profiles = list(self.document.profiles) if self.document else []
         if self.active_group == "*":
@@ -242,6 +254,8 @@ class Window(Gtk.ApplicationWindow):
 
     @staticmethod
     def profile_key(profile):
+        if isinstance(profile, VncProfile):
+            return "vnc:" + profile.id
         return ("rdp:" + profile.id) if isinstance(profile, DesktopProfile) else "ssh:" + profile.alias.lower()
 
     def is_favorite(self, profile):
@@ -270,7 +284,7 @@ class Window(Gtk.ApplicationWindow):
             pass
 
     def group_of(self, profile):
-        if isinstance(profile, DesktopProfile):
+        if isinstance(profile, (DesktopProfile, VncProfile)):
             return profile.group
         return self.settings["members"].get(profile.alias.lower(), "")
 
@@ -381,6 +395,18 @@ class Window(Gtk.ApplicationWindow):
         destinations = [Item(UNGROUPED_NAME, lambda: self.move_profile(profile, ""), icon="folder", checked=current == "")]
         destinations += [Item(group["name"], lambda g=group: self.move_profile(profile, g["id"]), checked=current == group["id"])
                          for group in self.settings["groups"]]
+        if isinstance(profile, VncProfile):
+            return menu_at(widget, event, [
+                Item("Подключиться", lambda: self.connect_profile(profile), icon="server"),
+                Item("Новый сеанс", lambda: self.connect_profile(profile, True), icon="plus"),
+                Item("Открыть в отдельном окне", lambda: self.connect_profile(profile, True, embedded=False), icon="move"),
+                Item("Изменить", lambda: self.edit_vnc(profile), icon="edit"),
+                Item("Убрать из избранного" if self.is_favorite(profile) else "В избранное",
+                     lambda: self.toggle_favorite(profile), icon="plus"),
+                Item("Переместить во вкладку", icon="move", children=destinations),
+                None,
+                Item("Удалить", lambda: self.delete_vnc(profile), icon="delete", danger=True),
+            ])
         if isinstance(profile, DesktopProfile):
             return menu_at(widget, event, [
                 Item("Подключиться", lambda: self.connect_profile(profile), icon="server"),
@@ -413,7 +439,9 @@ class Window(Gtk.ApplicationWindow):
 
     def move_profile(self, profile, destination):
         try:
-            if isinstance(profile, DesktopProfile):
+            if isinstance(profile, VncProfile):
+                self.save_vnc(replace(profile, group=destination), editing=True)
+            elif isinstance(profile, DesktopProfile):
                 self.save_desktop(replace(profile, group=destination), editing=True)
             else:
                 self.update_catalog_settings(members={**self.settings["members"], profile.alias.lower(): destination})
@@ -443,13 +471,17 @@ class Window(Gtk.ApplicationWindow):
     def add_profile(self):
         if self.protocol == "rdp":
             self.edit_desktop(None)
+        elif self.protocol == "vnc":
+            self.edit_vnc(None)
         else:
             self.edit_profile(None)
 
     def edit_catalog_entry(self, profile):
         if profile is None:
             return
-        if isinstance(profile, DesktopProfile):
+        if isinstance(profile, VncProfile):
+            self.edit_vnc(profile)
+        elif isinstance(profile, DesktopProfile):
             self.edit_desktop(profile)
         else:
             self.edit_profile(profile)
@@ -457,7 +489,9 @@ class Window(Gtk.ApplicationWindow):
     def delete_entry(self, profile):
         if profile is None:
             return
-        if isinstance(profile, DesktopProfile):
+        if isinstance(profile, VncProfile):
+            self.delete_vnc(profile)
+        elif isinstance(profile, DesktopProfile):
             self.delete_desktop(profile)
         else:
             self.delete_profile(profile)
@@ -517,6 +551,65 @@ class Window(Gtk.ApplicationWindow):
             return
         try:
             self.update_catalog_settings(desktops=[item for item in self.settings["desktops"] if item["id"] != profile.id])
+        except OSError as error:
+            message(self, error, Gtk.MessageType.ERROR)
+        else:
+            try:
+                if self.vault.lookup(profile.secret) is not None:
+                    self.vault.save(profile.secret, None)
+            except (OSError, RuntimeError, subprocess.TimeoutExpired) as error:
+                message(self, error, Gtk.MessageType.ERROR)
+            self.catalog.render()
+
+    def edit_vnc(self, before):
+        try:
+            has_password = before is not None and self.vault.lookup(before.secret) is not None
+        except (OSError, RuntimeError, subprocess.TimeoutExpired):
+            has_password = False
+        aliases = [profile.alias for profile in self.document.profiles] if self.document else []
+        dialog = VncDialog(self, before, has_password, group=self.real_group, ssh_aliases=aliases)
+        while dialog.run() == Gtk.ResponseType.OK:
+            try:
+                profile, password, forget = dialog.values()
+                secret = profile.secret
+                previous = self.vault.lookup(secret) if (password or forget) else None
+                changed = False
+                if forget and previous is not None:
+                    self.vault.save(secret, None)
+                    changed = True
+                elif password:
+                    self.vault.save(secret, password)
+                    changed = True
+                try:
+                    self.save_vnc(profile, editing=before is not None)
+                except Exception:
+                    if changed:
+                        self.vault.save(secret, previous)
+                    raise
+            except (OSError, RuntimeError, ValueError, subprocess.TimeoutExpired) as error:
+                dialog.error.set_text(str(error))
+            else:
+                self.catalog.search.set_text("")
+                self.catalog.render(keep=profile)
+                break
+        dialog.destroy()
+
+    def save_vnc(self, profile, editing=False):
+        entries = list(self.settings["vnc"])
+        if editing:
+            index = next((i for i, entry in enumerate(entries) if entry["id"] == profile.id), None)
+            if index is None:
+                raise ValueError("VNC-подключение уже удалено.")
+            entries[index] = asdict(profile)
+        else:
+            entries.append(asdict(profile))
+        self.update_catalog_settings(vnc=entries)
+
+    def delete_vnc(self, profile):
+        if not confirm(self, f"Удалить VNC-подключение «{profile.name}»?"):
+            return
+        try:
+            self.update_catalog_settings(vnc=[item for item in self.settings["vnc"] if item["id"] != profile.id])
         except OSError as error:
             message(self, error, Gtk.MessageType.ERROR)
         else:
@@ -650,12 +743,13 @@ class Window(Gtk.ApplicationWindow):
         except ValueError as error:
             message(self, error, Gtk.MessageType.ERROR)
             return False
-        if protocol == "rdp":
-            profile = DesktopProfile(uuid.uuid4().hex, host, host, port, user).validate()
+        if protocol in ("rdp", "vnc"):
+            kind = DesktopProfile if protocol == "rdp" else VncProfile
+            profile = kind(uuid.uuid4().hex, host, host, port, user).validate()
             self.connect_profile(profile)
             if confirm(self, f"Сохранить подключение «{host}»?"):
                 try:
-                    self.save_desktop(replace(profile, group=self.real_group))
+                    (self.save_desktop if protocol == "rdp" else self.save_vnc)(replace(profile, group=self.real_group))
                 except (OSError, ValueError) as error:
                     message(self, error, Gtk.MessageType.ERROR)
                 self.catalog.render()
@@ -742,12 +836,16 @@ class Window(Gtk.ApplicationWindow):
         added = 0
         try:
             desktops = list(self.settings["desktops"])
+            vnc = list(self.settings["vnc"])
             document = self.document
             names = [item.alias for item in document.profiles] if document else []
             for item in chosen:
                 if item.protocol == "rdp":
                     desktops.append(asdict(DesktopProfile(uuid.uuid4().hex, item.name[:80] or item.host, item.host, item.port,
                                                           item.user, item.domain, self.real_group).validate()))
+                elif item.protocol == "vnc":
+                    vnc.append(asdict(VncProfile(uuid.uuid4().hex, item.name[:80] or item.host, item.host, item.port,
+                                                 item.user, self.real_group).validate()))
                 elif document is not None:
                     alias = quick_alias(item.name, names)
                     names.append(alias)
@@ -758,7 +856,7 @@ class Window(Gtk.ApplicationWindow):
                 added += 1
             if document is not self.document:
                 self.config.save(self.document, document)
-            self.update_catalog_settings(desktops=desktops)
+            self.update_catalog_settings(desktops=desktops, vnc=vnc)
         except (OSError, ValueError) as error:
             message(self, error, Gtk.MessageType.ERROR)
         self.reload()
@@ -766,6 +864,8 @@ class Window(Gtk.ApplicationWindow):
 
     @staticmethod
     def server_key(profile):
+        if isinstance(profile, VncProfile):
+            return "vnc", profile.id
         return ("rdp", profile.id) if isinstance(profile, DesktopProfile) else ("ssh", profile.alias.lower())
 
     def related(self, profile):
@@ -776,6 +876,10 @@ class Window(Gtk.ApplicationWindow):
         return sum(session.live for session in self.related(profile))
 
     def connect_profile(self, profile, new=False, embedded=None, forwarding=True, credential=None):
+        if isinstance(profile, VncProfile) and embedded is False:
+            self.record_recent(profile)
+            VncWindow(self, profile, credential if credential is not None else self.saved_vnc_password(profile))
+            return
         related = self.related(profile)
         if not new:
             existing = max((session for session in related if session.live), key=lambda item: item.last_used, default=None)
@@ -784,11 +888,13 @@ class Window(Gtk.ApplicationWindow):
                 self.sessions_page.activate(existing, focus=True)
                 return
         number = max((session.number for session in related), default=0) + 1
-        if not isinstance(profile, DesktopProfile) and profile.alias in self.transient:
+        if not isinstance(profile, (DesktopProfile, VncProfile)) and profile.alias in self.transient:
             pass
         else:
             self.record_recent(profile)
-        if isinstance(profile, DesktopProfile):
+        if isinstance(profile, VncProfile):
+            session = VncSession(self, profile, number, credential if credential is not None else self.saved_vnc_password(profile))
+        elif isinstance(profile, DesktopProfile):
             if credential is None:
                 try:
                     saved = self.vault.lookup(profile.secret) if profile.user else None
@@ -804,12 +910,20 @@ class Window(Gtk.ApplicationWindow):
         self.sessions.append(session)
         self.show_sessions()
         self.sessions_page.add(session)
-        if isinstance(session, RdpSession):
+        if isinstance(session, (RdpSession, VncSession)):
             session.start()
         self.sessions_changed()
 
+    def saved_vnc_password(self, profile):
+        try:
+            return self.vault.lookup(profile.secret)
+        except (OSError, RuntimeError, subprocess.TimeoutExpired):
+            return None
+
     def duplicate_session(self, session, forwarding=True):
-        if isinstance(session, RdpSession):
+        if isinstance(session, VncSession):
+            self.connect_profile(session.profile, True, credential=session.credential)
+        elif isinstance(session, RdpSession):
             self.connect_profile(session.profile, True, embedded=session.embedded, credential=session.credential)
         else:
             self.connect_profile(session.profile, True, forwarding=forwarding)
@@ -858,7 +972,7 @@ class Window(Gtk.ApplicationWindow):
             return
 
     def enter_full_screen(self, session):
-        if not isinstance(session, RdpSession) or not session.embedded:
+        if not isinstance(session, (RdpSession, VncSession)) or not session.embedded:
             return
         self.full_session = session
         self.sessions_page.activate(session)
@@ -889,7 +1003,8 @@ class Window(Gtk.ApplicationWindow):
         names = {group["id"]: group for group in self.settings["groups"]}
 
         def entries(protocol):
-            profiles = self.desktop_profiles() if protocol == "rdp" else (list(self.document.profiles) if self.document else [])
+            profiles = (self.desktop_profiles() if protocol == "rdp" else self.vnc_profiles() if protocol == "vnc" else
+                        list(self.document.profiles) if self.document else [])
             result = []
             for profile in ordered(profiles, "name"):
                 group = names.get(self.group_of(profile))

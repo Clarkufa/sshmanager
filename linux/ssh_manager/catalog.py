@@ -5,6 +5,7 @@ import math
 from gi.repository import Gdk, GLib, GObject, Gtk, Pango, PangoCairo
 
 from .rdp import DesktopProfile, ordered
+from .vnc import VncProfile
 from . import glyphs
 from .theme import TAB_COLORS, mark, rgba
 from .widgets import Item, action_button, build_menu, menu_at
@@ -94,7 +95,7 @@ class CatalogPage(Gtk.Box):
 
         protocols = Gtk.Box(spacing=4, margin_bottom=6)
         self.protocol_tabs = {}
-        for kind, caption, icon in (("ssh", "SSH", "terminal"), ("rdp", "RDP", "server")):
+        for kind, caption, icon in (("ssh", "SSH", "terminal"), ("rdp", "RDP", "server"), ("vnc", "VNC", "server")):
             tab = action_button(caption, lambda kind=kind: owner.select_protocol(kind), "tab", icon=icon, width=86)
             self.protocol_tabs[kind] = tab
             protocols.pack_start(tab, False, False, 0)
@@ -114,7 +115,7 @@ class CatalogPage(Gtk.Box):
         self.search.set_size_request(265, -1)
         self.search.connect("search-changed", lambda *_: self.render())
         tools.pack_start(self.search, False, False, 0)
-        self.quick = Gtk.Entry(placeholder_text="Быстрое подключение: user@host:port или rdp://host")
+        self.quick = Gtk.Entry(placeholder_text="Быстрое подключение: user@host, rdp:// или vnc://")
         self.quick.set_size_request(250, -1)
         self.quick.set_tooltip_text("Подключиться без сохранения профиля. Enter — подключиться.")
         self.quick.connect("activate", lambda entry: owner.quick_connect(entry.get_text()) and entry.set_text(""))
@@ -314,6 +315,8 @@ class CatalogPage(Gtk.Box):
             self.show_empty("По вашему запросу ничего не найдено.")
         elif owner.active_group == "*":
             self.show_empty("Добавьте серверы в избранное через меню строки.")
+        elif owner.protocol == "vnc":
+            self.show_empty("Добавьте VNC-подключение.")
         elif not ssh:
             self.show_empty("Добавьте RDP-подключение или импортируйте профиль .rdp.")
         elif owner.active_group:
@@ -356,7 +359,7 @@ class CatalogPage(Gtk.Box):
         return False
 
     def run_pill(self, column, profile):
-        if column is self.columns["files"] and not isinstance(profile, DesktopProfile):
+        if column is self.columns["files"] and not isinstance(profile, (DesktopProfile, VncProfile)):
             self.owner.open_files(profile)
             return True
         if column is self.columns["action"]:
@@ -387,8 +390,8 @@ class CatalogPage(Gtk.Box):
 
 
 def same_profile(first, second):
-    if isinstance(first, DesktopProfile) or isinstance(second, DesktopProfile):
-        return getattr(first, "id", None) == getattr(second, "id", None)
+    if isinstance(first, (DesktopProfile, VncProfile)) or isinstance(second, (DesktopProfile, VncProfile)):
+        return type(first) is type(second) and first.id == second.id
     return first.alias.lower() == second.alias.lower()
 
 

@@ -70,7 +70,9 @@ settings = {"groups": groups, "members": {"web-prod": "a" * 32, "db-1": "a" * 32
                           "domain": "", "group": "a" * 32, "width": 0, "height": 0, "clipboard": True, "fullscreen": False,
                           "drives": ["/home/me/Share"], "gateway": "gw.example.com"},
                          {"id": "d" * 32, "name": "terminal-srv", "host": "10.0.5.4", "port": 3390, "user": "ops",
-                          "domain": "CORP", "group": "", "width": 1280, "height": 800, "clipboard": False, "fullscreen": False}]}
+                          "domain": "CORP", "group": "", "width": 1280, "height": 800, "clipboard": False, "fullscreen": False}],
+            "vnc": [{"id": "e" * 32, "name": "Пульт лаборатории", "host": "192.168.1.50", "port": 5900,
+                     "group": "b" * 32, "via": "lab"}]}
 (home / "state").mkdir()
 (home / "state/settings.json").write_text(json.dumps(settings, ensure_ascii=False))
 
@@ -113,6 +115,8 @@ step(lambda: (window.select_group(""), window.sort_by("address"))[1])
 step(lambda: shot("03-catalog-sorted-address"))
 step(lambda: window.select_protocol("rdp"))
 step(lambda: shot("04-catalog-rdp"))
+step(lambda: window.select_protocol("vnc"))
+step(lambda: shot("19-catalog-vnc"))
 step(lambda: (window.select_protocol("ssh"), window.switch_theme())[1])
 step(lambda: shot("05-catalog-ssh-dark"))
 step(lambda: window.catalog.group_menu(window.catalog.group_strip.get_children()[1], None, window.settings["groups"][0]))
@@ -140,6 +144,7 @@ step(lambda: window.switch_theme())
 step(lambda: window.show_catalog())
 step(lambda: in_dialog("10-dialog-ssh", lambda: window.edit_profile(window.document.profiles[0])))
 step(lambda: in_dialog("11-dialog-rdp", lambda: window.edit_desktop(window.desktop_profiles()[0])))
+step(lambda: in_dialog("20-dialog-vnc", lambda: window.edit_vnc(window.vnc_profiles()[0])))
 step(lambda: in_dialog("12-dialog-picker", window.pick_server))
 step(lambda: in_dialog("13-dialog-new-tab", window.new_group))
 step(lambda: window.select_group("*"))

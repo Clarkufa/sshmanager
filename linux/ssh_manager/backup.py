@@ -16,6 +16,7 @@ from gi.repository import GLib, Gtk
 from .auth import account_for
 from .config import Document, parse_settings, read, write
 from .rdp import DesktopProfile
+from .vnc import VncProfile
 from .widgets import chooser, confirm, dialog_buttons, message, themed
 
 
@@ -27,6 +28,7 @@ CONFIG = "ssh/config"
 KEY_PREFIX = "ssh/keys/"
 PASS_PREFIX = "app/passwords/"
 RDP_PREFIX = "rdp-"  # RDP passwords: app/passwords/rdp-<profile id>, the same naming as the Windows and macOS archives
+VNC_PREFIX = "vnc-"  # VNC passwords: app/passwords/vnc-<profile id>
 MAX_TOTAL = 64 * 1024 * 1024
 MAX_ENTRY = 8 * 1024 * 1024
 
@@ -42,11 +44,14 @@ def entry_name(name):
 
 
 def accounts(document, settings=None):
-    """Secret Service accounts by backup name: SSH profiles from the config, RDP profiles from the settings."""
+    """Secret Service accounts by backup name: SSH profiles from the config, RDP and VNC profiles from the settings."""
     result = {account.key: account for profile in document.profiles if (account := account_for(profile))}
     for entry in (settings or {}).get("desktops", []):
         profile = DesktopProfile(**entry)
         result[RDP_PREFIX + profile.id] = profile.secret
+    for entry in (settings or {}).get("vnc", []):
+        profile = VncProfile(**entry)
+        result[VNC_PREFIX + profile.id] = profile.secret
     return result
 
 
@@ -212,7 +217,7 @@ def password_dialog(owner, creating):
         area.add(entry)
         fields.append(entry)
     if creating:
-        note = Gtk.Label(label="Защищённая копия включает сохранённые пароли SSH и RDP.", xalign=0, wrap=True)
+        note = Gtk.Label(label="Защищённая копия включает сохранённые пароли SSH, RDP и VNC.", xalign=0, wrap=True)
         note.get_style_context().add_class("sshm-muted")
         area.add(note)
     dialog.show_all()
@@ -245,7 +250,7 @@ def choose_export(owner):
 
     def done(count):
         text = "Резервная копия сохранена.\n\n" + path
-        text += f"\n\nСохранённых паролей SSH и RDP: {count}" if password else "\n\nZIP сохраняет подключения без паролей SSH и RDP."
+        text += f"\n\nСохранённых паролей SSH, RDP и VNC: {count}" if password else "\n\nZIP сохраняет подключения без паролей SSH, RDP и VNC."
         message(owner, text)
 
     background(owner, lambda: export(owner.config, owner.vault, path, password), done)
@@ -269,9 +274,12 @@ def choose_import(owner):
         contents, valid = result
         secrets = [name for name in contents if name.startswith(PASS_PREFIX)]
         desktop = sum(name.startswith(PASS_PREFIX + RDP_PREFIX) for name in secrets)
+        vnc = sum(name.startswith(PASS_PREFIX + VNC_PREFIX) for name in secrets)
         summary = f"Файлов: {len(contents) - len(secrets)}"
         if secrets:
-            summary += f"\nПаролей SSH: {len(secrets) - desktop}\nПаролей RDP: {desktop}"
+            summary += f"\nПаролей SSH: {len(secrets) - desktop - vnc}\nПаролей RDP: {desktop}"
+            if vnc:
+                summary += f"\nПаролей VNC: {vnc}"
         if not confirm(owner, "Импортировать резервную копию?", summary +
                        "\n\nПредыдущие версии заменяемых файлов будут сохранены."):
             return
