@@ -910,8 +910,8 @@ namespace SshManager
             {
                 Theme.MenuItem("Подключиться", Glyph.Server, (sender, args) => ConnectVnc(profile)),
                 Theme.MenuItem("Новый сеанс", Glyph.Plus, (sender, args) => ConnectVnc(profile, true)),
-                Theme.MenuItem("Открыть в отдельном окне", Glyph.Move, (sender, args) => VncWindow.Open(profile, openFiles: () => OpenVncFiles(profile))),
-                Theme.MenuItem("Файлы (SFTP)", Glyph.Folder, (sender, args) => OpenVncFiles(profile)),
+                Theme.MenuItem("Открыть в отдельном окне", Glyph.Move, (sender, args) => VncWindow.Open(profile, openFiles: password => OpenVncFiles(profile, password))),
+                Theme.MenuItem("Файлы", Glyph.Folder, (sender, args) => OpenVncFiles(profile)),
                 Theme.MenuItem("Изменить", Glyph.Edit, (sender, args) => EditVnc(profile)),
                 Theme.MenuItem(groups.IsFavorite(Groups.Key(profile)) ? "Убрать из избранного" : "В избранное", Glyph.Star,
                     (sender, args) => ToggleFavorite(Groups.Key(profile), profile.Id)),
@@ -1406,23 +1406,33 @@ namespace SshManager
             if (connection != null) OpenFiles(new SessionTarget(connection, groups.ForAlias(connection.Alias)));
         }
 
-        private void OpenVncFiles(VncProfile profile)
+        private void OpenVncFiles(VncProfile profile, string password = null)
         {
             var latest = groups.Vnc.FirstOrDefault(item => item.Id == profile.Id) ?? profile;
             var source = document?.Connections().FirstOrDefault(item =>
                 String.Equals(item.Alias, latest.FilesVia, StringComparison.OrdinalIgnoreCase));
-            if (source == null)
+            Func<IRemoteFiles> fallback = null;
+            if (source != null)
             {
-                Theme.ShowError(this, new ArgumentException("Выберите SSH-профиль для файлов в настройках VNC-подключения."));
-                return;
+                var ssh = new SessionTarget(source, groups.ForAlias(source.Alias));
+                fallback = () => ConnectFileClient(ssh);
             }
-            OpenFiles(source);
+
+            var target = new SessionTarget(latest, groups.Find(latest.GroupId));
+            try
+            {
+                ShowFileWindow(target.Key, target, () => new TightVncFiles(latest, password ?? VncPasswords.Read(latest)), fallback);
+            }
+            catch (IOException error) { Theme.ShowError(this, error); }
         }
 
         private void OpenFiles(SessionTarget target)
         {
-            if (target.Vnc != null) { OpenVncFiles(target.Vnc); return; }
-            string id = target.Alias + "\n" + target.Address;
+            ShowFileWindow(target.Alias + "\n" + target.Address, target, () => ConnectFileClient(target));
+        }
+
+        private void ShowFileWindow(string id, SessionTarget target, Func<IRemoteFiles> connect, Func<IRemoteFiles> fallback = null)
+        {
             if (fileWindows.TryGetValue(id, out var open))
             {
                 if (open.WindowState == FormWindowState.Minimized) open.WindowState = FormWindowState.Normal;
@@ -1430,19 +1440,21 @@ namespace SshManager
                 open.Activate();
                 return;
             }
-            string config = Path.Combine(sshDirectory, "config");
-            var window = new SftpWindow(target, () =>
-            {
-                var entry = new ConfigFile(config).Load().Connections().FirstOrDefault(item =>
-                    String.Equals(item.Alias, target.Alias, StringComparison.OrdinalIgnoreCase) &&
-                    new SessionTarget(item, null).Address == target.Address);
-                if (entry == null) throw new IOException("Профиль сервера изменился. Откройте «Файлы» из каталога подключений.");
-                var configOverride = String.Equals(sshDirectory, Terminal.SshDirectory, StringComparison.OrdinalIgnoreCase) ? null : config;
-                return new SftpClient(target.Alias, PasswordTarget.From(entry), configOverride);
-            });
+            var window = new SftpWindow(target, connect, fallback);
             fileWindows.Add(id, window);
             window.FormClosed += (sender, args) => fileWindows.Remove(id);
             window.Show(this);
+        }
+
+        private SftpClient ConnectFileClient(SessionTarget target)
+        {
+            string config = Path.Combine(sshDirectory, "config");
+            var entry = new ConfigFile(config).Load().Connections().FirstOrDefault(item =>
+                String.Equals(item.Alias, target.Alias, StringComparison.OrdinalIgnoreCase) &&
+                new SessionTarget(item, null).Address == target.Address);
+            if (entry == null) throw new IOException("Профиль сервера изменился. Откройте «Файлы» из каталога подключений.");
+            var configOverride = String.Equals(sshDirectory, Terminal.SshDirectory, StringComparison.OrdinalIgnoreCase) ? null : config;
+            return new SftpClient(target.Alias, PasswordTarget.From(entry), configOverride);
         }
 
         private SessionsPage SessionWorkspace()
@@ -1456,6 +1468,7 @@ namespace SshManager
             sessions.RemoveSnippet += RemoveSnippet;
             sessions.ThemeRequested += ToggleTheme;
             sessions.ShowFiles += OpenFiles;
+            sessions.ShowVncFiles += OpenVncFiles;
             sessions.LoadServers += picker =>
                 picker.UpdateServers(document == null ? new Connection[0] : document.Connections().ToArray(), groups);
             sessions.OpenServer += target =>

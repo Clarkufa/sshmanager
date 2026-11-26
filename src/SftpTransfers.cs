@@ -11,7 +11,7 @@ namespace SshManager
 
     internal sealed class SftpTransfers
     {
-        private readonly SftpClient client;
+        private readonly IRemoteFiles client;
         private readonly CancellationToken token;
         private readonly Func<string, bool, FileConflict> conflict;
         private readonly Action<string, long, long> progress;
@@ -19,7 +19,7 @@ namespace SshManager
         public int Completed { get; private set; }
         public int Skipped { get; private set; }
 
-        public SftpTransfers(SftpClient client, CancellationToken token, Func<string, bool, FileConflict> conflict,
+        public SftpTransfers(IRemoteFiles client, CancellationToken token, Func<string, bool, FileConflict> conflict,
             Action<string, long, long> progress)
         {
             this.client = client;
@@ -51,7 +51,7 @@ namespace SshManager
             bool replace = false;
             if (existing != null && !(folder && existing.Directory && !existing.Link))
             {
-                var choice = Ask(destination, !folder && !existing.Directory && !existing.Link && !existing.Special);
+                var choice = Ask(destination, client.CanReplace && !folder && !existing.Directory && !existing.Link && !existing.Special);
                 if (choice == FileConflict.Skip) return;
                 if (choice == FileConflict.KeepBoth)
                 {

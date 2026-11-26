@@ -14,7 +14,7 @@ namespace SshManager
         private readonly Button fullScreen, reconnect, disconnect;
         private readonly ToolTip hints = new ToolTip();
 
-        private VncWindow(VncProfile profile, string password, Action openFiles)
+        private VncWindow(VncProfile profile, string password, Action<string> openFiles)
         {
             this.profile = profile;
             this.password = password;
@@ -42,14 +42,14 @@ namespace SshManager
             if (openFiles != null)
             {
                 var files = Theme.Button("Файлы", 86, glyph: Glyph.Folder);
-                files.Click += (sender, args) => openFiles();
+                files.Click += (sender, args) => desktop.ShowFiles();
                 buttons.Controls.Add(files);
             }
             buttons.Controls.AddRange(new Control[] { fullScreen, reconnect, disconnect });
             toolbar.Controls.Add(status, 0, 0);
             toolbar.Controls.Add(buttons, 1, 0);
 
-            desktop = new VncDesktop { PasswordPrompt = (target, wrong) => VncLogonDialog.Ask(this, target, wrong) };
+            desktop = new VncDesktop { OpenFiles = openFiles, PasswordPrompt = (target, wrong) => VncLogonDialog.Ask(this, target, wrong) };
             desktop.Changed += RefreshState;
             desktop.CloseRequested += () => BeginInvoke(new Action(Close));
             Controls.Add(desktop);
@@ -63,7 +63,7 @@ namespace SshManager
             ResumeLayout();
         }
 
-        public static void Open(VncProfile profile, string password = null, Action openFiles = null)
+        public static void Open(VncProfile profile, string password = null, Action<string> openFiles = null)
         {
             var window = new VncWindow(profile, password ?? VncPasswords.Read(profile), openFiles);
             window.Show();

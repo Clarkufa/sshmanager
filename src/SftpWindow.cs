@@ -13,20 +13,21 @@ namespace SshManager
     internal sealed class SftpWindow : ThemedForm
     {
         private readonly SessionTarget target;
-        private readonly Func<SftpClient> connect;
+        private readonly Func<IRemoteFiles> connect, fallback;
         private readonly FilePane local, remote;
         private readonly Button upload, download, cancel, reconnect;
         private readonly Label status, progressText;
         private readonly ProgressBar progressBar;
         private readonly ContextMenuStrip remoteMenu;
         private readonly System.Windows.Forms.Timer connectionWatch;
-        private SftpClient client;
+        private IRemoteFiles client;
         private CancellationTokenSource operation;
 
-        public SftpWindow(SessionTarget target, Func<SftpClient> connect)
+        public SftpWindow(SessionTarget target, Func<IRemoteFiles> connect, Func<IRemoteFiles> fallback = null)
         {
             this.target = target;
             this.connect = connect;
+            this.fallback = fallback;
             Text = "Файлы — " + target.Alias + " · " + target.Address;
             Icon = Icon.ExtractAssociatedIcon(Application.ExecutablePath);
             Font = Theme.Body;
@@ -190,12 +191,25 @@ namespace SshManager
             var connection = client;
             await Run("Подключение к " + target.Alias + "…", token =>
             {
-                connection.Initialize();
-                return ReadRemote(connection, ".", token);
+                try
+                {
+                    connection.Initialize();
+                    return ReadRemote(connection, ".", token);
+                }
+                catch (Exception error) when (fallback != null && (error is IOException))
+                {
+                    token.ThrowIfCancellationRequested();
+                    connection.Dispose();
+                    connection = fallback();
+                    client = connection;
+                    if (token.IsCancellationRequested) { connection.Dispose(); token.ThrowIfCancellationRequested(); }
+                    connection.Initialize();
+                    return ReadRemote(connection, ".", token);
+                }
             }, current =>
             {
                 remote.Load(current.Path, current.Items);
-                status.Text = "Подключено к " + target.Alias;
+                status.Text = "Подключено к " + target.Alias + " · " + connection.Protocol;
             });
             if (!IsDisposed && remote.DirectoryPath.Length == 0)
             {
@@ -229,7 +243,7 @@ namespace SshManager
             await Run("Чтение папки…", token => ReadRemote(connection, path, token), current =>
             {
                 remote.Load(current.Path, current.Items);
-                status.Text = "Подключено к " + target.Alias;
+                status.Text = "Подключено к " + target.Alias + " · " + connection.Protocol;
             });
         }
 
@@ -283,7 +297,7 @@ namespace SshManager
                 return dialog.ShowDialog(this) == DialogResult.OK ? name : null;
         }
 
-        private async Task ChangeRemote(Action<SftpClient, string, CancellationToken> action)
+        private async Task ChangeRemote(Action<IRemoteFiles, string, CancellationToken> action)
         {
             var connection = client;
             string path = remote.DirectoryPath;
@@ -461,7 +475,7 @@ namespace SshManager
             }).ToArray();
         }
 
-        private static DirectoryContents ReadRemote(SftpClient connection, string path, CancellationToken token)
+        private static DirectoryContents ReadRemote(IRemoteFiles connection, string path, CancellationToken token)
         {
             var canonical = connection.CanonicalPath(path);
             return new DirectoryContents(canonical, connection.List(canonical, token));

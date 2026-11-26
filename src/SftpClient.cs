@@ -7,7 +7,7 @@ using System.Threading;
 
 namespace SshManager
 {
-    internal sealed class SftpClient : IDisposable
+    internal sealed class SftpClient : IRemoteFiles
     {
         private const byte Init = 1, Version = 2, Open = 3, Close = 4, Read = 5, Write = 6, LStat = 7, FStat = 8,
             OpenDir = 11, ReadDir = 12, Remove = 13, MkDir = 14, RmDir = 15, RealPath = 16, Rename = 18,
@@ -56,6 +56,9 @@ namespace SshManager
             }
             catch { Dispose(); throw; }
         }
+
+        public bool CanReplace => true;
+        public string Protocol => "SFTP";
 
         public bool Connected
         {
@@ -505,6 +508,7 @@ namespace SshManager
 
     internal sealed class SftpProtocolException : IOException
     {
-        public SftpProtocolException() : base("Сервер вернул некорректный ответ SFTP. Переподключитесь.") { }
+        public SftpProtocolException() : this("Сервер вернул некорректный ответ SFTP. Переподключитесь.") { }
+        public SftpProtocolException(string message) : base(message) { }
     }
 }

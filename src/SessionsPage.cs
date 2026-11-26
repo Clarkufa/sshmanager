@@ -210,6 +210,7 @@ namespace SshManager
         public event Action<ServerPickerPanel> LoadServers;
         public event Action ThemeRequested;
         public event Action<SessionTarget> ShowFiles;
+        public event Action<VncProfile, string> ShowVncFiles;
         public event Action AddSnippet;
         public event Action<Snippet> RemoveSnippet;
         public Func<IList<Snippet>> Snippets;
@@ -315,7 +316,7 @@ namespace SshManager
             sessionMenu = Theme.Menu();
             sessionMenu.Items.Add(Theme.MenuItem("Переименовать сеанс", Glyph.Edit, (sender, args) => RenameActive()));
             sessionMenu.Items.Add(Theme.MenuItem("Новый сеанс этого сервера", Glyph.Plus, (sender, args) => DuplicateActive()));
-            var sessionFiles = Theme.MenuItem("Файлы (SFTP)", Glyph.Folder, (sender, args) => OpenFiles());
+            var sessionFiles = Theme.MenuItem("Файлы", Glyph.Folder, (sender, args) => OpenFiles());
             var fullScreen = Theme.MenuItem("Полноэкранный режим RDP", Glyph.Server, (sender, args) => OpenFullScreen());
             var detach = Theme.MenuItem("Открыть в отдельном окне", Glyph.Move, (sender, args) => DetachActive());
             var reconnect = Theme.MenuItem("Переподключить", Glyph.Refresh, (sender, args) => active?.Desktop?.Reconnect());
@@ -586,7 +587,7 @@ namespace SshManager
             var previous = active;
             var view = new VncDesktop { Visible = false };
             view.PasswordPrompt = (profile, wrong) => VncLogonDialog.Ask(FindForm(), profile, wrong);
-            view.OpenFiles = () => ShowFiles?.Invoke(target);
+            view.OpenFiles = password => ShowVncFiles?.Invoke(target.Vnc, password);
             Theme.ScaleToDpi(view);
             var opened = new TerminalSession(target, view, number);
             sessions.Add(opened);
@@ -827,7 +828,8 @@ namespace SshManager
 
         private void OpenFiles()
         {
-            if (active != null && (active.Desktop == null || active.Target.Vnc != null)) ShowFiles?.Invoke(active.Target);
+            if (active?.Desktop is VncDesktop vnc) vnc.ShowFiles();
+            else if (active != null && active.Desktop == null) ShowFiles?.Invoke(active.Target);
         }
 
         private void DrawSession(object sender, DrawItemEventArgs args)

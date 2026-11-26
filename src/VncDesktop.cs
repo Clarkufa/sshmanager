@@ -14,7 +14,8 @@ namespace SshManager
     /// </summary>
     internal sealed class VncDesktop : RemoteDesktopPanel
     {
-        public Action OpenFiles { get; set; }
+        public Action<string> OpenFiles { get; set; }
+        public void ShowFiles() => OpenFiles?.Invoke(password);
 
         private const int ResizeDelay = 450;
         private const int WmClipboardUpdate = 0x031d;
