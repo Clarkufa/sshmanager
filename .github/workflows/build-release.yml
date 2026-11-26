@@ -75,3 +75,23 @@ jobs:
           name: macos-release
           path: build/macos/SSH-Manager-macOS.dmg
           if-no-files-found: error
+      # Smoke check: the built app starts and shows its window (test hosts from TEST-NET-1 only).
+      - name: Screenshot of the running app
+        shell: bash
+        continue-on-error: true
+        run: |
+          mkdir -p build/macos-screens "$HOME/Applications" "$HOME/.ssh"
+          hdiutil attach -readonly -nobrowse -mountpoint /tmp/sshm-image build/macos/SSH-Manager-macOS.dmg
+          ditto "/tmp/sshm-image/SSH Manager.app" "$HOME/Applications/SSH Manager.app"
+          hdiutil detach /tmp/sshm-image
+          printf 'Host web-prod\n  HostName 192.0.2.10\n  User deploy\nHost bastion\n  HostName 192.0.2.11\n' >> "$HOME/.ssh/config"
+          open "$HOME/Applications/SSH Manager.app"
+          sleep 10
+          screencapture -x build/macos-screens/01-window.png
+          pgrep -x SshManager >/dev/null && echo "SSH Manager is running" || { echo "SSH Manager is not running"; exit 1; }
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: macos-screens
+          path: build/macos-screens
+          if-no-files-found: ignore
