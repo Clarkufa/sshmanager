@@ -40,6 +40,16 @@ struct SSHManagerApp: App {
                     .keyboardShortcut("p", modifiers: [.command, .shift])
                 Button("Обновить") { manager.reloadAll() }
                     .keyboardShortcut("r", modifiers: .command)
+                Button("Найти сервер") {
+                    manager.showServers()
+                    DispatchQueue.main.async { NotificationCenter.default.post(name: .focusCatalogSearch, object: nil) }
+                }.keyboardShortcut("f", modifiers: .command)
+                Button("Изменить сервер") { NotificationCenter.default.post(name: .editCatalogRow, object: nil) }
+                    .keyboardShortcut("e", modifiers: .command)
+                    .disabled(manager.showingSessions)
+                Button("Удалить сервер") { NotificationCenter.default.post(name: .deleteCatalogRow, object: nil) }
+                    .keyboardShortcut(.delete, modifiers: .command)
+                    .disabled(manager.showingSessions)
                 Button("Открыть OpenSSH config") { manager.openConfig() }
                 Button("Быстрое подключение") {
                     manager.showServers()
@@ -68,6 +78,9 @@ struct SSHManagerApp: App {
 extension Notification.Name {
     static let focusSessionSearch = Notification.Name("SSHManagerFocusSessionSearch")
     static let focusQuickConnect = Notification.Name("SSHManagerFocusQuickConnect")
+    static let focusCatalogSearch = Notification.Name("SSHManagerFocusCatalogSearch")
+    static let editCatalogRow = Notification.Name("SSHManagerEditCatalogRow")
+    static let deleteCatalogRow = Notification.Name("SSHManagerDeleteCatalogRow")
 }
 
 // MARK: - Root
@@ -315,6 +328,14 @@ private struct CatalogPage: View {
         }
         .padding(.horizontal, 24)
         .padding(.top, 15)
+        // ⌘F, ⌘E and ⌘⌫ / Delete, like Ctrl+F, F2 and Delete in the Windows app.
+        .onReceive(NotificationCenter.default.publisher(for: .focusCatalogSearch)) { _ in searchFocused = true }
+        .onReceive(NotificationCenter.default.publisher(for: .editCatalogRow)) { _ in
+            editSelected(CatalogModel(manager: manager, query: manager.catalogQuery))
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .deleteCatalogRow)) { _ in
+            deleteSelected(CatalogModel(manager: manager, query: manager.catalogQuery))
+        }
     }
 
     private func tools(rdp: Bool, model: CatalogModel) -> some View {
@@ -330,10 +351,11 @@ private struct CatalogPage: View {
                 .menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize()
                 .padding(.horizontal, 10)
             Button { manager.reloadAll() } label: { GlyphLabel(title: "Обновить", glyph: .refresh) }.winButton(.quiet)
+                .help("Перечитать SSH config и настройки (⌘R)")
             Button { editSelected(model) } label: { GlyphLabel(title: "Изменить", glyph: .edit) }
-                .winButton(.quiet).disabled(selection == nil)
+                .winButton(.quiet).disabled(selection == nil).help("Изменить выбранное подключение (⌘E)")
             Button { deleteSelected(model) } label: { GlyphLabel(title: "Удалить", glyph: .delete, danger: true) }
-                .winButton(.quiet, danger: true).disabled(selection == nil)
+                .winButton(.quiet, danger: true).disabled(selection == nil).help("Удалить выбранное подключение (⌘⌫)")
         }
         .padding(.bottom, 8)
     }
@@ -445,6 +467,7 @@ private struct ServerTable: View {
     let model: CatalogModel
     @Binding var selection: String?
     let query: String
+    @FocusState private var focused: Bool
     @Environment(\.colorScheme) private var scheme
 
     private struct Row: Identifiable {
@@ -491,6 +514,11 @@ private struct ServerTable: View {
             .background(palette.surface)
             .overlay(Rectangle().strokeBorder(palette.line, lineWidth: 1).allowsHitTesting(false))
         }
+        // Delete removes the selected server only while the table has focus, never from a text field.
+        .focusable()
+        .focusEffectDisabled()
+        .focused($focused)
+        .onDeleteCommand { if selection != nil { NotificationCenter.default.post(name: .deleteCatalogRow, object: nil) } }
     }
 
     private var emptyText: String {
@@ -578,7 +606,7 @@ private struct ServerTable: View {
         .overlay(alignment: .bottom) { Rectangle().fill(palette.line).frame(height: 1) }
         .contentShape(Rectangle())
         .onTapGesture(count: 2) { edit(row) }
-        .onTapGesture { selection = row.id }
+        .onTapGesture { selection = row.id; focused = true }
         .contextMenu {
             if let profile = row.ssh { sshMenu(profile) }
             if let desktop = row.rdp { rdpMenu(desktop) }
