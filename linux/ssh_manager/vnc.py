@@ -92,12 +92,14 @@ class SshTunnel:
 
     The saved SSH password goes through AskPass as for SFTP; otherwise ssh asks in its own dialog."""
 
-    def __init__(self, profile, config, vault, host, port, timeout=20):
+    def __init__(self, profile, config, vault, host, port, timeout=20, cancelled=None):
         account = account_for(profile)
         try:
             password = vault.lookup(account)
         except (OSError, RuntimeError, subprocess.TimeoutExpired):
             password = None
+        if cancelled is not None and cancelled.is_set():
+            raise TunnelError("Подключение отменено.")
         self.port = free_port()
         self.messages = bytearray()
         self.broker = AskPass(account if password else None, password)
@@ -114,7 +116,7 @@ class SshTunnel:
         self.broker.attach(self.process.pid)
         threading.Thread(target=self._drain, daemon=True).start()
         try:
-            self._wait(timeout)
+            self._wait(timeout, cancelled)
         except BaseException:
             self.close()
             raise
@@ -130,9 +132,11 @@ class SshTunnel:
         except (OSError, ValueError):
             pass
 
-    def _wait(self, timeout):
+    def _wait(self, timeout, cancelled):
         end = time.monotonic() + timeout
         while time.monotonic() < end:
+            if cancelled is not None and cancelled.is_set():
+                raise TunnelError("Подключение отменено.")
             if self.process.poll() is not None:
                 time.sleep(.2)
                 lines = [line.strip() for line in self.messages.decode(errors="replace").splitlines() if line.strip()]

@@ -581,6 +581,8 @@ class VncSession(Session):
         self.window = window
         self.display = None
         self.tunnel = None
+        self.tunnel_cancel = None
+        self.tunnel_lock = threading.Lock()
         self.generation = 0
         self.initialized = False
         self.failure = ""
@@ -656,21 +658,28 @@ class VncSession(Session):
         config, vault = self.owner.config, self.owner.vault
         host, port = self.profile.host, self.profile.port
 
+        cancelled = self.tunnel_cancel = threading.Event()
+
         def tunnel():
             try:
-                opened = SshTunnel(jump, config, vault, host, port)
+                opened = SshTunnel(jump, config, vault, host, port, cancelled=cancelled)
             except (TunnelError, OSError, RuntimeError) as error:
-                GLib.idle_add(self.tunnel_failed, generation, str(error))
-            else:
-                GLib.idle_add(self.tunnel_ready, generation, opened)
-        threading.Thread(target=tunnel, daemon=True).start()
+                if not cancelled.is_set():
+                    GLib.idle_add(self.tunnel_failed, generation, str(error))
+                return
+            with self.tunnel_lock:
+                if not cancelled.is_set():
+                    self.tunnel = opened
+                    GLib.idle_add(self.tunnel_ready, generation)
+                    return
+            opened.close()
 
-    def tunnel_ready(self, generation, tunnel):
-        if self.closed or generation != self.generation:
-            tunnel.close()
-            return False
-        self.tunnel = tunnel
-        self.open(generation, "127.0.0.1", tunnel.port)
+        # Let tunnel cleanup finish even when GTK quits while OpenSSH is starting.
+        threading.Thread(target=tunnel, daemon=False).start()
+
+    def tunnel_ready(self, generation):
+        if self.current(generation) and self.tunnel is not None:
+            self.open(generation, "127.0.0.1", self.tunnel.port)
         return False
 
     def tunnel_failed(self, generation, detail):
@@ -844,9 +853,13 @@ class VncSession(Session):
         for child in self.holder.get_children():
             self.holder.remove(child)
             child.destroy()
-        tunnel, self.tunnel = self.tunnel, None
+        with self.tunnel_lock:
+            if self.tunnel_cancel is not None:
+                self.tunnel_cancel.set()
+                self.tunnel_cancel = None
+            tunnel, self.tunnel = self.tunnel, None
         if tunnel is not None:
-            threading.Thread(target=tunnel.close, daemon=True).start()
+            threading.Thread(target=tunnel.close, daemon=False).start()
 
     def enter_full_screen(self):
         if self.window is not None:
@@ -887,7 +900,7 @@ class VncWindow(Gtk.Window):
     """«Открыть в отдельном окне» for VNC: the session in a window of its own (src/VncWindow.cs)."""
 
     def __init__(self, owner, profile, credential=None):
-        super().__init__(title=profile.name + " — VNC")
+        super().__init__(title=profile.name + " — VNC", application=owner.get_application())
         self.set_default_size(1024, 700)
         if owner.get_icon_name():
             self.set_icon_name(owner.get_icon_name())

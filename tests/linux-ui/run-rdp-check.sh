@@ -17,6 +17,9 @@ docker run --rm --network sshm-net -v "$PWD:/work" sshm-linux-dev sh -c \
     'timeout 180 xvfb-run -a -s "-screen 0 1280x800x24" dbus-run-session python3 -B tests/linux-ui/rdp_embedded.py sshm-xrdp' \
     > build/rdp-check.log 2>&1 || status=$?
 grep -v -E "AT-SPI|dbus-daemon|^$" build/rdp-check.log || true
+if [ "$status" -ne 0 ]; then
+    docker exec sshm-xrdp sh -c 'tail -n 40 /var/log/xrdp.log /var/log/xrdp-sesman.log' || true
+fi
 docker rm -f sshm-xrdp >/dev/null
 [ "$status" -eq 0 ] && echo "PASS embedded RDP" || echo "FAIL embedded RDP (exit $status)"
 exit $status

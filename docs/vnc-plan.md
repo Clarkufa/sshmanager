@@ -168,6 +168,8 @@ Back 0xff08, Tab 0xff09, Enter 0xff0d, Escape 0xff1b, Insert 0xff63, Delete 0xff
 - Тесты: `linux/tests/test_vnc.py` (модель, parse_quick, импорт); снимки `tests/linux-ui/screens.py` (каталог VNC, окно профиля); живая проверка `tests/linux-ui/vnc_embedded.py` + `run-vnc-check.sh` по образцу `rdp_embedded.py`/`run-rdp-check.sh` (подключение к контейнеру `sshm-vnc` по сети Docker, `VncTest1`): подключён, размер кадра совпадает с размером виджета при масштабе «По размеру окна», заглушка после `docker restart sshm-vnc`, «Переподключить». Код завершения ≠ 0 при любом провале.
 
 ## Фаза 5. macOS: TigerVNC или «Общий экран»
+
+Модель, каталог, сеансы, резервные копии и SSH-туннель реализованы. Универсальный DMG собрался в GitHub Actions. Подключение на реальном Mac ещё предстоит проверить.
 - `macos/Sources/Vnc.swift`: `struct VncProfile: Identifiable, Equatable` (поля Фазы 1), `validate()` по образцу `DesktopProfile` в `Rdp.swift`, `keychainAccount = "vnc\n" + id`, разбор/запись элемента `vnc` в `Settings.swift` (рядом с `rdp`, массив `settings.vnc`).
 - Клиент: `static func tigerVNC() -> URL?` — искать `/Applications/TigerVNC Viewer*.app/Contents/MacOS/TigerVNC Viewer`, `/opt/homebrew/bin/vncviewer`, `/usr/local/bin/vncviewer`.
   - С TigerVNC: пароль записать во временный файл в формате VNC passwd (8 байт, зашифрованные DES ECB фиксированным ключом `[23, 82, 107, 6, 35, 78, 88, 7]`; через CommonCrypto `CCCrypt(kCCEncrypt, kCCAlgorithmDES, kCCOptionECBMode, …)`), права 0600, запуск `vncviewer -passwd <файл> [-FullScreen] [-ViewOnly] [-Shared] host::port` через `Process`; файл удалить через 10 с после запуска. Сеанс отслеживает процесс (статус «подключён» после 3 с жизни процесса, «отключён» при выходе, код выхода ≠ 0 → «Подключение прервано»).

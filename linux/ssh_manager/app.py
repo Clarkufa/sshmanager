@@ -1057,6 +1057,16 @@ class Application(Gtk.Application):
                          flags=Gio.ApplicationFlags.NON_UNIQUE if isolated else Gio.ApplicationFlags.FLAGS_NONE)
         self.config = config
 
+    def do_shutdown(self):
+        for window in self.get_windows():
+            if isinstance(window, VncWindow):
+                window.session.stop()
+            elif isinstance(window, Window):
+                for session in window.sessions:
+                    if isinstance(session, VncSession):
+                        session.stop()
+        Gtk.Application.do_shutdown(self)
+
     def do_activate(self):
         window = next((window for window in self.get_windows() if isinstance(window, Window)), None)
         if not window:

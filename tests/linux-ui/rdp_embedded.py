@@ -141,7 +141,13 @@ def steps():
     window.connect_profile(desktop)
     session = next(item for item in window.sessions if isinstance(item, RdpSession))
     check("RDP opens embedded under X11", session.embedded)
-    check("connected to xrdp", wait(lambda: session.status == "подключён", 60))
+    wait(lambda: session.status == "подключён" or not session.live, 60)
+    if session.status == "отключён (код 145)":
+        # Give a cancelled initial connection one retry on the temporary xrdp server.
+        print(f"FreeRDP cancelled the first connection: {session.ended_detail.get_text()!r}", flush=True)
+        session.restart()
+        wait(lambda: session.status == "подключён" or not session.live, 60)
+    check("connected to xrdp", session.status == "подключён")
     check("remote desktop matches the window", follows(session))
     report("window", session)
     shot("20-rdp-embedded")

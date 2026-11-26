@@ -93,6 +93,7 @@ def pump(seconds):
 
 
 failures = []
+shutdown_process = None
 
 
 def check(label, condition):
@@ -141,6 +142,7 @@ def scenario():
 
 
 def steps():
+    global shutdown_process
     window.select_protocol("vnc")
     shot("30-vnc-catalog")
     window.connect_profile(profiles["vnc"])
@@ -196,9 +198,16 @@ def steps():
     check("closing the session stops the tunnel", process is not None and wait(lambda: process.poll() is not None, 10))
     check("no password prompt for the saved one", prompts == [True])
 
+    window.connect_profile(profiles["vnc-ssh"], embedded=False)
+    separate = next(item for item in application.get_windows() if isinstance(item, VncWindow))
+    check("the separate window connects through SSH", wait(lambda: separate.session.status == "подключён", 40))
+    if separate.session.tunnel:
+        shutdown_process = separate.session.tunnel.process
+
 
 GLib.timeout_add(800, scenario)
 application.run([])
-(SHARED / "done").write_text("1")
+check("application shutdown stops the separate window's tunnel",
+      shutdown_process is not None and wait(lambda: shutdown_process.poll() is not None, 10))
 print("failures:", len(failures), flush=True)
 sys.exit(1 if failures else 0)
