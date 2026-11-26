@@ -21,16 +21,16 @@ from gi.repository import Gdk, GdkPixbuf, Gio, GLib, Gtk, Pango, Vte  # noqa: F4
 
 from . import VERSION
 from .auth import Vault, account_for, ssh_args
-from .catalog import ALL_NAME, UNGROUPED_NAME, CatalogPage, next_order
 from .config import Config, Profile, parse_settings
 from .dialogs import IMPORT_RESPONSE, DesktopDialog, ImportDialog, ProfileDialog, ServerPicker, SettingsDialog, VncDialog
 from .extras import copy_key_command, parse_quick, putty_sessions, quick_alias
 from .files import FilesPanel
 from .launch import ssh_command_text, terminal_command
 from .rdp import DesktopProfile, ordered
-from .sessions import (RdpSession, SessionsPage, SshSession, VncSession, VncWindow, ask_credential, embedding_supported,
+from .sessions import (ALL_NAME, UNGROUPED_NAME, RdpSession, SessionsPage, SshSession, VncSession, VncWindow,
+                       ask_credential, embedding_supported,
                        prepare_terminal_paste, terminal_font)  # noqa: F401 - re-exported for tests
-from .theme import Theme, mark
+from .theme import TAB_COLORS, Theme, mark
 from .vnc import VncProfile
 from .tray import Tray
 from .update_ui import UpdateController
@@ -65,7 +65,6 @@ class Window(Gtk.ApplicationWindow):
             self.settings = parse_settings(b"")
         self.theme = Theme()
         self.theme.apply(self.settings["dark"])
-        self.active_group = self.settings["default"] if self.group_record(self.settings["default"]) else ""
         self.protocol = "ssh"
         self.set_default_size(1280, 720)
         self.set_size_request(800, 480)
@@ -96,8 +95,7 @@ class Window(Gtk.ApplicationWindow):
         mark(self.header_row.get_child(), "sshm-page")
         self.header_row.connect("size-allocate", lambda widget, allocation: self.fit_header(allocation.width))
         outer.pack_start(self.header_row, False, False, 0)
-        self.catalog = CatalogPage(self)
-        self.sessions_page = SessionsPage(self, self.catalog)
+        self.sessions_page = SessionsPage(self, self.start_page())
         # The columns fold on a narrow window: the body never asks for more width than the window has.
         self.body = Gtk.ScrolledWindow(hscrollbar_policy=Gtk.PolicyType.EXTERNAL, vscrollbar_policy=Gtk.PolicyType.NEVER,
                                        margin_start=12, margin_end=12)
@@ -123,7 +121,6 @@ class Window(Gtk.ApplicationWindow):
         icon = app_icon()
         self.tray = Tray(self, str(icon) if icon else None)
         self.apply_theme()
-        self.catalog.set_protocol(self.protocol)
         self.reload(show_error=False)
         if self.settings["preferences"]["check_updates"]:
             self.updates.check()
@@ -175,23 +172,60 @@ class Window(Gtk.ApplicationWindow):
         for widget in self.theme_buttons:
             widget.glyph.set_name_glyph("sun" if dark else "moon")
             set_button_text(widget, "Светлая тема" if dark else "Тёмная тема")
-        if hasattr(self, "catalog"):
-            self.catalog.view.queue_draw()
+        if hasattr(self, "sessions_page"):
             self.sessions_page.refresh()
+            self.sessions_page.server_panel.render()
 
     def switch_theme(self):
         self.settings["dark"] = not self.settings["dark"]
         self.apply_theme()
         self.save_settings()
 
-    def update_status(self, shown, total, searching=False):
-        self.status.set_text(f"Найдено: {shown} из {total}" if searching else f"Подключений: {total}")
-        if self.protocol == "ssh":
-            path = str(self.config.path)
-            home = str(Path.home())
-            self.source.set_text("~" + path[len(home):] if path.startswith(home) else path)
+    def update_status(self):
+        """Footer: the file of the chosen protocol and its servers; the start page text (docs/ui-spec.md §2.3, §2.4)."""
+        self.status.set_text(f"Подключений: {len(self.server_entries(self.protocol))}")
+        home = str(Path.home())
+        path = str(self.config.path if self.protocol == "ssh" else self.config.settings_path)
+        self.source.set_text("~" + path[len(home):] if path.startswith(home + "/") else path)
+        self.add_button.set_sensitive(self.protocol != "ssh" or self.document is not None)
+        if not hasattr(self, "start_title"):
+            return
+        empty = self.document is not None and not self.document.profiles and not self.settings["desktops"] and not self.settings["vnc"]
+        if self.document is None:
+            title, detail = "Не удалось прочитать SSH config", f"Проверьте файл {self.config.path} и нажмите «Обновить»."
+        elif empty:
+            title = "Добавьте первый сервер"
+            detail = ("SSH-серверы сохраняются в ~/.ssh/config, RDP и VNC — в настройках приложения. "
+                      "Можно перенести подключения из PuTTY, mRemoteNG или MobaXterm.")
         else:
-            self.source.set_text(str(self.config.settings_path))
+            title = "Выберите сервер слева"
+            detail = ("Двойной щелчок или Enter открывает сеанс. Правая кнопка — изменить, открыть файлы, "
+                      "перенести во вкладку. Быстрое подключение — Ctrl+K.")
+        self.start_title.set_text(title)
+        self.start_detail.set_text(detail)
+        self.start_retry.set_visible(self.document is None)
+
+    def start_page(self):
+        """The workspace without a session or files (docs/ui-spec.md §2.3)."""
+        page = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8, valign=Gtk.Align.CENTER, halign=Gtk.Align.CENTER)
+        self.start_title = Gtk.Label(justify=Gtk.Justification.CENTER)
+        mark(self.start_title, "sshm-title")
+        self.start_detail = Gtk.Label(wrap=True, max_width_chars=64, justify=Gtk.Justification.CENTER)
+        mark(self.start_detail, "sshm-muted")
+        buttons = Gtk.Box(spacing=8, halign=Gtk.Align.CENTER, margin_top=10)
+        buttons.pack_start(action_button("Добавить сервер", self.add_profile, "primary", icon="plus", width=170), False, False, 0)
+        buttons.pack_start(action_button("Импорт из других программ…", self.import_other, icon="folder"), False, False, 0)
+        self.start_retry = action_button("Обновить", self.reload, icon="refresh", width=120)
+        self.start_retry.set_no_show_all(True)
+        buttons.pack_start(self.start_retry, False, False, 0)
+        for widget in (self.start_title, self.start_detail, buttons):
+            page.pack_start(widget, False, False, 0)
+        return page
+
+    def refresh_servers(self, select=None):
+        """Refills the «Серверы» column (selecting a saved server) and the footer."""
+        self.sessions_page.server_panel.render(select=select)
+        self.update_status()
 
     # --- navigation -------------------------------------------------------------------------
     def show_sessions(self):
@@ -199,39 +233,45 @@ class Window(Gtk.ApplicationWindow):
         if self.sessions_page.active:
             GLib.idle_add(self.sessions_page.active.focus)
 
-    def show_catalog(self):
+    def show_start(self):
         if self.full_session:
             self.leave_full_screen()
-        self.sessions_page.show_catalog()
-        self.catalog.render()
-        self.catalog.search.grab_focus()
+        self.sessions_page.show_start()
 
     def workspace_changed(self):
-        """The footer path and counter belong to the catalog table."""
-        catalog = self.sessions_page.showing == "catalog"
-        self.source.set_visible(catalog)
-        self.status.set_visible(catalog)
+        self.update_status()
 
     def shortcuts(self, window, event):
-        if self.sessions_page.showing == "catalog":
-            return False
         modifiers = event.state & Gtk.accelerator_get_default_mod_mask()
         control, shift = Gdk.ModifierType.CONTROL_MASK, Gdk.ModifierType.SHIFT_MASK
-        if event.keyval == Gdk.KEY_Escape and modifiers == shift:
-            self.show_catalog()
-        elif event.keyval in (Gdk.KEY_Tab, Gdk.KEY_ISO_Left_Tab) and modifiers == control:
+        key = Gdk.keyval_to_lower(event.keyval)
+        # Ctrl+F, Ctrl+N, Ctrl+L, Ctrl+K and F5 belong to the terminal or the remote desktop while it has the keyboard.
+        focus = self.get_focus()
+        in_session = isinstance(focus, Vte.Terminal) or type(focus).__name__ == "Display"
+        if event.keyval in (Gdk.KEY_Tab, Gdk.KEY_ISO_Left_Tab) and modifiers == control:
             self.sessions_page.cycle()
-        elif Gdk.keyval_to_lower(event.keyval) == Gdk.KEY_p and modifiers == control | shift:
+        elif key == Gdk.KEY_p and modifiers == control | shift:
             self.sessions_page.focus_search()
+        elif in_session:
+            return False
+        elif key == Gdk.KEY_f and modifiers == control:
+            self.sessions_page.focus_server_search()
+        elif key == Gdk.KEY_n and modifiers == control:
+            self.add_profile()
+        elif key in (Gdk.KEY_l, Gdk.KEY_k) and modifiers == control:
+            self.quick.grab_focus()
+        elif event.keyval == Gdk.KEY_F5 and not modifiers:
+            self.reload()
         else:
             return False
         return True
 
     def select_protocol(self, protocol):
+        """The protocol of the «Серверы» column: «Добавить сервер» creates one of this kind."""
         self.protocol = protocol
-        self.catalog.set_protocol(protocol)
-        self.add_button.set_sensitive(protocol != "ssh" or self.document is not None)
-        self.catalog.render()
+        if self.sessions_page.server_panel.protocol != protocol:
+            self.sessions_page.server_panel.select(protocol)
+        self.update_status()
 
     # --- data ---------------------------------------------------------------------------------
     def reload(self, show_error=True):
@@ -241,10 +281,7 @@ class Window(Gtk.ApplicationWindow):
             self.document = None
             if show_error:
                 message(self, error, Gtk.MessageType.ERROR)
-        self.add_button.set_sensitive(self.protocol != "ssh" or self.document is not None)
-        self.catalog.render_groups()
-        self.catalog.render()
-        self.sessions_page.server_panel.render()
+        self.refresh_servers()
 
     def desktop_profiles(self):
         fields = DesktopProfile.__dataclass_fields__
@@ -260,21 +297,12 @@ class Window(Gtk.ApplicationWindow):
         profiles = self.document.profiles if self.document else []
         return next((profile for profile in profiles if profile.alias.lower() == alias.lower()), None)
 
-    def catalog_profiles(self):
-        if self.protocol == "rdp":
-            profiles = self.desktop_profiles()
-        elif self.protocol == "vnc":
-            profiles = self.vnc_profiles()
-        else:
-            profiles = list(self.document.profiles) if self.document else []
-        if self.active_group == "*":
-            return [profile for profile in profiles if self.is_favorite(profile)]
-        return [profile for profile in profiles if not self.active_group or self.group_of(profile) == self.active_group]
-
     @property
-    def real_group(self):
-        """The selected tab when it is a user group (not «Все серверы» or «Избранное»)."""
-        return self.active_group if self.group_record(self.active_group) else ""
+    def target_group(self):
+        """A new server goes to the tab of the server or group header chosen in the «Серверы» column."""
+        page = getattr(self, "sessions_page", None)
+        group = page.server_panel.selected_group() if page else ""
+        return group if self.group_record(group) else ""
 
     @staticmethod
     def profile_key(profile):
@@ -294,10 +322,7 @@ class Window(Gtk.ApplicationWindow):
             self.update_catalog_settings(favorites=favorites)
         except OSError as error:
             message(self, error, Gtk.MessageType.ERROR)
-        if self.active_group == "*" and not favorites:
-            self.active_group = ""
-        self.catalog.render_groups()
-        self.catalog.render()
+        self.refresh_servers()
 
     def record_recent(self, profile):
         key = self.profile_key(profile)
@@ -315,18 +340,13 @@ class Window(Gtk.ApplicationWindow):
     def group_record(self, identifier):
         return next((group for group in self.settings["groups"] if group["id"] == identifier), None) if identifier else None
 
-    @property
-    def sort_key(self):
-        return self.protocol + ":" + self.real_group
-
-    def sort_by(self, column):
-        changes = dict(self.settings["sort"])
-        changes[self.sort_key] = next_order(changes.get(self.sort_key, "original"), column)
+    def set_sort(self, order):
+        """The order of the «Серверы» column for the chosen protocol ("sort": {"ssh:": "name", …})."""
         try:
-            self.update_catalog_settings(sort=changes)
+            self.update_catalog_settings(sort={**self.settings["sort"], self.protocol + ":": order})
         except OSError as error:
             message(self, error, Gtk.MessageType.ERROR)
-        self.catalog.render()
+        self.refresh_servers()
 
     def update_catalog_settings(self, **changes):
         settings = {**self.settings, **changes}
@@ -340,11 +360,6 @@ class Window(Gtk.ApplicationWindow):
             message(self, error, Gtk.MessageType.ERROR)
 
     # --- groups -------------------------------------------------------------------------------
-    def select_group(self, selected):
-        self.active_group = selected
-        self.catalog.render_groups()
-        self.catalog.render()
-
     def ask_group_name(self, title, commit, initial="", current=None):
         name = initial
         while True:
@@ -360,35 +375,27 @@ class Window(Gtk.ApplicationWindow):
             else:
                 return name
 
-    def new_group(self, select=True):
+    def new_group(self):
         name = self.ask_group_name("Новая вкладка", "Создать")
         if not name:
             return None
         group = {"id": uuid.uuid4().hex, "name": name, "color": ""}
         self.settings["groups"].append(group)
         self.save_settings()
-        if select:
-            self.select_group(group["id"])
-        else:
-            self.catalog.render_groups()
+        self.refresh_servers()
         return group
-
-    def default_group(self, identifier):
-        self.settings["default"] = identifier
-        self.save_settings()
 
     def rename_group(self, group):
         name = self.ask_group_name("Переименовать вкладку", "Сохранить", group["name"], group)
         if name:
             group["name"] = name
             self.save_settings()
-            self.catalog.render_groups()
-            self.catalog.render()
+            self.refresh_servers()
 
     def mark_group(self, group, color):
         group["color"] = color
         self.save_settings()
-        self.catalog.render_groups()
+        self.refresh_servers()
         self.sessions_page.refresh()
 
     def shift_group(self, group, offset):
@@ -398,20 +405,75 @@ class Window(Gtk.ApplicationWindow):
         if 0 <= target < len(groups):
             groups[index], groups[target] = groups[target], groups[index]
             self.save_settings()
-            self.catalog.render_groups()
+            self.refresh_servers()
 
     def delete_group(self, group):
-        if confirm(self, f"Удалить вкладку «{group['name']}»? Её подключения будут доступны во вкладке «Все серверы»."):
+        if confirm(self, f"Удалить вкладку «{group['name']}»? Её подключения перейдут в «Без вкладки»."):
             self.settings["groups"].remove(group)
             self.settings["members"] = {key: value for key, value in self.settings["members"].items() if value != group["id"]}
             self.settings["desktops"] = [dict(item, group="") if item["group"] == group["id"] else item
                                          for item in self.settings["desktops"]]
+            self.settings["vnc"] = [dict(item, group="") if item["group"] == group["id"] else item for item in self.settings["vnc"]]
+            self.settings["collapsed"] = [key for key in self.settings.get("collapsed", []) if key != group["id"]]
             self.settings["sort"] = {key: value for key, value in self.settings["sort"].items()
                                      if not key.endswith(":" + group["id"])}
             if self.settings["default"] == group["id"]:
                 self.settings["default"] = ""
             self.save_settings()
-            self.select_group("")
+            self.refresh_servers()
+
+    def column_menu(self, widget):
+        """«⋯» of the «Серверы» column (docs/ui-spec.md §2.2)."""
+        current = self.settings["sort"].get(self.protocol + ":", "original")
+        orders = (("original", "Исходный порядок"), ("name", "По названию ↑"), ("name_desc", "По названию ↓"),
+                  ("address", "По адресу ↑"), ("address_desc", "По адресу ↓"))
+        return menu_at(widget, None, [
+            Item("Новая вкладка…", self.new_group, icon="plus"),
+            Item("Сортировка", icon="move", children=[Item(title, lambda value=value: self.set_sort(value), checked=current == value)
+                                                    for value, title in orders]),
+            None,
+            Item("Обновить список", self.reload, icon="refresh"),
+            Item("Экспорт архива…", self.export_backup, icon="copy"),
+            Item("Импорт архива…", self.import_backup, icon="folder"),
+            Item("Импорт из других программ…", self.import_other, icon="folder"),
+            Item("Импорт .rdp…", lambda: self.transfer_desktop(None), icon="server"),
+            None,
+            Item("Открыть SSH config", self.open_config, icon="edit"),
+            Item("Известные хосты…", lambda: self.open_known_hosts(None), icon="key"),
+        ])
+
+    def section_menu(self, widget, event, key):
+        """A group header: fold; for a tab also rename, color, order and delete."""
+        panel = self.sessions_page.server_panel
+        folded = key in panel.collapsed()
+        fold = Item("Развернуть" if folded else "Свернуть", lambda: panel.toggle(key), icon="move")
+        group = self.group_record(key)
+        if group is None:
+            return menu_at(widget, event, [fold, None, Item("Новая вкладка…", self.new_group, icon="plus")])
+        groups = self.settings["groups"]
+        index = groups.index(group)
+        colors = [Item("Без метки", lambda: self.mark_group(group, ""), checked=not group["color"])]
+        colors += [Item(name, lambda value=value: self.mark_group(group, value), checked=group["color"].lower() == value.lower())
+                   for name, value in TAB_COLORS]
+        return menu_at(widget, event, [
+            fold,
+            Item("Переименовать вкладку", lambda: self.rename_group(group), icon="edit"),
+            Item("Цветовая метка", icon="dot", children=colors),
+            Item("Переместить выше", lambda: self.shift_group(group, -1), icon="move_left", enabled=index > 0),
+            Item("Переместить ниже", lambda: self.shift_group(group, 1), icon="move", enabled=index < len(groups) - 1),
+            None,
+            Item("Новая вкладка…", self.new_group, icon="plus"),
+            Item("Удалить вкладку", lambda: self.delete_group(group), icon="delete", danger=True),
+        ])
+
+    def open_config(self):
+        if not self.config.path.exists():
+            message(self, "Файл ~/.ssh/config появится после добавления первого сервера.")
+            return
+        try:
+            Gio.AppInfo.launch_default_for_uri(self.config.path.as_uri(), None)
+        except GLib.Error as error:
+            message(self, error.message, Gtk.MessageType.ERROR)
 
     # --- catalog actions ------------------------------------------------------------------------
     def profile_menu(self, widget, event, profile):
@@ -472,10 +534,10 @@ class Window(Gtk.ApplicationWindow):
                 self.update_catalog_settings(members={**self.settings["members"], profile.alias.lower(): destination})
         except (OSError, ValueError) as error:
             message(self, error, Gtk.MessageType.ERROR)
-        self.catalog.render()
+        self.refresh_servers()
 
     def move_to_new_group(self, profile):
-        group = self.new_group(select=False)
+        group = self.new_group()
         if group:
             self.move_profile(profile, group["id"])
 
@@ -526,7 +588,7 @@ class Window(Gtk.ApplicationWindow):
             has_password = before is not None and self.vault.lookup(before.secret) is not None
         except (OSError, RuntimeError, subprocess.TimeoutExpired):
             has_password = False
-        dialog = DesktopDialog(self, before, has_password, group=self.real_group)
+        dialog = DesktopDialog(self, before, has_password, group=self.target_group)
         while True:
             response = dialog.run()
             if response == IMPORT_RESPONSE:
@@ -555,8 +617,7 @@ class Window(Gtk.ApplicationWindow):
             except (OSError, RuntimeError, ValueError, subprocess.TimeoutExpired) as error:
                 dialog.error.set_text(str(error))
             else:
-                self.catalog.search.set_text("")
-                self.catalog.render(keep=profile)
+                self.refresh_servers(profile)
                 break
         dialog.destroy()
 
@@ -584,7 +645,7 @@ class Window(Gtk.ApplicationWindow):
                     self.vault.save(profile.secret, None)
             except (OSError, RuntimeError, subprocess.TimeoutExpired) as error:
                 message(self, error, Gtk.MessageType.ERROR)
-            self.catalog.render()
+            self.refresh_servers()
 
     def edit_vnc(self, before):
         try:
@@ -592,7 +653,7 @@ class Window(Gtk.ApplicationWindow):
         except (OSError, RuntimeError, subprocess.TimeoutExpired):
             has_password = False
         aliases = [profile.alias for profile in self.document.profiles] if self.document else []
-        dialog = VncDialog(self, before, has_password, group=self.real_group, ssh_aliases=aliases)
+        dialog = VncDialog(self, before, has_password, group=self.target_group, ssh_aliases=aliases)
         while dialog.run() == Gtk.ResponseType.OK:
             try:
                 profile, password, forget = dialog.values()
@@ -614,8 +675,7 @@ class Window(Gtk.ApplicationWindow):
             except (OSError, RuntimeError, ValueError, subprocess.TimeoutExpired) as error:
                 dialog.error.set_text(str(error))
             else:
-                self.catalog.search.set_text("")
-                self.catalog.render(keep=profile)
+                self.refresh_servers(profile)
                 break
         dialog.destroy()
 
@@ -643,7 +703,7 @@ class Window(Gtk.ApplicationWindow):
                     self.vault.save(profile.secret, None)
             except (OSError, RuntimeError, subprocess.TimeoutExpired) as error:
                 message(self, error, Gtk.MessageType.ERROR)
-            self.catalog.render()
+            self.refresh_servers()
 
     def transfer_desktop(self, profile):
         rdp_filter = [("Профиль удалённого рабочего стола (*.rdp)", "*.rdp")]
@@ -654,10 +714,9 @@ class Window(Gtk.ApplicationWindow):
         if path:
             try:
                 if profile is None:
-                    imported = DesktopProfile.import_file(path, self.real_group)
+                    imported = DesktopProfile.import_file(path, self.target_group)
                     self.save_desktop(imported)
-                    self.catalog.search.set_text("")
-                    self.catalog.render(keep=imported)
+                    self.refresh_servers(imported)
                 else:
                     profile.export_file(path)
             except (OSError, ValueError) as error:
@@ -703,11 +762,11 @@ class Window(Gtk.ApplicationWindow):
                     self.drop_password(previous, updated)
                 if before and before.alias.lower() != after.alias.lower():
                     self.settings["members"][after.alias.lower()] = self.settings["members"].pop(before.alias.lower(), "")
-                elif not before and self.real_group:
-                    self.settings["members"][after.alias.lower()] = self.real_group
+                elif not before and self.target_group:
+                    self.settings["members"][after.alias.lower()] = self.target_group
                 self.save_settings()
                 self.reload()
-                self.catalog.render(keep=after)
+                self.refresh_servers(after)
                 break
             except (OSError, RuntimeError, ValueError, subprocess.TimeoutExpired) as error:
                 dialog.hint.set_text(str(error))
@@ -782,10 +841,10 @@ class Window(Gtk.ApplicationWindow):
             self.connect_profile(profile)
             if confirm(self, f"Сохранить подключение «{host}»?"):
                 try:
-                    (self.save_desktop if protocol == "rdp" else self.save_vnc)(replace(profile, group=self.real_group))
+                    (self.save_desktop if protocol == "rdp" else self.save_vnc)(replace(profile, group=self.target_group))
                 except (OSError, ValueError) as error:
                     message(self, error, Gtk.MessageType.ERROR)
-                self.catalog.render()
+                self.refresh_servers()
             return True
         existing = [item.alias for item in self.document.profiles] if self.document else []
         alias = quick_alias(host, existing + list(self.transient))
@@ -796,8 +855,8 @@ class Window(Gtk.ApplicationWindow):
             try:
                 updated = self.document.update(None, profile)
                 self.config.save(self.document, updated)
-                if self.real_group:
-                    self.settings["members"][alias.lower()] = self.real_group
+                if self.target_group:
+                    self.settings["members"][alias.lower()] = self.target_group
                     self.save_settings()
                 self.transient.pop(alias, None)
                 self.reload()
@@ -893,17 +952,17 @@ class Window(Gtk.ApplicationWindow):
             for item in chosen:
                 if item.protocol == "rdp":
                     desktops.append(asdict(DesktopProfile(uuid.uuid4().hex, item.name[:80] or item.host, item.host, item.port,
-                                                          item.user, item.domain, self.real_group).validate()))
+                                                          item.user, item.domain, self.target_group).validate()))
                 elif item.protocol == "vnc":
                     vnc.append(asdict(VncProfile(uuid.uuid4().hex, item.name[:80] or item.host, item.host, item.port,
-                                                 item.user, self.real_group).validate()))
+                                                 item.user, self.target_group).validate()))
                 elif document is not None:
                     alias = quick_alias(item.name, names)
                     names.append(alias)
                     document = document.update(None, Profile(alias, item.host, item.user,
                                                              "" if item.port == 22 else str(item.port)))
-                    if self.real_group:
-                        self.settings["members"][alias.lower()] = self.real_group
+                    if self.target_group:
+                        self.settings["members"][alias.lower()] = self.target_group
                 added += 1
             if document is not self.document:
                 self.config.save(self.document, document)
@@ -991,8 +1050,7 @@ class Window(Gtk.ApplicationWindow):
     def sessions_changed(self):
         live = sum(session.live for session in self.sessions)
         set_button_text(self.sessions_button, f"Сеансы · {live}" if live else "Сеансы")
-        if self.sessions_page.showing == "catalog":
-            self.catalog.render()
+        self.sessions_page.server_panel.render()
 
     def close_session(self, session, confirm_close=True):
         if session not in self.sessions:
@@ -1046,12 +1104,12 @@ class Window(Gtk.ApplicationWindow):
         if session is not None:
             session.set_full_screen(False)
 
-    def server_entries(self, protocol):
+    def server_entries(self, protocol, order="name"):
         names = {group["id"]: group for group in self.settings["groups"]}
         profiles = (self.desktop_profiles() if protocol == "rdp" else self.vnc_profiles() if protocol == "vnc" else
                     list(self.document.profiles) if self.document else [])
         result = []
-        for profile in ordered(profiles, "name"):
+        for profile in ordered(profiles, order):
             group = names.get(self.group_of(profile))
             result.append((profile, group["name"] if group else "",
                            group["color"] if group and group["color"] else self.theme.color("teal")))
@@ -1121,7 +1179,6 @@ class Application(Gtk.Application):
                 Gtk.Window.set_default_icon_from_file(str(icon))
             window = Window(self, self.config)
             window.show_all()
-            window.catalog.empty.set_visible(bool(window.catalog.empty.get_text()) and not len(window.catalog.model))
             window.sessions_page.refresh_details()
         window.restore()
 

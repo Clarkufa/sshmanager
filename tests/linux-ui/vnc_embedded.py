@@ -148,7 +148,7 @@ def scenario():
 def steps():
     global shutdown_process
     window.select_protocol("vnc")
-    shot("30-vnc-catalog")
+    shot("30-vnc-column")
     window.show_sessions()
     side = window.sessions_page
     side.server_panel.select("vnc")

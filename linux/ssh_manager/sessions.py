@@ -744,8 +744,17 @@ class VncSession(Session):
         self.status = "подключён"
         self.changed()
         self.focus()
+        if self.profile.scale == "fit" and hasattr(self.display, "set_allow_resize"):
+            # gtk-vnc asks the server for the widget size only when the size changes: ask once after connecting.
+            GLib.timeout_add(200, self.nudge_size, generation)
         if self.profile.fullscreen and not self.full_screen:
             self.enter_full_screen()
+
+    def nudge_size(self, generation):
+        if self.current(generation):
+            self.display.set_margin_end(1)
+            GLib.timeout_add(150, lambda: self.display is not None and self.display.set_margin_end(0) and False)
+        return False
 
     def on_credential(self, generation, values):
         if not self.current(generation):
@@ -1014,6 +1023,8 @@ class SessionRow(Gtk.ListBoxRow):
 
 
 SERVER_WIDTH, SESSION_WIDTH, COLUMN_GAP = 248, 203, 12
+ALL_NAME = "Все серверы"
+UNGROUPED_NAME = "Без вкладки"
 
 
 def column_title(text, action):
@@ -1049,13 +1060,14 @@ class FilesRow(Gtk.ListBoxRow):
         self.add(line)
 
 
-RECENT_SECTION, UNGROUPED_SECTION = "recent", "ungrouped"
+RECENT_SECTION, UNGROUPED_SECTION, FAVORITES_SECTION = "recent", "ungrouped", "favorites"
+SECTIONS = (RECENT_SECTION, UNGROUPED_SECTION, FAVORITES_SECTION)
 
 
 class ServerColumn(Gtk.Box):
-    """«Серверы»: SSH / RDP / VNC, search and the servers grouped by catalog tab. A tab folds and unfolds with a click;
-    the folded tabs are kept in the settings ("collapsed"). Right click opens the row menu of the catalog
-    (docs/ui-spec.md §2.2)."""
+    """«Серверы»: SSH / RDP / VNC, search and the servers grouped: «Недавние», «Избранное», each tab, «Без вкладки».
+    A group folds and unfolds with a click; folded groups are kept in the settings ("collapsed"). Right click opens
+    the server menu or the group menu (docs/ui-spec.md §2.2)."""
 
     def __init__(self, owner):
         super().__init__(orientation=Gtk.Orientation.VERTICAL, spacing=8, vexpand=True)
@@ -1097,7 +1109,18 @@ class ServerColumn(Gtk.Box):
         for kind, tab in self.tabs.items():
             context = tab.get_style_context()
             (context.add_class if kind == protocol else context.remove_class)("selected")
+        if getattr(self.owner, "protocol", protocol) != protocol:
+            self.owner.select_protocol(protocol)
         self.render()
+
+    def selected_group(self):
+        """The tab of the chosen server or group header: a new server goes there."""
+        row = self.listing.get_selected_row()
+        if row is None:
+            return ""
+        if row.profile is not None:
+            return self.owner.group_of(row.profile)
+        return row.section if row.section and row.section not in SECTIONS else ""
 
     def collapsed(self):
         return set(self.owner.settings.get("collapsed", []))
@@ -1111,13 +1134,21 @@ class ServerColumn(Gtk.Box):
             message(self.owner, error, Gtk.MessageType.ERROR)
         self.render(keep_section=section)
 
-    def render(self, keep_section=None):
+    def render(self, keep_section=None, select=None):
         owner = self.owner
-        chosen = self.chosen()
+        chosen = select if select is not None else self.chosen()
+        if select is not None and owner.profile_key(select).split(":")[0] != self.protocol:
+            self.protocol = owner.profile_key(select).split(":")[0]
+            for kind, tab in self.tabs.items():
+                context = tab.get_style_context()
+                (context.add_class if kind == self.protocol else context.remove_class)("selected")
+            if owner.protocol != self.protocol:
+                owner.select_protocol(self.protocol)
         keep = owner.profile_key(chosen) if chosen is not None else None
         for row in self.listing.get_children():
             self.listing.remove(row)
-        everything = owner.server_entries(self.protocol)
+        order = owner.settings["sort"].get(self.protocol + ":", "original")
+        everything = owner.server_entries(self.protocol, order)
         query = self.search.get_text().strip().casefold()
         shown = [entry for entry in everything if query in (entry[0].alias + " " + entry[0].address + " " + entry[1]).casefold()]
         collapsed = self.collapsed()
@@ -1130,6 +1161,10 @@ class ServerColumn(Gtk.Box):
             recent = [by_key[key] for key in keys if key in by_key]
             if recent:
                 sections.append((RECENT_SECTION, "Недавние", "", recent))
+            favorites = [entry for entry in shown if owner.is_favorite(entry[0])]
+            if favorites:
+                sections.append((FAVORITES_SECTION, "Избранное", "", favorites))
+            fixed = len(sections)
             groups = owner.settings["groups"]
             grouped = {group["id"]: [] for group in groups}
             ungrouped = []
@@ -1139,8 +1174,7 @@ class ServerColumn(Gtk.Box):
                 if grouped[group["id"]]:
                     sections.append((group["id"], group["name"], group["color"] or owner.theme.color("teal"), grouped[group["id"]]))
             if ungrouped:
-                sections.append((UNGROUPED_SECTION, "Без вкладки" if len(sections) > (1 if recent else 0) else "Все серверы",
-                                 "", ungrouped))
+                sections.append((UNGROUPED_SECTION, UNGROUPED_NAME if len(sections) > fixed else ALL_NAME, "", ungrouped))
         select = None
         for section, title, color, items in sections:
             folded = section in collapsed
@@ -1152,7 +1186,7 @@ class ServerColumn(Gtk.Box):
             if folded:
                 continue
             for profile, group, dot in items:
-                row = self.row(profile, dot if section in (None, RECENT_SECTION) else None)
+                row = self.row(profile, dot if section in (None, RECENT_SECTION, FAVORITES_SECTION) else None)
                 self.listing.add(row)
                 if select is None and keep is not None and owner.profile_key(profile) == keep:
                     select = row
@@ -1243,9 +1277,7 @@ class ServerColumn(Gtk.Box):
         if row is None:
             return False
         if row.profile is None:
-            folded = row.section in self.collapsed()
-            return menu_at(self.listing, event, [Item("Развернуть" if folded else "Свернуть",
-                                                      lambda: self.toggle(row.section), icon="move")])
+            return self.owner.section_menu(self.listing, event, row.section)
         self.owner.profile_menu(self.listing, event, row.profile)
         return True
 
@@ -1266,6 +1298,11 @@ class ServerColumn(Gtk.Box):
         if event.keyval == Gdk.KEY_Delete and row.profile is not None:
             self.owner.delete_entry(row.profile)
             return True
+        if event.keyval == Gdk.KEY_F2 and row.profile is not None:
+            self.owner.edit_catalog_entry(row.profile)
+            return True
+        if event.keyval == Gdk.KEY_Menu and row.profile is None:
+            return self.menu(None)
         return False
 
     def search_keys(self, entry, event):
@@ -1284,7 +1321,7 @@ class ServerColumn(Gtk.Box):
 class SessionsPage(Gtk.Box):
     """«Серверы» and «Сеансы» columns and the workspace: catalog table, a session or «Файлы» (docs/ui-spec.md §2.2, §3)."""
 
-    def __init__(self, owner, catalog):
+    def __init__(self, owner, start):
         super().__init__(spacing=COLUMN_GAP)
         self.owner = owner
         self.active = None
@@ -1298,8 +1335,9 @@ class SessionsPage(Gtk.Box):
 
         self.server_column = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6, margin_bottom=8)
         self.server_column.set_size_request(SERVER_WIDTH, -1)
-        self.server_column.pack_start(column_title("Серверы", action_button(
-            "Каталог", owner.show_catalog, "quiet", icon="server", width=104, tooltip="Таблица подключений")), False, False, 0)
+        more = action_button("⋯", None, "quiet", width=38, tooltip="Вкладки, сортировка, резервные копии и импорт")
+        more.connect("clicked", lambda widget: owner.column_menu(widget))
+        self.server_column.pack_start(column_title("Серверы", more), False, False, 0)
         self.server_panel = ServerColumn(owner)
         self.server_column.pack_start(self.server_panel, True, True, 0)
         self.pack_start(self.server_column, False, False, 0)
@@ -1339,8 +1377,8 @@ class SessionsPage(Gtk.Box):
         self.pack_start(session_list, False, False, 0)
 
         self.area = Gtk.Stack(hhomogeneous=False, vhomogeneous=False)
-        catalog.show_all()
-        self.area.add_named(catalog, "catalog")
+        start.show_all()
+        self.area.add_named(start, "start")
         self.pack_start(self.area, True, True, 0)
 
         workspace = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=7)
@@ -1400,12 +1438,12 @@ class SessionsPage(Gtk.Box):
     # --- workspace ------------------------------------------------------------------------------
     @property
     def showing(self):
-        """"catalog", "session" or "files"."""
+        """"start", "session" or "files"."""
         child = self.area.get_visible_child()
         return "files" if child in self.files_panels else self.area.get_visible_child_name()
 
-    def show_catalog(self):
-        self.area.set_visible_child_name("catalog")
+    def show_start(self):
+        self.area.set_visible_child_name("start")
         self.workspace_changed()
 
     def show_session(self):
@@ -1440,7 +1478,7 @@ class SessionsPage(Gtk.Box):
             if self.active is not None:
                 self.activate(self.active, focus=True)
             else:
-                self.owner.show_catalog()
+                self.show_start()
         else:
             self.refresh_files()
 
@@ -1485,24 +1523,24 @@ class SessionsPage(Gtk.Box):
 
     # --- columns --------------------------------------------------------------------------------
     def fit_columns(self, width=None):
-        """A narrow window folds «Серверы», then «Сеансы», so the workspace keeps 620 for the catalog table or 460
-        for a session and files. The header buttons show a column even then (docs/ui-spec.md §2.2)."""
+        """A narrow window folds «Сеансы», then «Серверы» (the way to every server), so the workspace keeps 460 and its
+        own minimum. The header buttons show a column even then (docs/ui-spec.md §2.2)."""
         if width is not None:
             self.width = width
         if not self.width:
             return
         # What the workspace shows needs at least its own minimum width (its button rows).
         child = self.area.get_visible_child()
-        need = max(620 if self.showing == "catalog" else 460, child.get_preferred_width()[0] if child else 0)
+        need = max(460, child.get_preferred_width()[0] if child else 0)
         servers, sessions = self.servers_wanted and self.chrome, self.sessions_wanted and self.chrome
 
         def room():
             return (self.width - (SERVER_WIDTH + COLUMN_GAP if servers else 0)
                     - (SESSION_WIDTH + COLUMN_GAP if sessions else 0))
-        if servers and not self.servers_forced and room() < need:
-            servers = False
         if sessions and not self.sessions_forced and room() < need:
             sessions = False
+        if servers and not self.servers_forced and room() < need:
+            servers = False
         if self.server_column.get_visible() != servers or self.session_column.get_visible() != sessions:
             GLib.idle_add(self.apply_columns, servers, sessions)
 

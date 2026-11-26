@@ -9,28 +9,6 @@ from ssh_manager.launch import ssh_command_text, terminal_command
 from ssh_manager.rdp import DesktopProfile
 
 
-def sort_cycle():
-    from ssh_manager.catalog import next_order
-    return next_order
-
-
-class SortCycleTest(unittest.TestCase):
-    def setUp(self):
-        try:
-            self.next_order = sort_cycle()
-        except (ImportError, ValueError):
-            self.skipTest("needs GTK")
-
-    def test_header_click_cycles_like_windows(self):
-        order = "original"
-        seen = []
-        for _ in range(3):
-            order = self.next_order(order, "name")
-            seen.append(order)
-        self.assertEqual(seen, ["name", "name_desc", "original"])
-        self.assertEqual(self.next_order("name_desc", "address"), "address")
-
-
 class ForwardingTest(unittest.TestCase):
     def setUp(self):
         try:
