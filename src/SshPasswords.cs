@@ -260,30 +260,29 @@ namespace SshManager
     {
         private readonly List<Change> changes = new List<Change>();
         public int Count => changes.Count;
-        public int ReplaceCount => changes.Count(change => change.Before != null);
-        public int DesktopCount => changes.Count(change => change.Desktop);
-        public int DesktopReplaceCount => changes.Count(change => change.Desktop && change.Before != null);
+        public int CountFor(CatalogKind kind) => changes.Count(change => change.Kind == kind);
+        public int ReplaceCountFor(CatalogKind kind) => changes.Count(change => change.Kind == kind && change.Before != null);
 
         public void Add(PasswordTarget target, byte[] value)
         {
-            if (target != null) Add(SshPasswords.Name(target), target.User, value, false);
+            if (target != null) Add(SshPasswords.Name(target), target.User, value, CatalogKind.Ssh);
         }
 
         public void Add(RdpProfile profile, byte[] value)
         {
-            if (profile != null) Add(RdpPasswords.Name(profile.Id), profile.Account, value, true);
+            if (profile != null) Add(RdpPasswords.Name(profile.Id), profile.Account, value, CatalogKind.Rdp);
         }
 
         public void Add(VncProfile profile, byte[] value)
         {
-            if (profile != null) Add(VncPasswords.Name(profile.Id), profile.User.Length == 0 ? "-" : profile.User, value, true);
+            if (profile != null) Add(VncPasswords.Name(profile.Id), profile.User.Length == 0 ? "-" : profile.User, value, CatalogKind.Vnc);
         }
 
-        private void Add(string name, string user, byte[] value, bool desktop)
+        private void Add(string name, string user, byte[] value, CatalogKind kind)
         {
             var before = SshPasswords.Read(name);
             if (Equal(before, value)) { SshPasswords.Clear(before); return; }
-            changes.Add(new Change(name, user, desktop, before, value == null ? null : (byte[])value.Clone()));
+            changes.Add(new Change(name, user, kind, before, value == null ? null : (byte[])value.Clone()));
         }
 
         public void Apply(Action commit)
@@ -334,12 +333,12 @@ namespace SshManager
         private sealed class Change
         {
             public readonly string Name, User;
-            public readonly bool Desktop;
+            public readonly CatalogKind Kind;
             public readonly byte[] Before, After;
 
-            public Change(string name, string user, bool desktop, byte[] before, byte[] after)
+            public Change(string name, string user, CatalogKind kind, byte[] before, byte[] after)
             {
-                Name = name; User = user; Desktop = desktop; Before = before; After = after;
+                Name = name; User = user; Kind = kind; Before = before; After = after;
             }
         }
     }

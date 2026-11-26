@@ -83,9 +83,8 @@ namespace SshManager
         public int ChangeCount { get { return changes.Count; } }
         public int ReplaceCount { get { return changes.Count(item => item.Before != null); } }
         public int PasswordCount => passwords.Count;
-        public int PasswordReplaceCount => passwords.ReplaceCount;
-        public int DesktopPasswordCount => passwords.DesktopCount;
-        public int DesktopPasswordReplaceCount => passwords.DesktopReplaceCount;
+        public int CountPasswords(CatalogKind kind) => passwords.CountFor(kind);
+        public int CountReplacedPasswords(CatalogKind kind) => passwords.ReplaceCountFor(kind);
         public IEnumerable<string> Replacements { get { return changes.Where(item => item.Before != null).Select(item => item.Path); } }
         public void Dispose() { passwords.Dispose(); }
 

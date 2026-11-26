@@ -156,7 +156,7 @@ namespace SshManager
             return added;
         }
 
-        public int AddDesktopPasswords()
+        public int AddDesktopPasswords(out int vncAdded)
         {
             Groups groups;
             using (var xml = new MemoryStream(Files[TabsEntry], false)) groups = GroupFile.Parse(xml);
@@ -169,13 +169,14 @@ namespace SshManager
                 catch { SshPasswords.Clear(password); throw; }
                 added++;
             }
+            vncAdded = 0;
             foreach (var profile in groups.Vnc)
             {
                 var password = VncPasswords.ReadBytes(profile.Id);
                 if (password == null) continue;
                 try { Add(VncPasswords.BackupPrefix + profile.Id, password); }
                 catch { SshPasswords.Clear(password); throw; }
-                added++;
+                vncAdded++;
             }
             return added;
         }

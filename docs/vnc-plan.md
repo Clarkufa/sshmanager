@@ -87,7 +87,7 @@
 - Тест: расширить `tests/windows/stage2-logic.ps1` — `tabs.xml` с `<vnc …/>` читается, пишется обратно, неверный `via` отклоняется, `RemoveTab` переносит профиль.
 
 ### 3.3 RFB-клиент (новая папка `src/Vnc/`)
-`src/Vnc/RfbClient.cs` — без UI, работает в фоновом потоке. Спецификация RFB: RFC 6143. Порядок байтов — big-endian.
+`src/VncClient.cs` — без UI, работает в фоновом потоке. Спецификация RFB: RFC 6143. Порядок байтов — big-endian.
 
 1. **Подключение**: `TcpClient` к host:port, таймаут 15 с. `NetworkStream` + `BinaryReader`-обёртка с методами `ReadExact(n)`, `ReadU8/U16/U32/S32` (big-endian вручную).
 2. **Версия**: прочитать 12 байт `"RFB xxx.yyy\n"`; ответить `"RFB 003.008\n"`, если сервер ≥ 3.8, иначе `"RFB 003.003\n"`.
@@ -120,12 +120,12 @@
 14. `Close()` закрывает сокет; поток завершается через `Disconnected(null)`.
 
 ### 3.4 Клавиши: WinForms → X11 keysym
-`src/Vnc/VncKeys.cs`, `static uint? FromKeyDown(Keys key)` для служебных клавиш:
+`src/VncKeys.cs`, `static uint? FromKeyDown(Keys key)` для служебных клавиш:
 Back 0xff08, Tab 0xff09, Enter 0xff0d, Escape 0xff1b, Insert 0xff63, Delete 0xffff, Home 0xff50, Left 0xff51, Up 0xff52, Right 0xff53, Down 0xff54, PageUp 0xff55, PageDown 0xff56, End 0xff57, F1–F12 = 0xffbe + n−1, ShiftKey 0xffe1, ControlKey 0xffe3, Menu (Alt) 0xffe9, LWin/RWin 0xffeb, CapsLock 0xffe5, NumLock 0xff7f, PrintScreen 0xff61, Pause 0xff13, цифровой блок NumPad0–9 = 0xffb0 + n, Multiply 0xffaa, Add 0xffab, Subtract 0xffad, Decimal 0xffae, Divide 0xffaf.
 Печатные символы — из `KeyPress`: символ c ≤ 0xFF → keysym = c; иначе `0x01000000 | c`. При зажатом Ctrl (`KeyPress` даёт управляющий символ) отправлять букву/цифру из `KeyDown`: `Keys.A..Z` → 0x61..0x7a (строчная), `D0..D9` → 0x30..0x39. Каждое нажатие — пара down/up; модификаторы отправлять отдельно по `KeyDown`/`KeyUp`. Переопределить `IsInputKey` (стрелки, Tab) и `ProcessCmdKey`, чтобы Tab/стрелки шли на сервер.
 
 ### 3.5 Элемент `VncDesktop` (как `RdpDesktop`)
-`src/Vnc/VncDesktop.cs`: `internal sealed class VncDesktop : Panel`.
+`src/VncDesktop.cs`: `internal sealed class VncDesktop : Panel`.
 - Публичный интерфейс повторяет `RdpDesktop` (см. `src/RdpDesktop.cs`): `Connect(VncProfile, string password)`, `Reconnect()`, `Disconnect()`, `FullScreen()`, `IsOpen`, `IsConnected`, `Status`, `Profile`, события `Changed`, `CloseRequested`.
 - Отрисовка: `DoubleBuffered`, в `OnPaint` под `frameLock` рисовать кадр. Масштаб «По размеру окна»: вписать с сохранением пропорций, по краям фон `NativeTerminalView.Background`, `InterpolationMode.HighQualityBilinear`. «Исходный размер»: `AutoScroll = true`, `AutoScrollMinSize = frame.Size`, рисовать со смещением `AutoScrollPosition`.
 - Мышь: перевести координаты окна в координаты кадра (обратное масштабирование, ограничить границами), отправлять маску кнопок при `MouseDown/Up/Move`, колесо — по 1 нажатию на каждые 120 `Delta`.
@@ -135,7 +135,7 @@ Back 0xff08, Tab 0xff09, Enter 0xff0d, Escape 0xff1b, Insert 0xff63, Delete 0xff
 - Заглушка после отключения: скопировать из `RdpDesktop` поля `overlay, overlayReason, overlayTitle, overlayDetail, overlayActions` и метод `FitOverlay` (или вынести их в общий `src/SessionOverlay.cs` и использовать в обоих классах — предпочтительно). Заголовок «Сеанс завершён» (сервер закрыл штатно) / «Подключение прервано» (ошибка), причина — текст исключения.
 - Статусы: «подключение» → «подключён» → «отключён» / «отключён (ошибка)».
 - Весь экран: создать `VncFullScreenForm` (без рамки, `WindowState = Maximized`, `TopMost`, на мониторе текущего окна), перенести в него этот же `VncDesktop` (`Parent = form`), вверху полупрозрачная панель с «Выйти из полноэкранного режима» (появляется при наведении на верхние 4 px); `Ctrl+Alt+Enter` — выход. При выходе вернуть элемент в прежний контейнер.
-- Отдельное окно: `src/Vnc/VncWindow.cs` по образцу `src/RdpWindow.cs` (`Open(VncProfile, string password, IWin32Window owner)`, верхняя строка с «Весь экран», «Переподключить», «Отключить»).
+- Отдельное окно: `src/VncWindow.cs` по образцу `src/RdpWindow.cs` (`Open(VncProfile, string password, IWin32Window owner)`, верхняя строка с «Весь экран», «Переподключить», «Отключить»).
 - Пароль не сохранён → подключаться без пароля; при `RfbPasswordRequired` (или «Неверный пароль VNC.») показать диалог «Вход: имя» (как `RdpLogonDialog.Resolve` в `src/RdpDialog.cs`, но поле «Пароль» и флажок «Сохранить пароль в Windows») и переподключиться с введённым паролем. «Отмена» → заглушка «Подключение прервано» с причиной «Нужен пароль VNC.».
 
 ### 3.6 ZRLE (после того как Raw/CopyRect/Hextile работают)
@@ -153,6 +153,8 @@ Back 0xff08, Tab 0xff09, Enter 0xff0d, Escape 0xff1b, Insert 0xff63, Delete 0xff
 - Проверка 3.x: `tests/windows/stage2-logic.ps1` (модель, RFB-ключ DES на известном примере: пароль `password`, challenge из RFC 6143 тестовых векторов или из захвата стенда), `tests/windows/render.ps1` (каталог VNC, окно профиля, сеанс с заглушкой при 100/150/200% и тёмной теме), новый `tests/windows/live-vnc.ps1`: подключение к `sshm-vnc` (127.0.0.1:5901, `VncTest1`) → `IsConnected`, размер кадра 1280×800, снимок, щелчок и ввод `echo VNC-OK` в xfce4-terminal не обязателен; изменение размера окна при `scale=fit` меняет размер сервера (если Xvnc поддерживает -308 — TigerVNC поддерживает), отключение сервера (`docker restart sshm-vnc`) → заглушка «Подключение прервано», «Переподключить» восстанавливает.
 
 ## Фаза 4. Linux: gtk-vnc
+
+Живой прогон на TigerVNC и 41 модульный тест прошли. Прямое подключение и SSH-туннель проверяются одним запуском.
 - Зависимости: `linux/build.sh` — `Recommends:` добавить `gir1.2-gtk-vnc-2.0`; `linux/ssh-manager.spec` — `Recommends: gtk-vnc2`; `tests/linux-ui/Dockerfile` — пакет `gir1.2-gtk-vnc-2.0`. Без пакета при подключении сообщение «Для VNC установите пакет gir1.2-gtk-vnc-2.0 (Debian/Ubuntu) или gtk-vnc2 (Fedora).».
 - Модель: новый `linux/ssh_manager/vnc.py` с `@dataclass(frozen=True) class VncProfile` (поля из Фазы 1, `validate()` по образцу `DesktopProfile.validate` в `rdp.py`, свойства `alias`, `address`, `secret` → `DesktopAccount(sha256("vnc\n"+id), user or "-", host, port)`). `config.py` `parse_settings`: ключ `"vnc"` (список, до 10000, неверные записи — ошибка, как `desktops`).
 - Сеанс: `class VncSession(Session)` в `linux/ssh_manager/sessions.py` по образцу `RdpSession`:
@@ -163,7 +165,7 @@ Back 0xff08, Tab 0xff09, Enter 0xff0d, Escape 0xff1b, Insert 0xff63, Delete 0xff
   - «Весь экран» и «В окне» — те же методы окна, что для `RdpSession` (`enter_full_screen`, `detach_session` в `app.py`); для «В окне» создать отдельное `Gtk.Window` и переподключиться в нём.
 - Каталог/окно (`linux/ssh_manager/app.py`, `catalog.py`, `dialogs.py`): третья вкладка в `catalog.py` (`(("ssh","SSH","terminal"),("rdp","RDP","server"),("vnc","VNC","server"))`), `select_protocol("vnc")`, заголовок, список `vnc_profiles()`, меню строки, `VncDialog` по образцу `DesktopDialog`, избранное/недавние (`favorite_key` → `("vnc", id)`), `ServerPicker` (третья вкладка), `parse_quick` в `extras.py` (`vnc://`), импорт mRemoteNG/MobaXterm.
 - Резервная копия (`linux/ssh_manager/backup.py`): `VNC_PREFIX = "vnc-"` рядом с `RDP_PREFIX`, цикл по `settings["vnc"]`.
-- Тесты: `linux/tests/test_vnc.py` (модель, parse_quick, импорт); снимки `tests/linux-ui/screens.py` (каталог VNC, окно профиля); живая проверка `tests/linux-ui/vnc_embedded.py` + `run-vnc-check.sh` по образцу `rdp_embedded.py`/`run-rdp-check.sh` (подключение к контейнеру `sshm-vnc` по сети Docker, `VncTest1`): подключён, размер кадра `display.get_width()/get_height()` = 1280×800, заглушка после `docker restart sshm-vnc`, «Переподключить». Код завершения ≠ 0 при любом провале.
+- Тесты: `linux/tests/test_vnc.py` (модель, parse_quick, импорт); снимки `tests/linux-ui/screens.py` (каталог VNC, окно профиля); живая проверка `tests/linux-ui/vnc_embedded.py` + `run-vnc-check.sh` по образцу `rdp_embedded.py`/`run-rdp-check.sh` (подключение к контейнеру `sshm-vnc` по сети Docker, `VncTest1`): подключён, размер кадра совпадает с размером виджета при масштабе «По размеру окна», заглушка после `docker restart sshm-vnc`, «Переподключить». Код завершения ≠ 0 при любом провале.
 
 ## Фаза 5. macOS: TigerVNC или «Общий экран»
 - `macos/Sources/Vnc.swift`: `struct VncProfile: Identifiable, Equatable` (поля Фазы 1), `validate()` по образцу `DesktopProfile` в `Rdp.swift`, `keychainAccount = "vnc\n" + id`, разбор/запись элемента `vnc` в `Settings.swift` (рядом с `rdp`, массив `settings.vnc`).
@@ -178,10 +180,10 @@ Back 0xff08, Tab 0xff09, Enter 0xff0d, Escape 0xff1b, Insert 0xff63, Delete 0xff
 
 ## Фаза 6. SSH-туннель («Через SSH-сервер»)
 Общая логика: найти свободный порт (`TcpListener(IPAddress.Loopback, 0)`, взять порт, закрыть), запустить `ssh -N -o ExitOnForwardFailure=yes -o ServerAliveInterval=15 -L 127.0.0.1:<порт>:<host>:<port> <alias>`, ждать до 15 с, пока к `127.0.0.1:<порт>` не начнёт подключаться TCP (проверять каждые 200 мс); если процесс ssh завершился раньше — ошибка «Не удалось открыть SSH-туннель: <последние строки stderr>». Туннель живёт столько же, сколько VNC-сеанс; при «Закрыть сеанс» и при выходе из приложения процесс ssh завершается. «Переподключить» перезапускает и туннель.
-- Windows: `src/Vnc/SshTunnel.cs`. Запуск — как в `src/SftpClient.cs` (конструктор): `PasswordTarget.From(connection)`, `password?.Arguments`, `new SshAskPass(password)` + `askPass.SetEnvironment(...)`, `Terminal.SshExecutable()`, `CreateNoWindow = true`, stderr собирать в буфер. Если сохранённого пароля нет — добавить `-o BatchMode=yes` и в ошибке подсказать сохранить пароль SSH-сервера или использовать ключ.
+- Windows: `src/VncTunnel.cs`. Запуск — как в `src/SftpClient.cs` (конструктор): `PasswordTarget.From(connection)`, `password?.Arguments`, `new SshAskPass(password)` + `askPass.SetEnvironment(...)`, `Terminal.SshExecutable()`, `CreateNoWindow = true`, stderr собирать в буфер. Если сохранённого пароля нет — добавить `-o BatchMode=yes` и в ошибке подсказать сохранить пароль SSH-сервера или использовать ключ.
 - Linux: `linux/ssh_manager/vnc.py` `class SshTunnel` — `ssh_args(profile, config, account)` и `AskPass(account, password)` из `auth.py`, как в `transfer.py` (строка с `self.broker = AskPass(...)`), `subprocess.Popen` с `env=broker.environment(...)`.
-- macOS: `SSHRequest(profile: sshProfile).arguments(noForwarding: true)` не подходит (там `ClearAllForwardings`) — собрать аргументы вручную: базовые опции из `SSHRequest.arguments` + `-N -o ExitOnForwardFailure=yes -L …`, окружение `SSHRequest.environment(prompt: false)`.
-- Проверка: стенд `sshm-vnc` — SSH на 127.0.0.1:2224 (пароль `Vnc-Test-2026`, сохранить в приложении), VNC-профиль `host=127.0.0.1 port=5901 via=<alias>`; на Windows `tests/windows/live-vnc.ps1 -ViaSsh`, на Linux вариант `vnc_embedded.py --via`.
+- macOS: `SSHRequest(profile: sshProfile).arguments(noForwarding: true)` не подходит (там `ClearAllForwardings`) — собрать аргументы вручную: базовые опции из `SSHRequest.arguments` + `-N -o ExitOnForwardFailure=yes -L …`, окружение `SSHRequest.environment(prompt: true)`, чтобы работали сохранённый пароль, запрос пароля и подтверждение ключа сервера.
+- Проверка: стенд `sshm-vnc` — SSH на 127.0.0.1:2224 (пароль `Vnc-Test-2026`, сохранить в приложении), VNC-профиль `host=127.0.0.1 port=5901 via=<alias>`; на Windows `tests/windows/live-vnc.ps1`, на Linux `tests/linux-ui/run-vnc-check.sh`. Оба сценария проверяют прямой вход и туннель за один прогон.
 
 ## Фаза 7. Документация
 - `docs/ui-spec.md` §8 (Фаза 1) актуализировать по факту.
@@ -193,13 +195,13 @@ Back 0xff08, Tab 0xff09, Enter 0xff0d, Escape 0xff1b, Insert 0xff63, Delete 0xff
 - Релиз — только после явного «выпускай» пользователя: версии в `installer/app.manifest`, `src/AssemblyInfo.cs`, `linux/ssh_manager/__init__.py`, `macos/Resources/Info.plist` (+ `CFBundleVersion`); `gh workflow run build-release.yml`, `gh run download`; RPM через `git -c core.autocrlf=false archive` + `docker run fedora:44 … build/test-rpm-fedora.sh`; fast-forward `main`, `./publish.ps1 -NotesFile … -Python "%APPDATA%\uv\python\cpython-3.11.15-windows-x86_64-none\python.exe" -MacDmg … -LinuxDeb … -LinuxRpm … -LinuxArchive …`.
 
 ## Ключевые файлы
-- Windows: `src/ConnectionsWindow.cs`, `src/SessionsPage.cs`, `src/Groups.cs`, `src/SshPasswords.cs`, `src/ServerPickerDialog.cs`, `src/Extras.cs`, `src/BackupFiles.cs`, `src/BackupRestore.cs`, новые `src/CatalogKind.cs`, `src/VncProfile.cs`, `src/VncDialog.cs`, `src/Vnc/RfbClient.cs`, `src/Vnc/VncKeys.cs`, `src/Vnc/VncDesktop.cs`, `src/Vnc/VncWindow.cs`, `src/Vnc/SshTunnel.cs`, (желательно) `src/SessionOverlay.cs`.
+- Windows: `src/ConnectionsWindow.cs`, `src/SessionsPage.cs`, `src/Groups.cs`, `src/SshPasswords.cs`, `src/ServerPickerDialog.cs`, `src/Extras.cs`, `src/BackupFiles.cs`, `src/BackupRestore.cs`, новые `src/CatalogKind.cs`, `src/VncProfile.cs`, `src/VncDialog.cs`, `src/VncClient.cs`, `src/VncKeys.cs`, `src/VncDesktop.cs`, `src/VncWindow.cs`, `src/VncTunnel.cs`, `src/RemoteDesktopPanel.cs`.
 - Linux: `linux/ssh_manager/{app,catalog,dialogs,sessions,config,backup,extras}.py`, новый `vnc.py`; `linux/build.sh`, `linux/ssh-manager.spec`, `tests/linux-ui/Dockerfile`.
 - macOS: `macos/Sources/{Manager,ManagerView,Settings,Backups,Extras}.swift`, новые `Vnc.swift`, `VncSession.swift`.
 - Общее: `docs/ui-spec.md`, `tests/vnc/`, `tests/windows/`, `.github/workflows/rdp-check.yml`, `.claude/skills/graphify/`, `.gitignore`, `AGENTS.md`.
 
 ## Проверка (итог)
-1. Windows: сборка; `tests/windows/stage2-logic.ps1` (0 ошибок); `tests/windows/render.ps1` при 1, 1.5, 2 и `-Dark` — VNC-каталог, окно профиля, сеанс; `tests/windows/live-vnc.ps1` против `sshm-vnc` напрямую и `-ViaSsh`; старые `live-ssh.ps1` и `live-rdp.ps1` по-прежнему проходят (регрессия SSH/RDP).
+1. Windows: сборка; `tests/windows/stage2-logic.ps1` (0 ошибок); `tests/windows/render.ps1` при 1, 1.5, 2 и `-Dark` — VNC-каталог, окно профиля, сеанс; `tests/windows/live-vnc.ps1` против `sshm-vnc` напрямую и через SSH; старые `live-ssh.ps1` и `live-rdp.ps1` по-прежнему проходят (регрессия SSH/RDP).
 2. Linux: `unittest` в `sshm-linux-dev` (все тесты, включая `test_vnc.py`); `run-vnc-check.sh` и `run-rdp-check.sh` — `PASS`; снимки `screens.py`.
 3. macOS: CI `build-release.yml` — задание `macos` зелёное, без предупреждений.
 4. CI `rdp-check.yml` — оба задания (`linux-rdp`, `linux-vnc`) зелёные.

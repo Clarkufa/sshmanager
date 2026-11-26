@@ -120,3 +120,4 @@ $s.Form.Dispose()
 (T 'SshTunnel').GetField('ConfigOverride', $NP).SetValue($null, $null)
 Remove-Item -Recurse -Force $dir -ErrorAction SilentlyContinue
 "failures: $failures"
+exit $failures

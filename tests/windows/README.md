@@ -15,6 +15,9 @@
 | `montage.ps1` | Склеивает несколько PNG в один лист для просмотра | `powershell -NoProfile -File tests/windows/montage.ps1 -Out build/sheet.png -Width 2000 a.png b.png …` |
 | `live-ssh.ps1` | Настоящий SSH к стенду `tests/xrdp` (порт 2223): копирование ключа, ProxyJump, LocalForward, команды, автопереподключение | см. ниже |
 | `live-rdp.ps1` | Встроенный RDP к стенду `tests/xrdp` (порт 3390) с папками и принтерами | `powershell -NoProfile -STA -ExecutionPolicy Bypass -File tests/windows/live-rdp.ps1 -Exe build/check/SshManager.exe` |
+| `live-vnc.ps1` | VNC через TigerVNC напрямую и через SSH, изменение разрешения и восстановление после рестарта | `powershell -NoProfile -STA -ExecutionPolicy Bypass -File tests/windows/live-vnc.ps1 -Exe build/check/SshManager.exe` |
+
+Для VNC запустите [стенд TigerVNC](../vnc/README.md). Скрипт перезапускает тестовый контейнер `sshm-vnc` и добавляет в него временный открытый SSH-ключ.
 
 Стенд для живых проверок (только тестовая учётная запись `tester`):
 

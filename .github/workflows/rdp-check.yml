@@ -1,4 +1,4 @@
-name: Embedded RDP check
+name: Embedded RDP and VNC checks
 
 # Runs the Linux app under Xvfb against the throwaway xrdp server in tests/xrdp (test account only)
 # and checks login, the remote resolution following the window, full screen, the separate window
@@ -10,12 +10,14 @@ on:
     paths:
       - 'linux/**'
       - 'tests/xrdp/**'
+      - 'tests/vnc/**'
       - 'tests/linux-ui/**'
       - '.github/workflows/rdp-check.yml'
   pull_request:
     paths:
       - 'linux/**'
       - 'tests/xrdp/**'
+      - 'tests/vnc/**'
       - 'tests/linux-ui/**'
       - '.github/workflows/rdp-check.yml'
 
@@ -36,5 +38,20 @@ jobs:
           name: rdp-check
           path: |
             build/rdp-check.log
+            build/linux-screens/
+          if-no-files-found: ignore
+  linux-vnc:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Embedded VNC against TigerVNC
+        run: sh tests/linux-ui/run-vnc-check.sh
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: vnc-check
+          path: |
+            build/vnc-check.log
             build/linux-screens/
           if-no-files-found: ignore

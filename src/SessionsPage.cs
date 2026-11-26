@@ -634,7 +634,7 @@ namespace SshManager
 
         private void RefreshDetails()
         {
-            selectedTitle.Text = active == null ? "Сеансы SSH и RDP" : active.Title;
+            selectedTitle.Text = active == null ? "Сеансы SSH, RDP и VNC" : active.Title;
             selectedDetail.Text = active == null ? "" : active.Target.Protocol + "  ·  " + active.Target.Address +
                 (active.Target.Group.Length == 0 ? "" : "  ·  " + active.Target.Group) +
                 (active.ForwardingFailed ? "  ·  ошибка проброса порта" : active.Target.WithoutForwarding ? "  ·  без проброса" : "") +

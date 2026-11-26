@@ -12,6 +12,7 @@ namespace SshManager
     internal sealed class BackupCommands
     {
         private const string Filter = "Защищённая копия (*.sshbackup)|*.sshbackup|Архив ZIP (*.zip)|*.zip";
+        private static readonly CatalogKind[] BackupProtocols = { CatalogKind.Ssh, CatalogKind.Rdp, CatalogKind.Vnc };
         private readonly Form owner;
         private readonly string sshDirectory, settingsPath;
         private readonly Action reload;
@@ -47,7 +48,7 @@ namespace SshManager
                     password = dialog.Password;
                 }
             }
-            int passwordCount = 0, desktopPasswordCount = 0;
+            int passwordCount = 0, desktopPasswordCount = 0, vncPasswordCount = 0;
             var snapshot = await Task.Run(() =>
             {
                 var copy = new BackupSnapshot(sshDirectory, settingsPath);
@@ -56,7 +57,7 @@ namespace SshManager
                     if (protect)
                     {
                         passwordCount = copy.AddPasswords();
-                        desktopPasswordCount = copy.AddDesktopPasswords();
+                        desktopPasswordCount = copy.AddDesktopPasswords(out vncPasswordCount);
                     }
                     BackupArchive.Write(path, copy.Files, password);
                     return copy;
@@ -65,8 +66,8 @@ namespace SshManager
             });
             string result = "Резервная копия сохранена.\n\n" + path + "\n\nФайлов ключей и сертификатов: " + snapshot.KeyCount;
             if (snapshot.OmittedCount > 0) result += "\nСсылок на файлы, которые не удалось включить: " + snapshot.OmittedCount;
-            result += protect ? "\nСохранённых паролей SSH: " + passwordCount + ", RDP: " + desktopPasswordCount
-                : "\nZIP сохраняет подключения без паролей SSH и RDP.";
+            result += protect ? "\nСохранённых паролей SSH: " + passwordCount + ", RDP: " + desktopPasswordCount + ", VNC: " + vncPasswordCount
+                : "\nZIP сохраняет подключения без паролей SSH, RDP и VNC.";
             if (!owner.IsDisposed) MessageBox.Show(owner, result, "Экспорт резервной копии", MessageBoxButtons.OK, MessageBoxIcon.Information);
         }
 
@@ -106,13 +107,15 @@ namespace SshManager
 
                 var summary = "Импортировать резервную копию?\n\nНовых файлов: " + (plan.ChangeCount - plan.ReplaceCount) +
                     "\nЗаменяемых файлов: " + plan.ReplaceCount;
-                int sshPasswords = plan.PasswordCount - plan.DesktopPasswordCount;
-                int sshReplaced = plan.PasswordReplaceCount - plan.DesktopPasswordReplaceCount;
-                if (sshPasswords > 0)
-                    summary += "\nНовых SSH-паролей: " + (sshPasswords - sshReplaced) + "\nЗаменяемых SSH-паролей: " + sshReplaced;
-                if (plan.DesktopPasswordCount > 0)
-                    summary += "\nНовых RDP-паролей: " + (plan.DesktopPasswordCount - plan.DesktopPasswordReplaceCount) +
-                        "\nЗаменяемых RDP-паролей: " + plan.DesktopPasswordReplaceCount;
+                foreach (var kind in BackupProtocols)
+                {
+                    int count = plan.CountPasswords(kind);
+                    if (count == 0) continue;
+                    int replaced = plan.CountReplacedPasswords(kind);
+                    string protocol = kind.ToString().ToUpperInvariant();
+                    summary += "\nНовых " + protocol + "-паролей: " + (count - replaced) +
+                        "\nЗаменяемых " + protocol + "-паролей: " + replaced;
+                }
                 if (plan.ReplaceCount > 0)
                 {
                     summary += "\n\nПредыдущие версии этих файлов будут сохранены:\n" + String.Join("\n", plan.Replacements.Take(7));
@@ -126,8 +129,8 @@ namespace SshManager
                 reload();
                 string result = "Резервная копия восстановлена.";
                 if (plan.PasswordCount > 0)
-                    result += "\nВосстановлено паролей SSH: " + (plan.PasswordCount - plan.DesktopPasswordCount) +
-                        ", RDP: " + plan.DesktopPasswordCount;
+                    result += "\nВосстановлено паролей " + String.Join(", ", BackupProtocols.Select(kind =>
+                        kind.ToString().ToUpperInvariant() + ": " + plan.CountPasswords(kind)));
                 if (previous.Count > 0) result += "\n\nПредыдущие файлы сохранены здесь:\n" + String.Join("\n", previous);
                 MessageBox.Show(owner, result, "Импорт резервной копии", MessageBoxButtons.OK, MessageBoxIcon.Information);
             }
@@ -166,7 +169,7 @@ namespace SshManager
             {
                 int row = layout.RowStyles.Count;
                 layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 28));
-                layout.Controls.Add(new Label { Text = "Защищённая копия включает сохранённые пароли SSH и RDP.",
+                layout.Controls.Add(new Label { Text = "Защищённая копия включает сохранённые пароли SSH, RDP и VNC.",
                     AutoSize = true, ForeColor = Theme.Muted, Margin = new Padding(0) }, 0, row);
             }
             var buttons = new FlowLayoutPanel { Dock = DockStyle.Fill, FlowDirection = FlowDirection.RightToLeft, WrapContents = false };
