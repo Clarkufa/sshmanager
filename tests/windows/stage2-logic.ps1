@@ -46,6 +46,29 @@ Check 'rdp options written' ($xml.tabs.rdp.drives -eq 'C:\Data;D:\' -and $xml.ta
 Throws 'drive outside a local disk rejected' { New 'RdpOptions' @([string[]]@('\\server\share'), $false, $false, '', '') }
 Throws 'bad gateway rejected' { New 'RdpOptions' @([string[]]@(), $false, $false, 'gw example', '') }
 
+# --- VNC profiles in tabs.xml
+$vncTabs = Join-Path $dir 'vnc.xml'
+@'
+<tabs vncSort="name">
+  <tab id="bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" name="Цех" vncSort="addressDescending"/>
+  <vnc id="66666666666666666666666666666666" name="Камера" host="10.0.0.7" port="5901" user="" group="bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" scale="native" viewOnly="1" clipboard="0" via="bastion"/>
+  <vnc id="77777777777777777777777777777777" name="Сборка" host="build.local" via="bad alias"/>
+</tabs>
+'@ | Set-Content -Encoding UTF8 $vncTabs
+$vf = New 'GroupFile' @($vncTabs)
+$vg = $vf.Load()
+$v = $vg.Vnc[0]
+Check 'vnc parsed' ($vg.Vnc.Count -eq 2 -and $v.Port -eq 5901 -and $v.Scale -eq 'native' -and $v.ViewOnly -and -not $v.Clipboard -and $v.Via -eq 'bastion' -and $v.GroupId -eq 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb')
+Check 'vnc defaults and a broken via dropped' ($vg.Vnc[1].Port -eq 5900 -and $vg.Vnc[1].Clipboard -and $vg.Vnc[1].Via -eq '' -and $vg.Vnc[1].Scale -eq 'fit')
+Check 'vnc sort per tab' ((Call $vg 'Sort' @('bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb', [Enum]::Parse((T 'CatalogKind'), 'Vnc'))).ToString() -eq 'AddressDescending')
+$removeTab = [scriptblock]{ param($x) Call $x 'RemoveTab' @('bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb') | Out-Null } -as [Action`1].MakeGenericType((T 'Groups'))
+Call $vf 'Update' @($removeTab) | Out-Null
+$vxml = [xml](Get-Content $vncTabs -Raw)
+Check 'removing the tab keeps the VNC profile ungrouped' (@($vxml.tabs.vnc).Count -eq 2 -and -not $vxml.tabs.vnc[0].group -and $vxml.tabs.vncSort -eq 'Name')
+Throws 'vnc profile rejects a bad via' { New 'VncProfile' @('88888888888888888888888888888888', 'x', 'h', 5900, '', $null, 'fit', $false, $true, $false, 'a b') }
+$qv = New 'QuickTarget' @('vnc://pi@10.1.1.5')
+Check 'quick vnc parse' ($qv.Vnc -and -not $qv.Rdp -and $qv.Port -eq 5900 -and $qv.User -eq 'pi')
+
 # --- .rdp export and import keep the options
 $rdpFile = Join-Path $dir 'pc.rdp'
 $d.Export($rdpFile)
@@ -114,15 +137,16 @@ $mr = Join-Path $dir 'confCons.xml'
 <mrng:Connections xmlns:mrng="http://mremoteng.org" Name="Connections" ConfVersion="2.6">
   <Node Name="Folder" Type="Container"><Node Name="web" Type="Connection" Protocol="SSH2" Hostname="10.0.0.5" Port="2222" Username="root" Password="ENC"/></Node>
   <Node Name="pc" Type="Connection" Protocol="RDP" Hostname="pc.local" Port="3389" Username="ivan" Domain="CORP"/>
-  <Node Name="vnc" Type="Connection" Protocol="VNC" Hostname="v"/>
+  <Node Name="vnc" Type="Connection" Protocol="VNC" Hostname="v" Port="5901"/>
+  <Node Name="tel" Type="Connection" Protocol="Telnet" Hostname="t"/>
 </mrng:Connections>
 '@ | Set-Content -Encoding UTF8 $mr
 $found = Call (T 'Importers') 'Read' @($mr)
-Check 'mRemoteNG: SSH and RDP, VNC skipped' ($found.Count -eq 2 -and $found[0].Name -eq 'web' -and $found[0].Port -eq 2222 -and $found[1].Rdp -and $found[1].Domain -eq 'CORP')
+Check 'mRemoteNG: SSH, RDP and VNC, Telnet skipped' ($found.Count -eq 3 -and $found[0].Name -eq 'web' -and $found[0].Port -eq 2222 -and $found[1].Rdp -and $found[1].Domain -eq 'CORP' -and $found[2].Vnc -and $found[2].Port -eq 5901)
 $moba = Join-Path $dir 'list.mxtsessions'
-"[Bookmarks]`r`nSubRep=`r`nImgNum=42`r`nsrv=#109#0%192.168.1.10%22%admin%%-1%-1%`r`nwin=#91#4%10.0.0.9%3389%user%-1%`r`ntelnet=#98#1%h%23%%" | Set-Content -Encoding UTF8 $moba
+"[Bookmarks]`r`nSubRep=`r`nImgNum=42`r`nsrv=#109#0%192.168.1.10%22%admin%%-1%-1%`r`nwin=#91#4%10.0.0.9%3389%user%-1%`r`nscreen=#128#5%10.0.0.10%5900%%-1%`r`ntelnet=#98#1%h%23%%" | Set-Content -Encoding UTF8 $moba
 $found = Call (T 'Importers') 'Read' @($moba)
-Check 'MobaXterm: SSH and RDP, telnet skipped' ($found.Count -eq 2 -and $found[0].Host -eq '192.168.1.10' -and $found[0].User -eq 'admin' -and $found[1].Rdp)
+Check 'MobaXterm: SSH, RDP and VNC, telnet skipped' ($found.Count -eq 3 -and $found[0].Host -eq '192.168.1.10' -and $found[0].User -eq 'admin' -and $found[1].Rdp -and $found[2].Vnc -and $found[2].Protocol -eq 'VNC')
 $putty = Call (T 'Importers') 'PuTTY' @()
 "info  PuTTY sessions on this PC: $($putty.Count)"
 

@@ -13,7 +13,7 @@ namespace SshManager
         public readonly string Id;
         public string Name;
         public string ColorId;
-        public ServerSort SshSort, RdpSort;
+        public ServerSort SshSort, RdpSort, VncSort;
         public readonly HashSet<string> Aliases = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
         public ServerGroup(string id, string name) { Id = id; Name = name; }
@@ -63,7 +63,8 @@ namespace SshManager
         public const string UngroupedName = "Без вкладки";
         public readonly List<ServerGroup> Items = new List<ServerGroup>();
         public readonly List<RdpProfile> Desktops = new List<RdpProfile>();
-        public ServerSort SshSort, RdpSort;
+        public readonly List<VncProfile> Vnc = new List<VncProfile>();
+        public ServerSort SshSort, RdpSort, VncSort;
         public string StartupTabId { get; private set; }
         public bool DarkTheme { get; set; }
         public readonly List<string> Favorites = new List<string>();
@@ -74,6 +75,7 @@ namespace SshManager
         /// <summary>"ssh:alias" (lower case, as on macOS and Linux) or "rdp:id".</summary>
         public static string Key(string alias) => "ssh:" + alias.ToLowerInvariant();
         public static string Key(RdpProfile profile) => "rdp:" + profile.Id;
+        public static string Key(VncProfile profile) => "vnc:" + profile.Id;
 
         public bool IsFavorite(string key) => Favorites.Contains(key, StringComparer.OrdinalIgnoreCase);
 
@@ -106,25 +108,48 @@ namespace SshManager
         public ServerGroup Find(string id) { return Items.FirstOrDefault(group => group.Id == id); }
         public ServerGroup ForAlias(string alias) { return Items.FirstOrDefault(group => group.Aliases.Contains(alias)); }
 
-        public ServerSort Sort(string id, bool rdp)
+        public ServerSort Sort(string id, CatalogKind kind)
         {
             var tab = Find(id);
-            return rdp ? tab?.RdpSort ?? RdpSort : tab?.SshSort ?? SshSort;
+            switch (kind)
+            {
+                case CatalogKind.Rdp: return tab?.RdpSort ?? RdpSort;
+                case CatalogKind.Vnc: return tab?.VncSort ?? VncSort;
+                default: return tab?.SshSort ?? SshSort;
+            }
         }
 
-        public void SetSort(string id, bool rdp, ServerSort sort)
+        public void SetSort(string id, CatalogKind kind, ServerSort sort)
         {
             if (id == null)
             {
-                if (rdp) RdpSort = sort;
+                if (kind == CatalogKind.Rdp) RdpSort = sort;
+                else if (kind == CatalogKind.Vnc) VncSort = sort;
                 else SshSort = sort;
             }
             else
             {
                 var tab = RequireTab(id);
-                if (rdp) tab.RdpSort = sort;
+                if (kind == CatalogKind.Rdp) tab.RdpSort = sort;
+                else if (kind == CatalogKind.Vnc) tab.VncSort = sort;
                 else tab.SshSort = sort;
             }
+        }
+
+        public void SaveVnc(VncProfile profile, bool editing)
+        {
+            if (profile.GroupId != null) RequireTab(profile.GroupId);
+            int index = Vnc.FindIndex(item => item.Id == profile.Id);
+            if (index < 0 && editing) throw new InvalidOperationException("VNC-профиль уже удалён. Обновите список.");
+            if (index < 0) Vnc.Add(profile);
+            else Vnc[index] = profile;
+        }
+
+        public void MoveVnc(string id, string groupId)
+        {
+            var profile = Vnc.FirstOrDefault(item => item.Id == id);
+            if (profile == null) throw new InvalidOperationException("VNC-профиль уже удалён. Обновите список.");
+            SaveVnc(profile.InGroup(groupId), true);
         }
 
         public void SaveDesktop(RdpProfile profile, bool editing)
@@ -196,6 +221,8 @@ namespace SshManager
             Items.RemoveAll(group => group.Id == id);
             for (int i = 0; i < Desktops.Count; i++)
                 if (Desktops[i].GroupId == id) Desktops[i] = Desktops[i].InGroup(null);
+            for (int i = 0; i < Vnc.Count; i++)
+                if (Vnc[i].GroupId == id) Vnc[i] = Vnc[i].InGroup(null);
             if (StartupTabId == id) StartupTabId = null;
         }
 
@@ -239,6 +266,7 @@ namespace SshManager
             groups.DarkTheme = (string)root.Attribute("theme") == "dark";
             groups.SshSort = ServerOrder.Parse((string)root.Attribute("sshSort"));
             groups.RdpSort = ServerOrder.Parse((string)root.Attribute("rdpSort"));
+            groups.VncSort = ServerOrder.Parse((string)root.Attribute("vncSort"));
             ParseExtras(root, groups);
             var known = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             foreach (var node in root.Elements("tab"))
@@ -253,6 +281,7 @@ namespace SshManager
                 group.ColorId = (string)node.Attribute("color");
                 group.SshSort = ServerOrder.Parse((string)node.Attribute("sshSort"));
                 group.RdpSort = ServerOrder.Parse((string)node.Attribute("rdpSort"));
+                group.VncSort = ServerOrder.Parse((string)node.Attribute("vncSort"));
                 foreach (var host in node.Elements("host"))
                 {
                     var alias = (string)host.Attribute("alias");
@@ -266,6 +295,13 @@ namespace SshManager
                 var profile = RdpProfile.Parse(node, groups.Find((string)node.Attribute("group"))?.Id);
                 if (!desktopIds.Add(profile.Id)) throw new XmlException("Повторяющийся идентификатор RDP-профиля.");
                 groups.Desktops.Add(profile);
+            }
+            var vncIds = new HashSet<string>();
+            foreach (var node in root.Elements("vnc"))
+            {
+                var profile = VncProfile.Parse(node, groups.Find((string)node.Attribute("group"))?.Id);
+                if (!vncIds.Add(profile.Id)) throw new XmlException("Повторяющийся идентификатор VNC-профиля.");
+                groups.Vnc.Add(profile);
             }
             string startup = (string)root.Attribute("startupTab");
             if (groups.Find(startup) != null) groups.SetStartupTab(startup);
@@ -349,14 +385,17 @@ namespace SshManager
                         latest.StartupTabId == null ? null : new XAttribute("startupTab", latest.StartupTabId),
                         latest.DarkTheme ? new XAttribute("theme", "dark") : null,
                         SortAttribute("sshSort", latest.SshSort), SortAttribute("rdpSort", latest.RdpSort),
+                        SortAttribute("vncSort", latest.VncSort),
                         WriteExtras(latest),
                         latest.Items.Select(group =>
                         new XElement("tab", new XAttribute("id", group.Id), new XAttribute("name", group.Name),
                             group.ColorId == null ? null : new XAttribute("color", group.ColorId),
                             SortAttribute("sshSort", group.SshSort), SortAttribute("rdpSort", group.RdpSort),
+                            SortAttribute("vncSort", group.VncSort),
                             group.Aliases.OrderBy(alias => alias, StringComparer.OrdinalIgnoreCase)
                                 .Select(alias => new XElement("host", new XAttribute("alias", alias))))),
-                        latest.Desktops.Select(profile => profile.ToXml())));
+                        latest.Desktops.Select(profile => profile.ToXml()),
+                        latest.Vnc.Select(profile => profile.ToXml())));
                     using (var stream = new FileStream(temp, FileMode.CreateNew, FileAccess.Write, FileShare.None))
                     {
                         document.Save(stream);

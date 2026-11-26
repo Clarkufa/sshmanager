@@ -13,15 +13,16 @@ namespace SshManager
         private readonly ListBox list;
         private readonly Button connect;
         private readonly Label status;
-        private readonly SurfaceButton sshTab, rdpTab;
+        private readonly SurfaceButton sshTab, rdpTab, vncTab;
         private readonly string[] recent;
-        private bool showRdp;
+        private CatalogKind kind;
 
-        public ServerPickerDialog(IEnumerable<Connection> connections, Groups groups, bool preferRdp)
+        public ServerPickerDialog(IEnumerable<Connection> connections, Groups groups, CatalogKind preferred)
         {
             recent = groups.Recent.Select(entry => entry.Key).ToArray();
             choices = connections.Select(connection => new Choice(connection, groups.ForAlias(connection.Alias)))
                 .Concat(groups.Desktops.Select(profile => new Choice(profile, groups.Find(profile.GroupId))))
+                .Concat(groups.Vnc.Select(profile => new Choice(profile, groups.Find(profile.GroupId))))
                 .OrderBy(choice => choice.Target.Alias, StringComparer.OrdinalIgnoreCase).ToArray();
             Text = "Новый сеанс";
             Font = Theme.Body;
@@ -46,10 +47,12 @@ namespace SshManager
             var protocols = new FlowLayoutPanel { Dock = DockStyle.Fill, WrapContents = false, Margin = Padding.Empty };
             sshTab = Theme.Button("SSH", 86, glyph: Glyph.Terminal);
             rdpTab = Theme.Button("RDP", 86, glyph: Glyph.Server);
-            sshTab.AccessibleRole = rdpTab.AccessibleRole = AccessibleRole.PageTab;
-            sshTab.Click += (sender, args) => SelectProtocol(false);
-            rdpTab.Click += (sender, args) => SelectProtocol(true);
-            protocols.Controls.AddRange(new Control[] { sshTab, rdpTab });
+            vncTab = Theme.Button("VNC", 86, glyph: Glyph.Server);
+            sshTab.AccessibleRole = rdpTab.AccessibleRole = vncTab.AccessibleRole = AccessibleRole.PageTab;
+            sshTab.Click += (sender, args) => SelectProtocol(CatalogKind.Ssh);
+            rdpTab.Click += (sender, args) => SelectProtocol(CatalogKind.Rdp);
+            vncTab.Click += (sender, args) => SelectProtocol(CatalogKind.Vnc);
+            protocols.Controls.AddRange(new Control[] { sshTab, rdpTab, vncTab });
             layout.Controls.Add(protocols, 0, 0);
             var filter = new ServerSearch { Dock = DockStyle.Top };
             search = filter.Input;
@@ -85,19 +88,21 @@ namespace SshManager
                 if (next >= 0 && next < list.Items.Count) list.SelectedIndex = next;
                 args.SuppressKeyPress = true;
             };
-            SelectProtocol(preferRdp);
+            SelectProtocol(preferred);
             Theme.ScaleToDpi(this);
             ResumeLayout();
         }
 
         public Connection SelectedConnection { get; private set; }
         public RdpProfile SelectedProfile { get; private set; }
+        public VncProfile SelectedVnc { get; private set; }
 
-        private void SelectProtocol(bool rdp)
+        private void SelectProtocol(CatalogKind next)
         {
-            showRdp = rdp;
-            sshTab.Style = rdp ? ButtonStyle.Tab : ButtonStyle.SelectedTab;
-            rdpTab.Style = rdp ? ButtonStyle.SelectedTab : ButtonStyle.Tab;
+            kind = next;
+            sshTab.Style = next == CatalogKind.Ssh ? ButtonStyle.SelectedTab : ButtonStyle.Tab;
+            rdpTab.Style = next == CatalogKind.Rdp ? ButtonStyle.SelectedTab : ButtonStyle.Tab;
+            vncTab.Style = next == CatalogKind.Vnc ? ButtonStyle.SelectedTab : ButtonStyle.Tab;
             ActiveControl = search;
             Filter();
         }
@@ -108,13 +113,14 @@ namespace SshManager
             if (choice == null) return;
             SelectedConnection = choice.Connection;
             SelectedProfile = choice.Target.Desktop;
+            SelectedVnc = choice.Target.Vnc;
             DialogResult = DialogResult.OK;
         }
 
         private void Filter()
         {
             string query = search.Text.Trim();
-            var candidates = choices.Where(choice => (choice.Target.Desktop != null) == showRdp).ToArray();
+            var candidates = choices.Where(choice => choice.Kind == kind).ToArray();
             var visible = candidates.Where(choice => new[] { choice.Target.Alias, choice.Target.Address, choice.Target.Group }
                 .Any(value => value.IndexOf(query, StringComparison.OrdinalIgnoreCase) >= 0)).ToArray();
             // «Недавние» (up to 5) before the full list while the search is empty (docs/ui-spec.md §7).
@@ -176,13 +182,18 @@ namespace SshManager
         {
             public readonly Connection Connection;
             public readonly SessionTarget Target;
-            public string Key => Target.Desktop != null ? Groups.Key(Target.Desktop) : Groups.Key(Connection.Alias);
+            public string Key => Target.Desktop != null ? Groups.Key(Target.Desktop) : Target.Vnc != null ? Groups.Key(Target.Vnc) : Groups.Key(Connection.Alias);
+            public CatalogKind Kind => Target.Desktop != null ? CatalogKind.Rdp : Target.Vnc != null ? CatalogKind.Vnc : CatalogKind.Ssh;
             public Choice(Connection connection, ServerGroup group)
             {
                 Connection = connection;
                 Target = new SessionTarget(connection, group);
             }
             public Choice(RdpProfile profile, ServerGroup group)
+            {
+                Target = new SessionTarget(profile, group);
+            }
+            public Choice(VncProfile profile, ServerGroup group)
             {
                 Target = new SessionTarget(profile, group);
             }

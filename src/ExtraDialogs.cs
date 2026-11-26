@@ -233,7 +233,7 @@ namespace SshManager
             {
                 list.Items.Clear();
                 foreach (var item in found)
-                    list.Items.Add(new ListViewItem(new[] { item.Rdp ? "RDP" : "SSH", item.Name, item.Address, item.Source })
+                    list.Items.Add(new ListViewItem(new[] { item.Protocol, item.Name, item.Address, item.Source })
                     { Checked = true, Tag = item });
             }
             finally { list.EndUpdate(); }

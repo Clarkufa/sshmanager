@@ -15,7 +15,7 @@ namespace SshManager
 
     internal static class ServerOrder
     {
-        public static ServerSort Parse(string value) => Enum.TryParse(value, out ServerSort order) && Enum.IsDefined(typeof(ServerSort), order)
+        public static ServerSort Parse(string value) => Enum.TryParse(value, true, out ServerSort order) && Enum.IsDefined(typeof(ServerSort), order)
             ? order : ServerSort.Original;
 
         public static IEnumerable<T> Apply<T>(IEnumerable<T> values, ServerSort order, Func<T, string> name, Func<T, string> host)

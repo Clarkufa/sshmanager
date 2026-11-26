@@ -45,7 +45,7 @@ namespace SshManager
         private readonly Label status;
         private readonly Label empty;
         private readonly Label catalogTitle;
-        private readonly SurfaceButton sshTab, rdpTab;
+        private readonly SurfaceButton sshTab, rdpTab, vncTab;
         private readonly string settingsPath;
         private readonly ContextMenuStrip serverMenu;
         private ContextMenuStrip desktopMenu;
@@ -64,7 +64,8 @@ namespace SshManager
         private ConfigDocument document;
         private string activeGroupId;
         private SessionsPage sessions;
-        private bool showRdp;
+        private CatalogKind kind = CatalogKind.Ssh;
+        private bool showRdp => kind == CatalogKind.Rdp;
 
         public ConnectionsWindow(string sshDirectory, string groupsPath)
         {
@@ -107,7 +108,12 @@ namespace SshManager
             pages.Controls.Add(layout);
 
             add = Theme.Button("Добавить сервер", 158, true, Glyph.Plus);
-            add.Click += (sender, args) => { if (showRdp) EditDesktop(null); else EditConnection(null); };
+            add.Click += (sender, args) =>
+            {
+                if (kind == CatalogKind.Rdp) EditDesktop(null);
+                else if (kind == CatalogKind.Vnc) EditVnc(null);
+                else EditConnection(null);
+            };
             var header = catalogHeader = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 6, Margin = new Padding(0, 0, 0, 7) };
             header.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 51));
             header.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
@@ -139,18 +145,20 @@ namespace SshManager
             var protocols = new FlowLayoutPanel { Dock = DockStyle.Fill, WrapContents = false, Margin = Padding.Empty };
             sshTab = Theme.Button("SSH", 86, glyph: Glyph.Terminal);
             rdpTab = Theme.Button("RDP", 86, glyph: Glyph.Server);
-            sshTab.AccessibleRole = rdpTab.AccessibleRole = AccessibleRole.PageTab;
+            vncTab = Theme.Button("VNC", 86, glyph: Glyph.Server);
+            sshTab.AccessibleRole = rdpTab.AccessibleRole = vncTab.AccessibleRole = AccessibleRole.PageTab;
             sshTab.Style = ButtonStyle.SelectedTab;
-            rdpTab.Style = ButtonStyle.Tab;
-            sshTab.Click += (sender, args) => SelectProtocol(false);
-            rdpTab.Click += (sender, args) => SelectProtocol(true);
-            protocols.Controls.AddRange(new Control[] { sshTab, rdpTab });
+            rdpTab.Style = vncTab.Style = ButtonStyle.Tab;
+            sshTab.Click += (sender, args) => SelectProtocol(CatalogKind.Ssh);
+            rdpTab.Click += (sender, args) => SelectProtocol(CatalogKind.Rdp);
+            vncTab.Click += (sender, args) => SelectProtocol(CatalogKind.Vnc);
+            protocols.Controls.AddRange(new Control[] { sshTab, rdpTab, vncTab });
             var protocolRow = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2, Margin = Padding.Empty };
             protocolRow.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
             protocolRow.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 310));
             protocolRow.Controls.Add(protocols, 0, 0);
             quick = new TextBox { AccessibleName = "Быстрое подключение", MaxLength = 300 };
-            Theme.SetCue(quick, "Быстрое подключение: user@host или rdp://host");
+            Theme.SetCue(quick, "Быстрое подключение: user@host, rdp:// или vnc://");
             hints.SetToolTip(quick, "Подключиться без сохранения профиля. Enter — подключиться.");
             quick.KeyDown += (sender, args) =>
             {
@@ -207,7 +215,12 @@ namespace SshManager
             backupMenu.Items.Add(Theme.MenuItem("Импорт из других программ…", Glyph.Folder, (sender, args) => ImportOther()));
             backupButton.Click += (sender, args) => backupMenu.Show(backupButton, new Point(0, backupButton.Height));
             edit.Click += (sender, args) => EditRow(grid.CurrentRow?.Tag);
-            delete.Click += (sender, args) => { if (showRdp) DeleteDesktop(SelectedDesktop); else DeleteConnection(Selected); };
+            delete.Click += (sender, args) =>
+            {
+                if (kind == CatalogKind.Rdp) DeleteDesktop(SelectedDesktop);
+                else if (kind == CatalogKind.Vnc) DeleteVnc(SelectedVnc);
+                else DeleteConnection(Selected);
+            };
             refresh.Click += (sender, args) => Reload();
             actions.Controls.AddRange(new Control[] { backupButton, refresh, edit, delete });
             hints.SetToolTip(add, "Ctrl+N");
@@ -423,6 +436,17 @@ namespace SshManager
             QuickTarget target;
             try { target = new QuickTarget(quick.Text); }
             catch (ArgumentException error) { Theme.ShowError(this, error); return; }
+            if (target.Vnc)
+            {
+                VncProfile vnc;
+                try { vnc = new VncProfile(Guid.NewGuid().ToString("N"), target.Host, target.Host, target.Port, target.User, ActiveTabId); }
+                catch (ArgumentException error) { Theme.ShowError(this, error); return; }
+                quick.Clear();
+                ConnectVnc(vnc, forceNew: true);
+                if (!Ask("Сохранить подключение «" + vnc.Name + "»?")) return;
+                UpdateGroups(items => items.SaveVnc(vnc, false), activeGroupId, vnc.Id);
+                return;
+            }
             if (target.Rdp)
             {
                 RdpProfile profile;
@@ -479,7 +503,7 @@ namespace SshManager
             int added = 0;
             var problems = new List<string>();
             string tab = ActiveTabId;
-            var ssh = chosen.Where(item => !item.Rdp).ToList();
+            var ssh = chosen.Where(item => !item.Rdp && !item.Vnc).ToList();
             if (ssh.Count > 0 && document != null)
             {
                 var next = new ConfigDocument(document.ToString());
@@ -511,12 +535,23 @@ namespace SshManager
                     item.Host, item.Port, item.User, item.Domain, tab)); }
                 catch (ArgumentException error) { problems.Add(item.Name + ": " + error.Message); }
             }
-            if (desktops.Count > 0)
+            var vncProfiles = new List<VncProfile>();
+            foreach (var item in chosen.Where(item => item.Vnc))
+            {
+                try { vncProfiles.Add(new VncProfile(Guid.NewGuid().ToString("N"), item.Name.Length > 80 ? item.Name.Substring(0, 80) : item.Name,
+                    item.Host, item.Port, item.User, tab)); }
+                catch (ArgumentException error) { problems.Add(item.Name + ": " + error.Message); }
+            }
+            if (desktops.Count > 0 || vncProfiles.Count > 0)
             {
                 try
                 {
-                    groups = groupFile.Update(items => { foreach (var profile in desktops) items.SaveDesktop(profile, false); });
-                    added += desktops.Count;
+                    groups = groupFile.Update(items =>
+                    {
+                        foreach (var profile in desktops) items.SaveDesktop(profile, false);
+                        foreach (var profile in vncProfiles) items.SaveVnc(profile, false);
+                    });
+                    added += desktops.Count + vncProfiles.Count;
                 }
                 catch (Exception ex) when (Theme.IsFileError(ex) || ex is InvalidOperationException) { problems.Add(ex.Message); }
             }
@@ -557,19 +592,22 @@ namespace SshManager
             catch (Exception ex) when (Theme.IsFileError(ex) || ex is ArgumentException || ex is ExternalException) { Theme.ShowError(this, ex); }
         }
         private RdpProfile SelectedDesktop => grid.CurrentRow?.Tag as RdpProfile;
-        private string SelectedKey => SelectedDesktop?.Id ?? Selected?.Alias;
+        private VncProfile SelectedVnc => grid.CurrentRow?.Tag as VncProfile;
+        private string SelectedKey => SelectedDesktop?.Id ?? SelectedVnc?.Id ?? Selected?.Alias;
 
-        private void SelectProtocol(bool rdp)
+        private void SelectProtocol(CatalogKind next)
         {
-            if (showRdp == rdp) return;
-            showRdp = rdp;
-            sshTab.Style = rdp ? ButtonStyle.Tab : ButtonStyle.SelectedTab;
-            rdpTab.Style = rdp ? ButtonStyle.SelectedTab : ButtonStyle.Tab;
-            catalogTitle.Text = rdp ? "RDP-подключения" : "SSH-подключения";
-            grid.Columns[0].HeaderText = rdp ? "Название" : "Псевдоним";
-            grid.Columns[TerminalColumn].HeaderText = rdp ? "Рабочий стол" : "Терминал";
-            grid.Columns[FilesColumn].Visible = !rdp;
-            source.Text = rdp ? settingsPath : Path.Combine(sshDirectory, "config");
+            if (kind == next) return;
+            kind = next;
+            bool desktop = next != CatalogKind.Ssh;
+            sshTab.Style = next == CatalogKind.Ssh ? ButtonStyle.SelectedTab : ButtonStyle.Tab;
+            rdpTab.Style = next == CatalogKind.Rdp ? ButtonStyle.SelectedTab : ButtonStyle.Tab;
+            vncTab.Style = next == CatalogKind.Vnc ? ButtonStyle.SelectedTab : ButtonStyle.Tab;
+            catalogTitle.Text = next == CatalogKind.Rdp ? "RDP-подключения" : next == CatalogKind.Vnc ? "VNC-подключения" : "SSH-подключения";
+            grid.Columns[0].HeaderText = desktop ? "Название" : "Псевдоним";
+            grid.Columns[TerminalColumn].HeaderText = desktop ? "Рабочий стол" : "Терминал";
+            grid.Columns[FilesColumn].Visible = !desktop;
+            source.Text = desktop ? settingsPath : Path.Combine(sshDirectory, "config");
             hints.SetToolTip(source, source.Text);
             search.Clear();
             RefreshList(null);
@@ -578,11 +616,12 @@ namespace SshManager
         private void SortColumn(int index)
         {
             string tab = ActiveTabId;
-            var current = groups.Sort(tab, showRdp);
+            var current = groups.Sort(tab, kind);
             var ascending = index == 0 ? ServerSort.Name : ServerSort.Address;
             var descending = index == 0 ? ServerSort.NameDescending : ServerSort.AddressDescending;
             var next = current == ascending ? descending : current == descending ? ServerSort.Original : ascending;
-            UpdateGroups(items => items.SetSort(tab, showRdp, next), activeGroupId, SelectedKey);
+            var protocol = kind;
+            UpdateGroups(items => items.SetSort(tab, protocol, next), activeGroupId, SelectedKey);
         }
 
         private async Task CheckUpdates(bool interactive)
@@ -707,14 +746,15 @@ namespace SshManager
         private void RefreshList(string selectAlias)
         {
             grid.Rows.Clear();
-            var order = groups.Sort(ActiveTabId, showRdp);
+            var order = groups.Sort(ActiveTabId, kind);
             bool favorites = activeGroupId == FavoritesId;
             grid.Columns[0].HeaderCell.SortGlyphDirection = order == ServerSort.Name ? SortOrder.Ascending :
                 order == ServerSort.NameDescending ? SortOrder.Descending : SortOrder.None;
             grid.Columns[1].HeaderCell.SortGlyphDirection = order == ServerSort.Address ? SortOrder.Ascending :
                 order == ServerSort.AddressDescending ? SortOrder.Descending : SortOrder.None;
             var activeGroup = groups.Find(activeGroupId);
-            if (showRdp) { RefreshDesktops(selectAlias, order, activeGroup); return; }
+            if (kind == CatalogKind.Rdp) { RefreshDesktops(selectAlias, order, activeGroup); return; }
+            if (kind == CatalogKind.Vnc) { RefreshVnc(selectAlias, order, activeGroup); return; }
             var connections = document == null ? new Connection[0] : document.Connections()
                 .Where(connection => (activeGroup == null || activeGroup.Aliases.Contains(connection.Alias)) &&
                     (!favorites || groups.IsFavorite(Groups.Key(connection.Alias)))).ToArray();
@@ -762,6 +802,26 @@ namespace SshManager
             UpdateListStatus(desktops.Length);
         }
 
+        private void RefreshVnc(string selected, ServerSort order, ServerGroup activeGroup)
+        {
+            var profiles = groups.Vnc.Where(profile => (activeGroup == null || profile.GroupId == activeGroup.Id) &&
+                (activeGroupId != FavoritesId || groups.IsFavorite(Groups.Key(profile)))).ToArray();
+            var query = search.Text.Trim();
+            foreach (var profile in ServerOrder.Apply(profiles, order, item => item.Name, item => item.Host))
+            {
+                var groupName = groups.Find(profile.GroupId)?.Name ?? "";
+                if (!new[] { profile.Name, profile.Address, profile.User, groupName, profile.Via }
+                    .Any(value => value.IndexOf(query, StringComparison.OrdinalIgnoreCase) >= 0)) continue;
+                var row = grid.Rows[grid.Rows.Add(profile.Name, profile.Host, Dash(profile.User), profile.Port, Dash(groupName),
+                    "", SessionAction(profile.Key))];
+                row.Tag = profile;
+                if (profile.Id == selected) grid.CurrentCell = row.Cells[0];
+            }
+            empty.Text = profiles.Length > 0 ? "По вашему запросу ничего не найдено." : activeGroupId == FavoritesId ? FavoritesHint :
+                "Добавьте VNC-подключение.";
+            UpdateListStatus(profiles.Length);
+        }
+
         private void UpdateListStatus(int total)
         {
             empty.Visible = grid.Rows.Count == 0;
@@ -771,7 +831,7 @@ namespace SshManager
 
         private void UpdateActions()
         {
-            add.Enabled = showRdp || document != null;
+            add.Enabled = kind != CatalogKind.Ssh || document != null;
             edit.Enabled = delete.Enabled = grid.CurrentRow?.Tag != null;
         }
 
@@ -785,6 +845,88 @@ namespace SshManager
         {
             if (entry is Connection connection) EditConnection(connection);
             else if (entry is RdpProfile profile) EditDesktop(profile);
+            else if (entry is VncProfile vnc) EditVnc(vnc);
+        }
+
+        /// <summary>«Новое VNC-подключение» / «Изменить VNC-подключение»; the password lives in Credential Manager.</summary>
+        private void EditVnc(VncProfile profile)
+        {
+            string selected = null;
+            bool hasPassword = false;
+            try { hasPassword = profile != null && VncPasswords.Exists(profile); }
+            catch (IOException error) { Theme.ShowError(this, error); }
+            var aliases = document == null ? new string[0] : document.Connections().Select(item => item.Alias).ToArray();
+            using (var dialog = new VncDialog(profile, ActiveTabId, hasPassword, aliases, (replacement, password, forgetPassword) =>
+            {
+                groups = groupFile.Update(items => items.SaveVnc(replacement, profile != null));
+                if (forgetPassword) VncPasswords.Set(replacement, null);
+                else if (password.Length > 0) VncPasswords.Set(replacement, password);
+                selected = replacement.Id;
+            }))
+            {
+                if (dialog.ShowDialog(this) != DialogResult.OK || selected == null) return;
+            }
+            search.Clear();
+            RefreshList(selected);
+        }
+
+        private void DeleteVnc(VncProfile profile)
+        {
+            if (profile == null || MessageBox.Show(this, "Удалить VNC-подключение «" + profile.Name + "»?",
+                Text, MessageBoxButtons.YesNo, MessageBoxIcon.Warning, MessageBoxDefaultButton.Button2) != DialogResult.Yes) return;
+            UpdateGroups(items =>
+            {
+                items.Vnc.RemoveAll(item => item.Id == profile.Id);
+                items.RenameKey(Groups.Key(profile), null);
+            }, activeGroupId);
+            if (groups.Vnc.Any(item => item.Id == profile.Id)) return;
+            try { VncPasswords.Set(profile, null); }
+            catch (IOException error) { Theme.ShowError(this, error); }
+        }
+
+        private void ConnectVnc(VncProfile profile, bool forceNew = false)
+        {
+            if (groups.Vnc.Any(item => item.Id == profile.Id)) RecordRecent(Groups.Key(profile));
+            try
+            {
+                var workspace = SessionWorkspace();
+                ShowSessions();
+                workspace.Open(new SessionTarget(profile, groups.Find(profile.GroupId)), forceNew);
+            }
+            catch (Exception error) when (Theme.IsFileError(error) || error is InvalidOperationException || error is ArgumentException)
+            {
+                Theme.ShowError(this, error);
+            }
+        }
+
+        private void ShowVncMenu(VncProfile profile, Point point)
+        {
+            desktopMenu?.Dispose();
+            desktopMenu = Theme.Menu();
+            var move = Theme.MenuItem("Переместить во вкладку", Glyph.Move);
+            AddDestination(Groups.UngroupedName, null);
+            foreach (var group in groups.Items) AddDestination(group.Name, group.Id);
+            desktopMenu.Items.AddRange(new ToolStripItem[]
+            {
+                Theme.MenuItem("Подключиться", Glyph.Server, (sender, args) => ConnectVnc(profile)),
+                Theme.MenuItem("Новый сеанс", Glyph.Plus, (sender, args) => ConnectVnc(profile, true)),
+                Theme.MenuItem("Открыть в отдельном окне", Glyph.Move, (sender, args) => VncWindow.Open(profile)),
+                Theme.MenuItem("Изменить", Glyph.Edit, (sender, args) => EditVnc(profile)),
+                Theme.MenuItem(groups.IsFavorite(Groups.Key(profile)) ? "Убрать из избранного" : "В избранное", Glyph.Star,
+                    (sender, args) => ToggleFavorite(Groups.Key(profile), profile.Id)),
+                move,
+                new ToolStripSeparator(),
+                Theme.MenuItem("Удалить", Glyph.Delete, (sender, args) => DeleteVnc(profile))
+            });
+            desktopMenu.Show(grid, point);
+
+            void AddDestination(string name, string id)
+            {
+                var item = Theme.MenuItem(SafeMenuText(name), Glyph.Folder, (sender, args) =>
+                    UpdateGroups(items => items.MoveVnc(profile.Id, id), activeGroupId, profile.Id));
+                item.Checked = profile.GroupId == id;
+                move.DropDownItems.Add(item);
+            }
         }
 
         private void EditDesktop(RdpProfile profile)
@@ -1086,6 +1228,7 @@ namespace SshManager
         {
             grid.CurrentCell = grid.Rows[index].Cells[0];
             if (SelectedDesktop is RdpProfile desktop) { ShowDesktopMenu(desktop, point); return; }
+            if (SelectedVnc is VncProfile vnc) { ShowVncMenu(vnc, point); return; }
             menuConnection = Selected;
             if (menuConnection == null) return;
             var connection = menuConnection;
@@ -1252,6 +1395,7 @@ namespace SshManager
             if (column.Name == FilesColumn && entry is Connection fileSource) OpenFiles(fileSource);
             else if (column.Name == TerminalColumn && entry is Connection connection) Connect(connection);
             else if (column.Name == TerminalColumn && entry is RdpProfile profile) ConnectDesktop(profile);
+            else if (column.Name == TerminalColumn && entry is VncProfile vnc) ConnectVnc(vnc);
             else return false;
             return true;
         }
@@ -1300,10 +1444,11 @@ namespace SshManager
             sessions.PickServer += () =>
             {
                 var connections = document == null ? new Connection[0] : document.Connections().ToArray();
-                using (var picker = new ServerPickerDialog(connections, groups, showRdp))
+                using (var picker = new ServerPickerDialog(connections, groups, kind))
                 {
                     if (picker.ShowDialog(this) != DialogResult.OK) return;
-                    if (picker.SelectedProfile != null) ConnectDesktop(picker.SelectedProfile, forceNew: true);
+                    if (picker.SelectedVnc != null) ConnectVnc(picker.SelectedVnc, forceNew: true);
+                    else if (picker.SelectedProfile != null) ConnectDesktop(picker.SelectedProfile, forceNew: true);
                     else Connect(picker.SelectedConnection, forceNew: true);
                 }
             };
@@ -1317,6 +1462,7 @@ namespace SshManager
                 {
                     if (row.Tag is Connection connection) row.Cells[TerminalColumn].Value = SessionAction(connection.Alias);
                     else if (row.Tag is RdpProfile profile) row.Cells[TerminalColumn].Value = SessionAction(SessionTarget.RdpKey(profile));
+                    else if (row.Tag is VncProfile vnc) row.Cells[TerminalColumn].Value = SessionAction(vnc.Key);
                 }
             };
             pages.Controls.Add(sessions);
@@ -1458,7 +1604,8 @@ namespace SshManager
             if (args.ColumnIndex == 0)
             {
                 var tag = grid.Rows[args.RowIndex].Tag;
-                bool favorite = tag is Connection item ? groups.IsFavorite(Groups.Key(item.Alias)) : tag is RdpProfile desktop && groups.IsFavorite(Groups.Key(desktop));
+                bool favorite = tag is Connection item ? groups.IsFavorite(Groups.Key(item.Alias)) :
+                    tag is RdpProfile desktop ? groups.IsFavorite(Groups.Key(desktop)) : tag is VncProfile vnc && groups.IsFavorite(Groups.Key(vnc));
                 var icon = favorite ? Theme.Icon(Glyph.Star, TabColor.Find("amber").Swatch) : Theme.Icon(Glyph.Server, Theme.Teal);
                 graphics.DrawImage(icon, new Rectangle(box.Left + inset, box.Top + (box.Height - iconSize) / 2, iconSize, iconSize));
                 var text = new Rectangle(box.Left + iconSize + inset * 2, box.Top, box.Width - iconSize - inset * 3, box.Height);

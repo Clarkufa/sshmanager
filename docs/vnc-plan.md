@@ -68,7 +68,9 @@
 ---
 
 ## Фаза 3. Windows: встроенный VNC-клиент
-Образец всех паттернов — RDP: `src/RdpProfile.cs`, `src/RdpDesktop.cs`, `src/RdpWindow.cs`, `src/RdpDialog.cs`, `RdpPasswords` в `src/SshPasswords.cs`. Новые файлы в `src/` (все `src/*.cs` компилирует `build.ps1` автоматически).
+Образец всех паттернов — RDP: `src/RdpProfile.cs`, `src/RdpDesktop.cs`, `src/RdpWindow.cs`, `src/RdpDialog.cs`, `RdpPasswords` в `src/SshPasswords.cs`. Новые файлы кладутся прямо в `src/` (`build.ps1` не заходит в подпапки): `src/VncClient.cs` (RFB), `src/VncKeys.cs`, `src/VncDesktop.cs`, `src/VncWindow.cs`, `src/VncDialog.cs` (+ `VncLogonDialog`), `src/VncTunnel.cs` (`SshTunnel`), `src/VncProfile.cs`, общий базовый класс `src/RemoteDesktopPanel.cs` (заглушка, статус, события — от него наследуют `RdpDesktop` и `VncDesktop`).
+
+**Статус Windows: ВЫПОЛНЕНО** (Фазы 3 и 6 для Windows). Проверки: `tests/windows/live-vnc.ps1` (20 проверок: ZRLE/Hextile/Raw, пароль, смена размера, перезапуск сервера, туннель), `tests/windows/stage2-logic.ps1` (модель VNC, `vnc://`, импорт).
 
 ### 3.1 Протокол каталога: bool → enum
 - Добавить `internal enum CatalogKind { Ssh, Rdp, Vnc }` (новый файл `src/CatalogKind.cs`).

@@ -65,6 +65,8 @@ $tabsPath = Join-Path $data 'tabs.xml'
   <tab id="$tabB" name="Тестовые стенды и разработка" color="amber"/>
   <tab id="$tabC" name="Пустая"/>
   <rdp id="11111111111111111111111111111111" name="Офисный ПК" host="10.1.2.3" port="3389" user="ivan" domain="CORP" group="$tabA" drives="C:\Data;D:\" printers="1" gateway="gw.example.com"/>
+  <vnc id="44444444444444444444444444444444" name="Сервер сборки" host="build.example.com" port="5901" user="" group="$tabA" scale="fit" clipboard="1" via="sshm-bastion"/>
+  <vnc id="55555555555555555555555555555555" name="Камера в цеху" host="10.20.0.7" port="5900" user="" scale="native" viewOnly="1" clipboard="0"/>
   <rdp id="22222222222222222222222222222222" name="Сервер терминалов с длинным названием" host="ts.example.com" port="3390" user="admin" domain=""/>
 </tabs>
 "@ | Set-Content -Encoding UTF8 $tabsPath
@@ -90,12 +92,13 @@ function Snap($control, $name) {
 function Show-Form($form, [switch] $KeepShown) {
     $form.StartPosition = 'Manual'; $form.Location = New-Object Drawing.Point(-30000, -30000); $form.ShowInTaskbar = $false
     if (-not $KeepShown) { Remove-Shown $form }
-    $form.Show(); Pump 0.4
+    $form.Show(); Pump 0.4; $form.Refresh(); Pump 0.6
 }
 function Set-Minimum($form) {
     $form.ClientSize = New-Object Drawing.Size(($form.MinimumSize.Width - ($form.Width - $form.ClientSize.Width)), ($form.MinimumSize.Height - ($form.Height - $form.ClientSize.Height))); Pump
 }
 function Want($scene) { $Scenes -contains 'all' -or $Scenes -contains $scene }
+function Kind($name) { [Enum]::Parse((T 'CatalogKind'), $name) }
 
 $configFile = New 'ConfigFile' @((Join-Path $ssh 'config'))
 $connections = @($configFile.Load().Connections())
@@ -115,14 +118,15 @@ if ((Want 'main') -or (Want 'sessions')) {
         "DIAG rowstyles=$(($cat.RowStyles | % { $_.SizeType.ToString()[0] + [string]$_.Height }) -join ',') padding=$($cat.Padding)"
         Snap $main 'main-minimum-size'
         $main.ClientSize = New-Object Drawing.Size([int](980 * $Scale), [int](570 * $Scale)); Pump
-        Call $main 'SelectProtocol' @($true) | Out-Null; Pump; Snap $main 'main-rdp'
-        Call $main 'SelectProtocol' @($false) | Out-Null
+        Call $main 'SelectProtocol' @((Kind 'Rdp')) | Out-Null; Pump; Snap $main 'main-rdp'
+        Call $main 'SelectProtocol' @((Kind 'Vnc')) | Out-Null; Pump; Snap $main 'main-vnc'
+        Call $main 'SelectProtocol' @((Kind 'Ssh')) | Out-Null
         Call $main 'SelectGroup' @($tabC) | Out-Null; Call $main 'RefreshList' @($null) | Out-Null; Pump; Snap $main 'main-empty-tab'
         Call $main 'SelectGroup' @($null) | Out-Null; Call $main 'RefreshList' @($null) | Out-Null; Pump
         if (Want 'stage2') {
             Call $main 'SelectGroup' @('favorites') | Out-Null; Call $main 'RefreshList' @($null) | Out-Null; Pump; Snap $main 'main-favorites'
-            Call $main 'SelectProtocol' @($true) | Out-Null; Pump; Snap $main 'main-favorites-rdp'
-            Call $main 'SelectProtocol' @($false) | Out-Null
+            Call $main 'SelectProtocol' @((Kind 'Rdp')) | Out-Null; Pump; Snap $main 'main-favorites-rdp'
+            Call $main 'SelectProtocol' @((Kind 'Ssh')) | Out-Null
             Call $main 'SelectGroup' @($null) | Out-Null; Call $main 'RefreshList' @($null) | Out-Null; Pump
         }
     }
@@ -172,9 +176,15 @@ if (Want 'dialogs') {
     $d = New 'RdpLogonDialog' @($profiles[0]); Show-Form $d; Snap $d 'dlg-rdp-logon'; $d.Dispose()
     $d = New 'GroupDialog' @($null, $null); Show-Form $d; Snap $d 'dlg-tab'; $d.Dispose()
     $typed = [Array]::CreateInstance((T 'Connection'), $connections.Count); for ($i = 0; $i -lt $connections.Count; $i++) { $typed[$i] = $connections[$i] }
-    $d = New 'ServerPickerDialog' @($typed, $groups, $false); Show-Form $d; Snap $d 'dlg-picker'; $d.Dispose()
+    $d = New 'ServerPickerDialog' @($typed, $groups, (Kind 'Ssh')); Show-Form $d; Snap $d 'dlg-picker'; $d.Dispose()
+    $d = New 'ServerPickerDialog' @($typed, $groups, (Kind 'Vnc')); Show-Form $d; Snap $d 'dlg-picker-vnc'; $d.Dispose()
     if (Want 'stage2') {
         $d = New 'SettingsDialog' @($groups.Preferences); Show-Form $d; Snap $d 'dlg-settings'; $d.Dispose()
+        $aliases = [string[]]@($connections | ForEach-Object { $_.Alias })
+        $save = [Action`3].MakeGenericType((T 'VncProfile'), [string], [bool])
+        $d = New 'VncDialog' @($null, $null, $false, $aliases, ([scriptblock]{ } -as $save)); Show-Form $d; Snap $d 'dlg-vnc-new'; $d.Dispose()
+        $d = New 'VncDialog' @($groups.Vnc[0], $null, $true, $aliases, ([scriptblock]{ } -as $save)); Show-Form $d; Snap $d 'dlg-vnc-edit'; $d.Dispose()
+        $d = New 'VncLogonDialog' @($groups.Vnc[0], $true); Show-Form $d; Snap $d 'dlg-vnc-logon'; $d.Dispose()
         $d = New 'SnippetDialog' @(); Show-Form $d; Snap $d 'dlg-snippet'; $d.Dispose()
         $d = New 'ImportDialog' @(); Show-Form $d
         $mx = Join-Path $data 'list.mxtsessions'

@@ -53,13 +53,21 @@ namespace SshManager
                 StringComparer.OrdinalIgnoreCase);
             var validDesktops = archived.Desktops.ToDictionary(profile => RdpPasswords.BackupPrefix + profile.Id,
                 StringComparer.OrdinalIgnoreCase);
+            var validVnc = archived.Vnc.ToDictionary(profile => VncPasswords.BackupPrefix + profile.Id,
+                StringComparer.OrdinalIgnoreCase);
             try
             {
                 foreach (var secret in secrets)
                 {
                     if (!SshPasswords.IsValid(secret.Value))
                         throw new InvalidDataException("Пароль в архиве повреждён.");
-                    if (RdpPasswords.IsBackupEntry(secret.Key))
+                    if (VncPasswords.IsBackupEntry(secret.Key))
+                    {
+                        if (!validVnc.TryGetValue(secret.Key, out var vnc))
+                            throw new InvalidDataException("VNC-пароль в архиве не соответствует ни одному VNC-подключению.");
+                        passwords.Add(vnc, secret.Value);
+                    }
+                    else if (RdpPasswords.IsBackupEntry(secret.Key))
                     {
                         if (!validDesktops.TryGetValue(secret.Key, out var desktop))
                             throw new InvalidDataException("RDP-пароль в архиве не соответствует ни одному RDP-подключению.");

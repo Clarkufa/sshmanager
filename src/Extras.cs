@@ -13,26 +13,27 @@ namespace SshManager
 {
     // Stage 2 helpers shared by the catalog, the sessions page and the dialogs (docs/ui-spec.md §7).
 
-    /// <summary>«user@host:port», «ssh://…» or «rdp://[user@]host[:port]» typed into «Быстрое подключение».</summary>
+    /// <summary>«user@host:port», «ssh://…», «rdp://[user@]host[:port]» or «vnc://…» typed into «Быстрое подключение».</summary>
     internal sealed class QuickTarget
     {
         private static readonly Regex Pattern = new Regex(@"\A(?:([^@\s:]+)@)?(\[[0-9A-Fa-f:.]+\]|[A-Za-z0-9_.-]+)(?::([0-9]{1,5}))?\z");
-        public readonly bool Rdp;
+        public readonly bool Rdp, Vnc;
         public readonly string User, Host;
         public readonly int Port;
 
         public QuickTarget(string input)
         {
             string text = (input ?? "").Trim();
-            foreach (var prefix in new[] { "rdp://", "ssh://" })
+            foreach (var prefix in new[] { "rdp://", "vnc://", "ssh://" })
             {
                 if (!text.StartsWith(prefix, StringComparison.OrdinalIgnoreCase)) continue;
                 Rdp = prefix == "rdp://";
+                Vnc = prefix == "vnc://";
                 text = text.Substring(prefix.Length).TrimEnd('/');
             }
             var match = Pattern.Match(text);
-            if (!match.Success) throw new ArgumentException("Введите адрес как user@host:port или rdp://host:port.");
-            Port = match.Groups[3].Success ? int.Parse(match.Groups[3].Value, CultureInfo.InvariantCulture) : Rdp ? 3389 : 22;
+            if (!match.Success) throw new ArgumentException("Введите адрес как user@host:port, rdp://host:port или vnc://host:port.");
+            Port = match.Groups[3].Success ? int.Parse(match.Groups[3].Value, CultureInfo.InvariantCulture) : DefaultPort;
             if (Port < 1 || Port > 65535) throw new ArgumentException("Порт должен быть числом от 1 до 65535.");
             User = match.Groups[1].Value;
             if (User.Any(ch => "#'\"\\".Contains(ch))) throw new ArgumentException("Укажите имя пользователя без кавычек и решётки.");
@@ -44,7 +45,9 @@ namespace SshManager
             Terminal.Quote((User.Length == 0 ? "" : User + "@") + Host);
 
         public string Address => (User.Length == 0 ? "" : User + "@") + (Host.Contains(":") ? "[" + Host + "]" : Host) +
-            (Port == (Rdp ? 3389 : 22) ? "" : ":" + Port.ToString(CultureInfo.InvariantCulture));
+            (Port == DefaultPort ? "" : ":" + Port.ToString(CultureInfo.InvariantCulture));
+
+        private int DefaultPort => Rdp ? 3389 : Vnc ? VncProfile.DefaultPort : 22;
 
         /// <summary>A free config alias based on the host name: "db.example.com", then "db.example.com-2".</summary>
         public static string Alias(string host, IEnumerable<string> existing)
@@ -60,22 +63,24 @@ namespace SshManager
 
     internal sealed class FoundConnection
     {
-        public readonly bool Rdp;
+        public readonly bool Rdp, Vnc;
         public readonly string Name, Host, User, Domain, Source;
         public readonly int Port;
 
-        public FoundConnection(bool rdp, string name, string host, int port, string user, string domain, string source)
+        public FoundConnection(bool rdp, string name, string host, int port, string user, string domain, string source, bool vnc = false)
         {
             Rdp = rdp;
+            Vnc = vnc && !rdp;
             Name = String.IsNullOrWhiteSpace(name) ? host : name.Trim();
             Host = host.Trim();
-            Port = port >= 1 && port <= 65535 ? port : rdp ? 3389 : 22;
+            Port = port >= 1 && port <= 65535 ? port : rdp ? 3389 : vnc ? VncProfile.DefaultPort : 22;
             User = (user ?? "").Trim();
             Domain = (domain ?? "").Trim();
             Source = source;
         }
 
         public string Address => (User.Length == 0 ? "" : User + "@") + Host + ":" + Port.ToString(CultureInfo.InvariantCulture);
+        public string Protocol => Rdp ? "RDP" : Vnc ? "VNC" : "SSH";
     }
 
     /// <summary>«Импорт из других программ». Passwords are never imported: the other programs encrypt them.</summary>
@@ -120,18 +125,19 @@ namespace SshManager
                 while (reader.Read())
                 {
                     if (reader.NodeType != XmlNodeType.Element || reader.Name != "Node" || reader.GetAttribute("Type") != "Connection") continue;
-                    bool rdp;
+                    bool rdp = false, vnc = false;
                     switch (reader.GetAttribute("Protocol"))
                     {
-                        case "SSH1": case "SSH2": rdp = false; break;
+                        case "SSH1": case "SSH2": break;
                         case "RDP": rdp = true; break;
+                        case "VNC": vnc = true; break;
                         default: continue;
                     }
                     var host = reader.GetAttribute("Hostname") ?? "";
                     if (host.Trim().Length == 0) continue;
                     int.TryParse(reader.GetAttribute("Port"), NumberStyles.None, CultureInfo.InvariantCulture, out var port);
                     found.Add(new FoundConnection(rdp, reader.GetAttribute("Name"), host, port, reader.GetAttribute("Username"),
-                        rdp ? reader.GetAttribute("Domain") : "", "mRemoteNG"));
+                        rdp ? reader.GetAttribute("Domain") : "", "mRemoteNG", vnc));
                 }
             }
             return found;
@@ -151,9 +157,10 @@ namespace SshManager
                 var fields = line.Substring(equals + 1).Split('%');
                 if (fields.Length < 4) continue;
                 var kind = fields[0].Split('#').Last();
-                if ((kind != "0" && kind != "4") || fields[1].Trim().Length == 0) continue;
+                // Session types: 0 SSH, 4 RDP, 5 VNC.
+                if ((kind != "0" && kind != "4" && kind != "5") || fields[1].Trim().Length == 0) continue;
                 int.TryParse(fields[2], NumberStyles.None, CultureInfo.InvariantCulture, out var port);
-                found.Add(new FoundConnection(kind == "4", line.Substring(0, equals), fields[1], port, fields[3], "", "MobaXterm"));
+                found.Add(new FoundConnection(kind == "4", line.Substring(0, equals), fields[1], port, fields[3], "", "MobaXterm", kind == "5"));
             }
             return found;
         }

@@ -27,14 +27,11 @@ namespace SshManager
         }
     }
 
-    internal sealed class RdpDesktop : Panel
+    internal sealed class RdpDesktop : RemoteDesktopPanel
     {
         private const int ResizeDelay = 450, RetryDelay = 1500, MaxRetries = 6;
         private static readonly Guid EventInterface = new Guid("336d5562-efa8-482e-8cb3-c5c0fc7a7db6");
         private readonly List<KeyValuePair<int, Delegate>> handlers = new List<KeyValuePair<int, Delegate>>();
-        private readonly Panel overlay, overlayReason;
-        private readonly Label overlayTitle, overlayDetail;
-        private readonly FlowLayoutPanel overlayActions;
         private readonly Timer resizeTimer;
         private RdpClientHost host;
         private object client;
@@ -49,44 +46,19 @@ namespace SshManager
 
         public RdpDesktop()
         {
-            Dock = DockStyle.Fill;
-            BackColor = NativeTerminalView.Background;
-            AccessibleName = "Удалённый рабочий стол";
-
-            // Laid out by FitOverlay: centred when it fits, otherwise the title and buttons stay visible and
-            // only the reason scrolls (the RDP client's descriptions run to several paragraphs).
-            overlay = new Panel { Dock = DockStyle.Fill, BackColor = NativeTerminalView.Background, Visible = false };
-            overlayTitle = new Label { AutoSize = true, Font = Theme.Title, ForeColor = Color.Gainsboro };
-            overlayDetail = new Label { AutoSize = true, MaximumSize = new Size(560, 0), ForeColor = Color.DarkGray,
-                TextAlign = ContentAlignment.MiddleCenter, Margin = Padding.Empty };
-            overlayReason = new Panel { AutoScroll = true, BackColor = NativeTerminalView.Background };
-            overlayReason.Controls.Add(overlayDetail);
-            Theme.DarkScrollBars(overlayReason);
-            overlayActions = new FlowLayoutPanel { AutoSize = true, WrapContents = false, Margin = Padding.Empty,
-                BackColor = NativeTerminalView.Background };
-            var reconnect = Theme.Button("Переподключить", 160, true, Glyph.Refresh);
-            reconnect.Click += (sender, args) => Reconnect();
-            var close = Theme.Button("Закрыть сеанс", 140);
-            close.Click += (sender, args) => CloseRequested?.Invoke();
-            // The buttons clear their corners with their own BackColor (Canvas by default).
-            reconnect.BackColor = close.BackColor = NativeTerminalView.Background;
-            overlayActions.Controls.AddRange(new Control[] { reconnect, close });
-            overlay.Controls.AddRange(new Control[] { overlayTitle, overlayReason, overlayActions });
-            overlay.Resize += (sender, args) => FitOverlay();
-            overlay.VisibleChanged += (sender, args) => FitOverlay();
-            Controls.Add(overlay);
-
             resizeTimer = new Timer { Interval = ResizeDelay };
             resizeTimer.Tick += (sender, args) => { resizeTimer.Stop(); SyncDisplay(); };
         }
 
-        public event Action Changed;
-        public event Action CloseRequested;
-        public string Status { get; private set; } = "подключение";
-        public bool IsOpen { get; private set; } = true;
-        public bool IsConnected => loggedIn && IsOpen;
+        public override bool IsConnected => loggedIn && IsOpen;
+        protected override string TargetLine => profile == null ? "" : profile.Name + " · " + profile.Address;
         public RdpProfile Profile => profile;
         public RdpCredential Credential => credential;
+
+        public override void OpenInWindow()
+        {
+            if (profile != null) RdpWindow.Open(profile, credential);
+        }
 
         public void Connect(RdpProfile profile, RdpCredential credential)
         {
@@ -95,26 +67,26 @@ namespace SshManager
             Start();
         }
 
-        public void Reconnect()
+        public override void Reconnect()
         {
             if (profile == null) return;
             try { Start(); }
             catch (Exception error) when (error is ExternalException || error is TargetInvocationException ||
                 error is InvalidOperationException || error is ArgumentException)
             {
-                ShowEnded("Не удалось подключиться", (error.InnerException ?? error).Message);
+                ShowEndedDesktop("Не удалось подключиться", (error.InnerException ?? error).Message);
                 UpdateStatus("ошибка подключения", false);
             }
         }
 
-        public void Disconnect()
+        public override void Disconnect()
         {
             if (client == null || !IsOpen) return;
             try { Call(client, "Disconnect"); }
             catch (Exception error) when (IsComError(error)) { }
         }
 
-        public void FullScreen()
+        public override void FullScreen()
         {
             if (client != null && IsOpen) Set(client, "FullScreen", true);
         }
@@ -126,7 +98,7 @@ namespace SshManager
             fullScreenMode = false;
             retries = 0;
             appliedSize = Size.Empty;
-            overlay.Visible = false;
+            HideEnded();
             host = new RdpClientHost();
             Controls.Add(host);
             host.BringToFront();
@@ -174,7 +146,7 @@ namespace SshManager
             {
                 loggedIn = false;
                 resizeTimer.Stop();
-                ShowEnded("Ошибка RDP-клиента", "Код ошибки: " + code);
+                ShowEndedDesktop("Ошибка RDP-клиента", "Код ошибки: " + code);
                 UpdateStatus("ошибка подключения", false);
             }));
             UpdateStatus("подключение", true);
@@ -202,7 +174,7 @@ namespace SshManager
             string description = Describe(reason);
             bool normal = reason <= 3;
             UpdateStatus(normal ? "отключён" : "отключён (код " + reason + ")", false);
-            ShowEnded(normal ? "Сеанс завершён" : "Подключение прервано", description);
+            ShowEndedDesktop(normal ? "Сеанс завершён" : "Подключение прервано", description);
         }
 
         private string Describe(int reason)
@@ -218,53 +190,11 @@ namespace SshManager
             return (text.Trim() + (reason > 3 ? "\nКод: " + reason : "")).Trim();
         }
 
-        private void ShowEnded(string title, string detail)
+        private void ShowEndedDesktop(string title, string detail)
         {
             if (IsDisposed) return;
-            overlayTitle.Text = title;
-            overlayDetail.Text = (profile == null ? "" : profile.Name + " · " + profile.Address + "\n") + detail;
             if (host != null) host.Visible = false;
-            overlay.Visible = true;
-            overlay.BringToFront();
-            FitOverlay();
-        }
-
-        /// <summary>
-        /// Centres the title, the reason and the buttons. When they do not fit, the reason gets the height that is
-        /// left and scrolls, so «Переподключить» and «Закрыть сеанс» are always on screen.
-        /// </summary>
-        private void FitOverlay()
-        {
-            if (IsDisposed) return;
-            var area = overlay.ClientSize;
-            int edge = Theme.Scaled(this, 12), small = Theme.Scaled(this, 6), large = Theme.Scaled(this, 16);
-            int width = Math.Min(Theme.Scaled(this, 560), area.Width - Theme.Scaled(this, 48));
-            overlayDetail.MaximumSize = new Size(Math.Max(Theme.Scaled(this, 200), width), 0);
-            var title = overlayTitle.PreferredSize;
-            var detail = overlayDetail.GetPreferredSize(Size.Empty);
-            var buttons = overlayActions.PreferredSize;
-            int fixedHeight = title.Height + small + large + buttons.Height;
-            int reasonHeight = Math.Max(0, Math.Min(detail.Height, area.Height - 2 * edge - fixedHeight));
-            bool scrolls = reasonHeight < detail.Height;
-            int reasonWidth = detail.Width + (scrolls ? SystemInformation.VerticalScrollBarWidth : 0);
-            int top = Math.Max(edge, (area.Height - fixedHeight - reasonHeight) / 2);
-            int Centre(int itemWidth) => Math.Max(0, (area.Width - itemWidth) / 2);
-
-            overlay.SuspendLayout();
-            overlayTitle.Location = new Point(Centre(title.Width), top);
-            top += title.Height + small;
-            overlayReason.Bounds = new Rectangle(Centre(reasonWidth), top, reasonWidth, reasonHeight);
-            overlayDetail.Location = new Point(0, overlayReason.AutoScrollPosition.Y);
-            top += reasonHeight + large;
-            overlayActions.Location = new Point(Centre(buttons.Width), top);
-            overlay.ResumeLayout(false);
-        }
-
-        private void UpdateStatus(string status, bool open)
-        {
-            Status = status;
-            IsOpen = open;
-            Changed?.Invoke();
+            ShowEnded(title, detail);
         }
 
         /// <summary>

@@ -169,6 +169,14 @@ namespace SshManager
                 catch { SshPasswords.Clear(password); throw; }
                 added++;
             }
+            foreach (var profile in groups.Vnc)
+            {
+                var password = VncPasswords.ReadBytes(profile.Id);
+                if (password == null) continue;
+                try { Add(VncPasswords.BackupPrefix + profile.Id, password); }
+                catch { SshPasswords.Clear(password); throw; }
+                added++;
+            }
             return added;
         }
 

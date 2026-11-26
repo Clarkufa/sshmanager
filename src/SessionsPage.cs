@@ -16,12 +16,13 @@ namespace SshManager
         public readonly PasswordTarget Password;
         public readonly bool WithoutForwarding;
         public readonly RdpProfile Desktop;
+        public readonly VncProfile Vnc;
         /// <summary>Quick connect: ssh arguments without a config entry.</summary>
         public readonly string DirectArguments;
         /// <summary>A one-off remote command such as «Скопировать ключ на сервер».</summary>
         public readonly string RemoteCommand;
-        public string Protocol => Desktop == null ? "SSH" : "RDP";
-        public string Key => Desktop != null ? RdpKey(Desktop) : DirectArguments != null ? "quick:" + Address :
+        public string Protocol => Desktop != null ? "RDP" : Vnc != null ? "VNC" : "SSH";
+        public string Key => Desktop != null ? RdpKey(Desktop) : Vnc != null ? Vnc.Key : DirectArguments != null ? "quick:" + Address :
             RemoteCommand != null ? Alias + "\ncommand" : Alias;
         public static string RdpKey(RdpProfile profile) => "RDP:" + profile.Id;
 
@@ -45,6 +46,15 @@ namespace SshManager
             Desktop = profile;
             Alias = profile.Name;
             Address = profile.Address;
+            Group = group == null ? "" : group.Name;
+            Color = TabColor.Find(group?.ColorId)?.Swatch ?? Theme.Teal;
+        }
+
+        public SessionTarget(VncProfile profile, ServerGroup group)
+        {
+            Vnc = profile;
+            Alias = profile.Name;
+            Address = profile.Address + (profile.Via.Length == 0 ? "" : " · через " + profile.Via);
             Group = group == null ? "" : group.Name;
             Color = TabColor.Find(group?.ColorId)?.Swatch ?? Theme.Teal;
         }
@@ -91,7 +101,8 @@ namespace SshManager
         public readonly SessionTarget Target;
         public readonly PseudoTerminal Process;
         public readonly TerminalScreen Screen;
-        public readonly RdpDesktop Desktop;
+        /// <summary>The RDP or VNC desktop of a remote desktop session, null for SSH.</summary>
+        public readonly RemoteDesktopPanel Desktop;
         public readonly int Number;
         public string Name = "";
         public long LastUsed;
@@ -111,7 +122,7 @@ namespace SshManager
             Screen = new TerminalScreen(size.Width, size.Height, bytes => Process.Send(bytes));
         }
 
-        public TerminalSession(SessionTarget target, RdpDesktop desktop, int number)
+        public TerminalSession(SessionTarget target, RemoteDesktopPanel desktop, int number)
         {
             Target = target;
             Desktop = desktop;
@@ -418,6 +429,11 @@ namespace SshManager
             if (existing != null) { Activate(existing, true); return true; }
 
             int number = related.Length == 0 ? 1 : related.Max(session => session.Number) + 1;
+            if (target.Vnc != null)
+            {
+                OpenVnc(target, number);
+                return true;
+            }
             if (target.Desktop != null)
             {
                 credential = credential ?? RdpLogonDialog.Resolve(this, target.Desktop);
@@ -508,14 +524,41 @@ namespace SshManager
             Changed?.Invoke();
         }
 
+        /// <summary>VNC in the window: the password comes from Credential Manager or, when the server asks, the user.</summary>
+        private void OpenVnc(SessionTarget target, int number)
+        {
+            var previous = active;
+            var view = new VncDesktop { Visible = false };
+            view.PasswordPrompt = (profile, wrong) => VncLogonDialog.Ask(FindForm(), profile, wrong);
+            Theme.ScaleToDpi(view);
+            var opened = new TerminalSession(target, view, number);
+            sessions.Add(opened);
+            try
+            {
+                display.Controls.Add(view);
+                Activate(opened, false);
+                view.Changed += OnDesktopChanged;
+                view.CloseRequested += () => CloseSession(opened, confirm: false);
+                view.Connect(target.Vnc, VncPasswords.Read(target.Vnc));
+                FocusTerminal();
+            }
+            catch
+            {
+                sessions.Remove(opened);
+                view.Changed -= OnDesktopChanged;
+                Activate(previous, true);
+                opened.Dispose();
+                throw;
+            }
+            Changed?.Invoke();
+        }
+
         private void DetachActive()
         {
-            var session = active;
-            if (session?.Desktop?.Profile == null) return;
-            var profile = session.Desktop.Profile;
-            var credential = session.Desktop.Credential;
-            CloseSession(session, confirm: false);
-            RdpWindow.Open(profile, credential);
+            var desktop = active?.Desktop;
+            if (desktop == null) return;
+            CloseSession(active, confirm: false);
+            desktop.OpenInWindow();
         }
 
         private void OnDesktopChanged()

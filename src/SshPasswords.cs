@@ -222,6 +222,40 @@ namespace SshManager
             SshPasswords.Set(Name(profileId), account, password);
     }
 
+    /// <summary>VNC passwords: "SSH Manager/VNC/&lt;id&gt;", backed up as app/passwords/vnc-&lt;id&gt; like RDP ones.</summary>
+    internal static class VncPasswords
+    {
+        public const string BackupPrefix = SshPasswords.BackupPrefix + "vnc-";
+
+        internal static string Name(string profileId) => "SSH Manager/VNC/" + profileId;
+
+        public static bool IsBackupEntry(string path) => path.StartsWith(BackupPrefix, StringComparison.OrdinalIgnoreCase);
+
+        public static bool Exists(VncProfile profile)
+        {
+            var password = SshPasswords.Read(Name(profile.Id));
+            SshPasswords.Clear(password);
+            return password != null;
+        }
+
+        public static string Read(VncProfile profile)
+        {
+            var password = SshPasswords.Read(Name(profile.Id));
+            try { return password == null ? null : Encoding.UTF8.GetString(password); }
+            finally { SshPasswords.Clear(password); }
+        }
+
+        public static byte[] ReadBytes(string profileId) => SshPasswords.Read(Name(profileId));
+
+        public static void Set(VncProfile profile, string password)
+        {
+            if (String.IsNullOrEmpty(password)) { SshPasswords.Set(Name(profile.Id), profile.User, null); return; }
+            var bytes = SshPasswords.Encode(password);
+            try { SshPasswords.Set(Name(profile.Id), profile.User.Length == 0 ? "-" : profile.User, bytes); }
+            finally { SshPasswords.Clear(bytes); }
+        }
+    }
+
     internal sealed class PasswordUpdates : IDisposable
     {
         private readonly List<Change> changes = new List<Change>();
@@ -238,6 +272,11 @@ namespace SshManager
         public void Add(RdpProfile profile, byte[] value)
         {
             if (profile != null) Add(RdpPasswords.Name(profile.Id), profile.Account, value, true);
+        }
+
+        public void Add(VncProfile profile, byte[] value)
+        {
+            if (profile != null) Add(VncPasswords.Name(profile.Id), profile.User.Length == 0 ? "-" : profile.User, value, true);
         }
 
         private void Add(string name, string user, byte[] value, bool desktop)
