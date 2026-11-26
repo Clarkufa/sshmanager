@@ -180,9 +180,15 @@ namespace SshManager
         private readonly Panel display;
         private readonly TextBox search;
         private readonly ServerPickerPanel serverPicker;
-        private readonly SurfaceButton sessionsTab, serversTab;
+        private const int ServerWidth = 248, SessionWidth = 203;
+        private readonly TableLayoutPanel columns, serverColumn;
+        private readonly Panel workspaceHost;
+        private readonly TableLayoutPanel workspace;
+        private Control catalogContent, shown;
+        private bool serversVisible = true, sessionsVisible = true, serversForced, sessionsForced;
         private readonly TableLayoutPanel sessionList;
-        private readonly ListBox list;
+        private readonly ListBox list, filesList;
+        private readonly Label filesCaption;
         private readonly Label count, selectedTitle, selectedDetail, empty;
         private readonly Button duplicate, close, files, fullScreenButton, windowButton, reconnectButton, snippetsButton;
         private readonly TableLayoutPanel endedBar;
@@ -191,7 +197,6 @@ namespace SshManager
         private readonly Timer reconnectTimer;
         private bool broadcast;
         private Preferences preferences = new Preferences();
-        private readonly SurfaceButton themeButton;
         private readonly ContextMenuStrip sessionMenu;
         private readonly ToolTip hints;
         private readonly TableLayoutPanel info;
@@ -201,14 +206,14 @@ namespace SshManager
         private readonly Timer timer;
         private TerminalSession active;
         private long activationOrder;
-        private bool refreshingList, showingServerList;
+        private bool refreshingList;
 
         public event Action Changed;
         public event Action ShowServers;
         public event Action PickServer;
         public event Action<SessionTarget> OpenServer;
         public event Action<ServerPickerPanel> LoadServers;
-        public event Action ThemeRequested;
+        public event Action<bool> CatalogVisibleChanged;
         public event Action<SessionTarget> ShowFiles;
         public event Action<VncProfile, string> ShowVncFiles;
         public event Action AddSnippet;
@@ -235,55 +240,37 @@ namespace SshManager
             ForeColor = Theme.Ink;
             Font = Theme.Body;
 
-            var layout = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2, RowCount = 2, Padding = new Padding(24, 15, 24, 21) };
-            layout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 234));
-            layout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-            layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 61));
-            layout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
-            Controls.Add(layout);
+            columns = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 3, RowCount = 1, Padding = new Padding(10, 0, 12, 6) };
+            columns.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, ServerWidth));
+            columns.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, SessionWidth));
+            columns.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+            columns.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+            columns.SizeChanged += (sender, args) => FitColumns();
+            Controls.Add(columns);
 
-            var header = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 5, Margin = new Padding(0, 0, 0, 9) };
-            header.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 51));
-            header.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-            header.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
-            header.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
-            header.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
-            header.Controls.Add(new PictureBox { Image = Theme.AppMark(), SizeMode = PictureBoxSizeMode.Zoom, Size = new Size(42, 42), Anchor = AnchorStyles.Left, Margin = new Padding(0) }, 0, 0);
-            header.Controls.Add(new Label { Text = "Сеансы", Font = Theme.Title, AutoSize = true, Anchor = AnchorStyles.Left, Margin = new Padding(0) }, 1, 0);
-            var servers = Theme.Button("К серверам", 126, glyph: Glyph.MoveLeft);
-            servers.Anchor = AnchorStyles.Right;
-            servers.Click += (sender, args) => ShowServers?.Invoke();
-            themeButton = Theme.Button("", 130);
-            themeButton.Anchor = AnchorStyles.Right;
-            RefreshThemeButton();
-            themeButton.Click += (sender, args) => ThemeRequested?.Invoke();
-            header.Controls.Add(themeButton, 2, 0);
-            header.Controls.Add(servers, 3, 0);
-            var newSession = Theme.Button("Новый сеанс", 132, true, Glyph.Plus);
-            newSession.Anchor = AnchorStyles.Right;
-            newSession.Click += (sender, args) => PickServer?.Invoke();
-            header.Controls.Add(newSession, 4, 0);
-            layout.Controls.Add(header, 0, 0);
-            layout.SetColumnSpan(header, 2);
+            serverColumn = new TableLayoutPanel { Dock = DockStyle.Fill, Margin = new Padding(0, 0, 11, 0), ColumnCount = 1, RowCount = 2 };
+            serverColumn.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+            serverColumn.RowStyles.Add(new RowStyle(SizeType.Absolute, 39));
+            serverColumn.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+            var catalogButton = Theme.Button("Каталог", 88, glyph: Glyph.Server, quiet: true);
+            catalogButton.Anchor = AnchorStyles.Right;
+            catalogButton.Click += (sender, args) => ShowServers?.Invoke();
+            serverColumn.Controls.Add(ColumnHeader("Серверы", catalogButton), 0, 0);
+            columns.Controls.Add(serverColumn, 0, 0);
 
-            var sidebar = new TableLayoutPanel { Dock = DockStyle.Fill, Margin = new Padding(0, 0, 12, 0), ColumnCount = 1, RowCount = 2 };
-            sidebar.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-            sidebar.RowStyles.Add(new RowStyle(SizeType.Absolute, 39));
-            sidebar.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
-            var tabs = new FlowLayoutPanel { Dock = DockStyle.Fill, WrapContents = false, Margin = Padding.Empty };
-            sessionsTab = Theme.Button("Сеансы", 98);
-            serversTab = Theme.Button("Серверы", 98);
-            sessionsTab.AccessibleRole = serversTab.AccessibleRole = AccessibleRole.PageTab;
-            sessionsTab.Click += (sender, args) => ShowServerList(false);
-            serversTab.Click += (sender, args) => ShowServerList(true);
-            tabs.Controls.AddRange(new Control[] { sessionsTab, serversTab });
-            sidebar.Controls.Add(tabs, 0, 0);
-
-            sessionList = new TableLayoutPanel { Dock = DockStyle.Fill, Margin = Padding.Empty, ColumnCount = 1, RowCount = 3 };
+            sessionList = new TableLayoutPanel { Dock = DockStyle.Fill, Margin = new Padding(0, 0, 12, 0), ColumnCount = 1, RowCount = 6 };
             sessionList.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+            sessionList.RowStyles.Add(new RowStyle(SizeType.Absolute, 39));
             sessionList.RowStyles.Add(new RowStyle(SizeType.Absolute, 43));
             sessionList.RowStyles.Add(new RowStyle(SizeType.Absolute, 28));
             sessionList.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+            sessionList.RowStyles.Add(new RowStyle(SizeType.Absolute, 0)); // «Открытые файлы» while file panels are open
+            sessionList.RowStyles.Add(new RowStyle(SizeType.Absolute, 0));
+            var newSession = Theme.Button("", 34, glyph: Glyph.Plus, quiet: true);
+            newSession.AccessibleName = "Новый сеанс";
+            newSession.Anchor = AnchorStyles.Right;
+            newSession.Click += (sender, args) => PickServer?.Invoke();
+            sessionList.Controls.Add(ColumnHeader("Сеансы", newSession), 0, 0);
             var filter = new ServerSearch("Найти сеанс", "Поиск открытых сеансов") { Dock = DockStyle.Top };
             search = filter.Input;
             search.TextChanged += (sender, args) => RefreshList();
@@ -293,9 +280,9 @@ namespace SshManager
                 args.SuppressKeyPress = true;
                 Activate(list.SelectedItem as TerminalSession ?? (TerminalSession)list.Items[0], true);
             };
-            sessionList.Controls.Add(filter, 0, 0);
+            sessionList.Controls.Add(filter, 0, 1);
             count = new Label { Dock = DockStyle.Fill, TextAlign = ContentAlignment.MiddleLeft, ForeColor = Theme.Muted, Margin = new Padding(2, 0, 0, 0) };
-            sessionList.Controls.Add(count, 0, 1);
+            sessionList.Controls.Add(count, 0, 2);
             list = new ListBox { AccessibleName = "Список сеансов", Dock = DockStyle.Fill, Margin = new Padding(0), IntegralHeight = false,
                 BackColor = Theme.Surface, ForeColor = Theme.Ink, BorderStyle = BorderStyle.FixedSingle, DrawMode = DrawMode.OwnerDrawFixed, ItemHeight = Theme.Scaled(this, 46) };
             list.DrawItem += DrawSession;
@@ -303,15 +290,17 @@ namespace SshManager
             {
                 if (!refreshingList && list.SelectedItem is TerminalSession) Activate((TerminalSession)list.SelectedItem, false);
             };
+            // A click returns to the session even when the catalog or a file panel fills the workspace.
             list.MouseClick += (sender, args) =>
             {
-                if (args.Button == MouseButtons.Left && list.IndexFromPoint(args.Location) >= 0) FocusTerminal();
+                int index = args.Button == MouseButtons.Left ? list.IndexFromPoint(args.Location) : -1;
+                if (index >= 0 && list.Items[index] is TerminalSession session) Activate(session, true);
             };
             list.KeyDown += (sender, args) =>
             {
-                if (args.KeyCode != Keys.Enter || list.SelectedItem == null) return;
+                if (args.KeyCode != Keys.Enter || !(list.SelectedItem is TerminalSession session)) return;
                 args.SuppressKeyPress = true;
-                FocusTerminal();
+                Activate(session, true);
             };
             sessionMenu = Theme.Menu();
             sessionMenu.Items.Add(Theme.MenuItem("Переименовать сеанс", Glyph.Edit, (sender, args) => RenameActive()));
@@ -341,21 +330,42 @@ namespace SshManager
             {
                 if (args.Button == MouseButtons.Right) list.SelectedIndex = list.IndexFromPoint(args.Location);
             };
-            sessionList.Controls.Add(Theme.Frame(list, Padding.Empty), 0, 2);
-            var listArea = new Panel { Dock = DockStyle.Fill, Margin = Padding.Empty };
-            serverPicker = new ServerPickerPanel(compact: true) { Visible = false };
-            serverPicker.Submitted += target =>
+            sessionList.Controls.Add(Theme.Frame(list, Padding.Empty), 0, 3);
+            filesCaption = new Label { Text = "Открытые файлы", Font = Theme.Emphasis, Dock = DockStyle.Fill,
+                TextAlign = ContentAlignment.BottomLeft, Margin = new Padding(2, 0, 0, 5), Visible = false };
+            sessionList.Controls.Add(filesCaption, 0, 4);
+            filesList = new ListBox { AccessibleName = "Открытые файлы", Dock = DockStyle.Fill, Margin = new Padding(0), IntegralHeight = false,
+                BackColor = Theme.Surface, ForeColor = Theme.Ink, BorderStyle = BorderStyle.FixedSingle, DrawMode = DrawMode.OwnerDrawFixed, ItemHeight = Theme.Scaled(this, 46) };
+            filesList.DrawItem += DrawFiles;
+            filesList.MouseClick += (sender, args) =>
             {
-                SetServerList(false);
-                OpenServer?.Invoke(target);
+                int index = args.Button == MouseButtons.Left ? filesList.IndexFromPoint(args.Location) : -1;
+                if (index >= 0) ShowFilesPanel((Form)filesList.Items[index]);
             };
-            listArea.Controls.Add(serverPicker);
-            listArea.Controls.Add(sessionList);
-            sidebar.Controls.Add(listArea, 0, 1);
-            SetServerList(false);
-            layout.Controls.Add(sidebar, 0, 1);
+            filesList.KeyDown += (sender, args) =>
+            {
+                if (!(filesList.SelectedItem is Form panel)) return;
+                if (args.KeyCode == Keys.Enter) { args.SuppressKeyPress = true; ShowFilesPanel(panel); }
+                else if (args.KeyCode == Keys.Delete) { args.SuppressKeyPress = true; panel.Close(); }
+            };
+            var filesMenu = Theme.Menu();
+            filesMenu.Items.Add(Theme.MenuItem("Открыть", Glyph.Folder, (sender, args) => { if (filesList.SelectedItem is Form panel) ShowFilesPanel(panel); }));
+            filesMenu.Items.Add(Theme.MenuItem("Закрыть файлы", Glyph.Delete, (sender, args) => (filesList.SelectedItem as Form)?.Close()));
+            filesMenu.Opening += (sender, args) => args.Cancel = filesList.SelectedItem == null;
+            filesList.ContextMenuStrip = filesMenu;
+            filesList.MouseDown += (sender, args) =>
+            {
+                if (args.Button == MouseButtons.Right) filesList.SelectedIndex = filesList.IndexFromPoint(args.Location);
+            };
+            sessionList.Controls.Add(Theme.Frame(filesList, Padding.Empty), 0, 5);
+            serverPicker = new ServerPickerPanel(compact: true);
+            serverPicker.Submitted += target => OpenServer?.Invoke(target);
+            serverColumn.Controls.Add(serverPicker, 0, 1);
+            columns.Controls.Add(sessionList, 1, 0);
 
-            var workspace = new TableLayoutPanel { Dock = DockStyle.Fill, Margin = new Padding(0), ColumnCount = 1, RowCount = 3 };
+            workspaceHost = new Panel { Dock = DockStyle.Fill, Margin = Padding.Empty };
+            columns.Controls.Add(workspaceHost, 2, 0);
+            workspace = new TableLayoutPanel { Dock = DockStyle.Fill, Margin = Padding.Empty, ColumnCount = 1, RowCount = 3 };
             workspace.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
             workspace.RowStyles.Add(new RowStyle(SizeType.Absolute, 65));
             workspace.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
@@ -387,6 +397,7 @@ namespace SshManager
             snippetsButton.Click += (sender, args) => ShowSnippets();
             snippetMenu = Theme.Menu();
             hints = new ToolTip();
+            hints.SetToolTip(newSession, newSession.AccessibleName);
             hints.SetToolTip(fullScreenButton, FullScreenHint);
             hints.SetToolTip(windowButton, WindowHint);
             hints.SetToolTip(snippetsButton, "Сохранённые команды");
@@ -423,7 +434,8 @@ namespace SshManager
             endedBar.Controls.Add(endedText, 0, 0);
             endedBar.Controls.Add(endedActions, 1, 0);
             workspace.Controls.Add(endedBar, 0, 2);
-            layout.Controls.Add(workspace, 1, 1);
+            workspaceHost.Controls.Add(workspace);
+            shown = workspace;
 
             timer = new Timer { Interval = 33 };
             timer.Tick += (sender, args) => PumpOutput();
@@ -433,7 +445,44 @@ namespace SshManager
             RefreshDetails();
         }
 
-        public void RefreshThemeButton() { Theme.RefreshSwitcher(themeButton); }
+        private static Control ColumnHeader(string title, Button action)
+        {
+            var header = new TableLayoutPanel { Dock = DockStyle.Fill, Margin = Padding.Empty, ColumnCount = 2 };
+            header.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+            header.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+            header.Controls.Add(new Label { Text = title, Font = Theme.Emphasis, Dock = DockStyle.Fill,
+                TextAlign = ContentAlignment.MiddleLeft, Margin = new Padding(2, 0, 0, 0) }, 0, 0);
+            header.Controls.Add(action, 1, 0);
+            return header;
+        }
+
+        public void AttachCatalog(Control catalog)
+        {
+            catalogContent = catalog;
+            workspaceHost.Controls.Add(catalog);
+        }
+
+        public void ShowCatalog() => ShowContent(catalogContent);
+        public void ShowSession() => ShowContent(workspace);
+
+        private void ShowContent(Control content)
+        {
+            if (content == null || shown == content) return;
+            workspaceHost.SuspendLayout();
+            foreach (Control control in workspaceHost.Controls) control.Visible = control == content;
+            shown = content;
+            content.BringToFront();
+            workspaceHost.ResumeLayout();
+            FitColumns();
+            refreshingList = true;
+            try
+            {
+                list.SelectedItem = content == workspace ? active : null;
+                filesList.SelectedItem = content is Form ? content : null;
+            }
+            finally { refreshingList = false; }
+            CatalogVisibleChanged?.Invoke(content == catalogContent);
+        }
 
         protected override void OnHandleCreated(EventArgs e)
         {
@@ -441,12 +490,75 @@ namespace SshManager
             FitButtons();
         }
 
-        protected override void OnVisibleChanged(EventArgs e)
+        public void RefreshServers() => LoadServers?.Invoke(serverPicker);
+
+        /// <summary>The terminal or a remote desktop of the shown session has the keyboard.</summary>
+        public bool SessionHasFocus => shown == workspace && active != null && workspace.ContainsFocus;
+
+        /// <summary>«Файлы» open in the workspace and stay in «Открытые файлы» until closed; a transfer keeps running
+        /// while another session is shown (docs/ui-spec.md §3).</summary>
+        public void AddFiles(Form panel)
         {
-            base.OnVisibleChanged(e);
-            if (!Visible) return;
-            FitButtons();
-            if (showingServerList) LoadServers?.Invoke(serverPicker);
+            panel.TopLevel = false;
+            panel.FormBorderStyle = FormBorderStyle.None;
+            panel.Dock = DockStyle.Fill;
+            panel.Visible = false;
+            workspaceHost.Controls.Add(panel);
+            panel.FormClosed += (sender, args) => RemoveFiles(panel);
+            panel.TextChanged += (sender, args) => filesList.Invalidate();
+            filesList.Items.Add(panel);
+            FitFilesList();
+            ShowFilesPanel(panel);
+        }
+
+        public void ShowFilesPanel(Form panel)
+        {
+            if (!filesList.Items.Contains(panel)) return;
+            ShowContent(panel);
+            panel.Focus();
+            Changed?.Invoke();
+        }
+
+        public int CountFiles() => filesList.Items.Count;
+
+        private void RemoveFiles(Form panel)
+        {
+            filesList.Items.Remove(panel);
+            workspaceHost.Controls.Remove(panel);
+            FitFilesList();
+            if (shown == panel)
+            {
+                shown = null;
+                if (active != null) Activate(active, true);
+                else ShowServers?.Invoke();
+            }
+            Changed?.Invoke();
+        }
+
+        private void FitFilesList()
+        {
+            int items = Math.Min(filesList.Items.Count, 4);
+            sessionList.RowStyles[4].Height = items == 0 ? 0 : Theme.Scaled(this, 34);
+            sessionList.RowStyles[5].Height = items == 0 ? 0 : items * filesList.ItemHeight + Theme.Scaled(this, 4);
+            filesCaption.Visible = items != 0;
+        }
+
+        private void DrawFiles(object sender, DrawItemEventArgs args)
+        {
+            if (args.Index < 0) return;
+            var panel = (Form)filesList.Items[args.Index];
+            var bounds = args.Bounds;
+            bool selected = (args.State & DrawItemState.Selected) != 0;
+            using (var fill = new SolidBrush(selected ? Theme.Selection : Theme.Surface)) args.Graphics.FillRectangle(fill, bounds);
+            int S(int logical) => Theme.Scaled(filesList, logical);
+            var target = (panel as SftpWindow)?.Target;
+            using (var dot = new SolidBrush(target?.Color ?? Theme.Teal)) args.Graphics.FillEllipse(dot, bounds.X + S(9), bounds.Y + S(12), S(7), S(7));
+            var title = new Rectangle(bounds.X + S(20), bounds.Y + S(4), bounds.Width - S(26), S(21));
+            var subtitle = new Rectangle(bounds.X + S(20), bounds.Y + S(24), bounds.Width - S(26), S(19));
+            const TextFormatFlags flags = TextFormatFlags.EndEllipsis | TextFormatFlags.NoPrefix | TextFormatFlags.SingleLine | TextFormatFlags.VerticalCenter;
+            TextRenderer.DrawText(args.Graphics, target?.Alias ?? panel.Text, Theme.Emphasis, title, Theme.Ink, flags);
+            TextRenderer.DrawText(args.Graphics, (panel as SftpWindow)?.Transport ?? "Файлы", Theme.Body, subtitle, Theme.Muted, flags);
+            args.DrawFocusRectangle();
         }
 
         public int CountOpen(string alias = null)
@@ -494,30 +606,60 @@ namespace SshManager
             view.Focus();
         }
 
-        private void SetServerList(bool show)
-        {
-            showingServerList = show;
-            sessionList.Visible = !show;
-            serverPicker.Visible = show;
-            sessionsTab.Style = show ? ButtonStyle.Tab : ButtonStyle.SelectedTab;
-            serversTab.Style = show ? ButtonStyle.SelectedTab : ButtonStyle.Tab;
-        }
+        public void ToggleServers() => ShowServerList(!serverColumn.Visible);
+        public void ToggleSessions() => SetSessionList(!sessionList.Visible);
 
+        /// <summary>«Серверы» in the header: shown on request even when the window is narrow; hidden until asked again.</summary>
         private void ShowServerList(bool show)
         {
-            SetServerList(show);
-            if (show)
+            serversVisible = serversForced = show;
+            FitColumns();
+        }
+
+        private void SetSessionList(bool show)
+        {
+            sessionsVisible = sessionsForced = show;
+            FitColumns();
+        }
+
+        /// <summary>A narrow window folds the server column, then the session column, so the workspace keeps room
+        /// (620 for the catalog table, 460 for a session). The user's own choice of columns is kept for wider windows.</summary>
+        private void FitColumns()
+        {
+            if (serverColumn == null || sessionList == null || workspaceHost == null) return;
+            int free = columns.ClientSize.Width - columns.Padding.Horizontal;
+            int serverWidth = Theme.Scaled(this, ServerWidth), sessionWidth = Theme.Scaled(this, SessionWidth);
+            int need = Theme.Scaled(this, shown == catalogContent ? 620 : 460);
+            bool showServers = serversVisible, showSessions = sessionsVisible;
+            int Room() => free - (showServers ? serverWidth : 0) - (showSessions ? sessionWidth : 0);
+            if (showServers && !serversForced && Room() < need) showServers = false;
+            if (showSessions && !sessionsForced && Room() < need) showSessions = false;
+            bool reload = showServers && !serverColumn.Visible;
+            if (serverColumn.Visible != showServers || sessionList.Visible != showSessions ||
+                (int)columns.ColumnStyles[0].Width != (showServers ? serverWidth : 0) ||
+                (int)columns.ColumnStyles[1].Width != (showSessions ? sessionWidth : 0))
             {
-                LoadServers?.Invoke(serverPicker);
-                serverPicker.FocusSearch();
+                columns.SuspendLayout();
+                columns.ColumnStyles[0].Width = showServers ? serverWidth : 0;
+                columns.ColumnStyles[1].Width = showSessions ? sessionWidth : 0;
+                serverColumn.Visible = showServers;
+                sessionList.Visible = showSessions;
+                columns.ResumeLayout();
             }
-            else FocusSearch();
+            if (reload) RefreshServers();
         }
 
         public void FocusSearch()
         {
-            if (showingServerList) serverPicker.FocusSearch();
-            else { search.Focus(); search.SelectAll(); }
+            SetSessionList(true);
+            search.Focus();
+            search.SelectAll();
+        }
+
+        public void FocusServerSearch()
+        {
+            ShowServerList(true);
+            serverPicker.FocusSearch();
         }
 
         public void Cycle()
@@ -536,6 +678,7 @@ namespace SshManager
 
         private void Activate(TerminalSession selected, bool focus)
         {
+            if (selected != null) ShowSession();
             if (selected != active)
             {
                 active?.Desktop?.Hide();
@@ -683,7 +826,7 @@ namespace SshManager
                 var visible = sessions.Where(session => new[] { session.Title, session.Target.Address, session.Target.Group, session.Target.Protocol }
                     .Any(text => text.IndexOf(query, StringComparison.OrdinalIgnoreCase) >= 0));
                 foreach (var session in visible) list.Items.Add(session);
-                list.SelectedItem = active;
+                list.SelectedItem = shown == workspace ? active : null;
             }
             finally { list.EndUpdate(); refreshingList = false; }
             int open = CountOpen();

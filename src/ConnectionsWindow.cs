@@ -30,7 +30,7 @@ namespace SshManager
         private readonly Button add;
         private readonly Button edit;
         private readonly Button delete;
-        private readonly Button sessionsButton;
+        private readonly SurfaceButton serversButton, sessionsButton;
         private readonly Button backupButton;
         private readonly SurfaceButton themeButton;
         private readonly SurfaceButton updateButton;
@@ -86,26 +86,25 @@ namespace SshManager
             StartPosition = FormStartPosition.CenterScreen;
             SuspendLayout();
             AutoScaleMode = AutoScaleMode.None;
-            ClientSize = new Size(980, 570);
+            ClientSize = new Size(1280, 720);
             MinimumSize = new Size(800, 480);
 
-            var frame = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 2 };
+            var frame = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 3 };
             frame.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+            frame.RowStyles.Add(new RowStyle(SizeType.Absolute, 54));
             frame.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
             frame.RowStyles.Add(new RowStyle(SizeType.Absolute, 47));
             pages = new Panel { Dock = DockStyle.Fill, Margin = Padding.Empty };
-            frame.Controls.Add(pages, 0, 0);
+            frame.Controls.Add(pages, 0, 1);
             Controls.Add(frame);
 
-            var layout = new TableLayoutPanel { Dock = DockStyle.Fill, Padding = new Padding(24, 15, 24, 0), ColumnCount = 1, RowCount = 5 };
+            var layout = new TableLayoutPanel { Dock = DockStyle.Fill, Padding = new Padding(0), Margin = Padding.Empty, ColumnCount = 1, RowCount = 4 };
             layout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
             catalog = layout;
-            layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 62));
             layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 39));
             layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 49));
             layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 46));
             layout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
-            pages.Controls.Add(layout);
 
             add = Theme.Button("Добавить сервер", 158, true, Glyph.Plus);
             add.Click += (sender, args) =>
@@ -114,32 +113,32 @@ namespace SshManager
                 else if (kind == CatalogKind.Vnc) EditVnc(null);
                 else EditConnection(null);
             };
-            var header = catalogHeader = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 6, Margin = new Padding(0, 0, 0, 7) };
-            header.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 51));
+            var header = catalogHeader = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 8, RowCount = 1, Margin = new Padding(10, 0, 10, 0) };
+            header.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+            header.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 38));
+            header.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
             header.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-            header.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
-            header.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
-            header.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
-            header.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
-            header.Controls.Add(new PictureBox { Image = Theme.AppMark(), SizeMode = PictureBoxSizeMode.Zoom, Size = new Size(42, 42), Anchor = AnchorStyles.Left, Margin = new Padding(0) }, 0, 0);
-            catalogTitle = new Label { Text = "SSH-подключения", Font = Theme.Title, AutoSize = true, Anchor = AnchorStyles.Left, Margin = new Padding(0) };
+            for (int i = 3; i < header.ColumnCount; i++) header.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+            header.Controls.Add(new PictureBox { Image = Theme.AppMark(), SizeMode = PictureBoxSizeMode.Zoom, Size = new Size(32, 32), Anchor = AnchorStyles.Left, Margin = Padding.Empty }, 0, 0);
+            catalogTitle = new Label { Text = "SSH Manager", Font = Theme.Emphasis, AutoSize = true, Anchor = AnchorStyles.Left, Margin = new Padding(0, 0, 10, 0) };
             header.Controls.Add(catalogTitle, 1, 0);
             add.Anchor = AnchorStyles.Right;
+            serversButton = Theme.Button("Серверы", 94, glyph: Glyph.Server);
+            serversButton.Click += (sender, args) => SessionWorkspace().ToggleServers();
             sessionsButton = Theme.Button("Сеансы", 116, glyph: Glyph.Terminal);
-            sessionsButton.Anchor = AnchorStyles.Right;
-            sessionsButton.Click += (sender, args) => ShowSessions();
+            sessionsButton.Click += (sender, args) => SessionWorkspace().ToggleSessions();
             themeButton = Theme.Button("", 130);
-            themeButton.Anchor = AnchorStyles.Right;
             Theme.RefreshSwitcher(themeButton);
             themeButton.Click += (sender, args) => ToggleTheme();
             settingsButton = Theme.Button("Настройки", 118, glyph: Glyph.Settings, quiet: true);
-            settingsButton.Anchor = AnchorStyles.Right;
             settingsButton.Click += (sender, args) => EditSettings();
-            header.Controls.Add(settingsButton, 2, 0);
-            header.Controls.Add(themeButton, 3, 0);
-            header.Controls.Add(sessionsButton, 4, 0);
-            header.Controls.Add(add, 5, 0);
-            layout.Controls.Add(header, 0, 0);
+            var headerButtons = new Button[] { serversButton, sessionsButton, settingsButton, themeButton, add };
+            for (int i = 0; i < headerButtons.Length; i++)
+            {
+                headerButtons[i].Anchor = AnchorStyles.Right;
+                header.Controls.Add(headerButtons[i], i + 3, 0);
+            }
+            frame.Controls.Add(header, 0, 0);
             header.Resize += (sender, args) => FitHeader();
 
             var protocols = new FlowLayoutPanel { Dock = DockStyle.Fill, WrapContents = false, Margin = Padding.Empty };
@@ -153,10 +152,6 @@ namespace SshManager
             rdpTab.Click += (sender, args) => SelectProtocol(CatalogKind.Rdp);
             vncTab.Click += (sender, args) => SelectProtocol(CatalogKind.Vnc);
             protocols.Controls.AddRange(new Control[] { sshTab, rdpTab, vncTab });
-            var protocolRow = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2, Margin = Padding.Empty };
-            protocolRow.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-            protocolRow.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 310));
-            protocolRow.Controls.Add(protocols, 0, 0);
             quick = new TextBox { AccessibleName = "Быстрое подключение", MaxLength = 300 };
             Theme.SetCue(quick, "Быстрое подключение: user@host, rdp:// или vnc://");
             hints.SetToolTip(quick, "Подключиться без сохранения профиля. Enter — подключиться.");
@@ -165,8 +160,19 @@ namespace SshManager
                 if (args.KeyCode == Keys.Enter) { args.SuppressKeyPress = true; QuickConnect(); }
                 else if (args.KeyCode == Keys.Escape && quick.TextLength > 0) { args.SuppressKeyPress = true; quick.Clear(); }
             };
-            protocolRow.Controls.Add(Theme.Frame(quick, new Padding(0, 2, 0, 3)), 1, 0);
-            layout.Controls.Add(protocolRow, 0, 1);
+            // The quick-connect field sits in the middle of the free space, at most 460 wide (docs/ui-spec.md §2.1).
+            var quickFrame = Theme.Frame(quick, Padding.Empty);
+            quickFrame.Dock = DockStyle.None;
+            var quickHost = new Panel { Dock = DockStyle.Fill, Margin = new Padding(6, 0, 10, 0) };
+            quickHost.Controls.Add(quickFrame);
+            quickHost.Resize += (sender, args) =>
+            {
+                int width = Math.Min(quickHost.ClientSize.Width, Theme.Scaled(this, 460));
+                int height = Theme.Scaled(this, 32);
+                quickFrame.Bounds = new Rectangle((quickHost.ClientSize.Width - width) / 2, (quickHost.ClientSize.Height - height) / 2, width, height);
+            };
+            header.Controls.Add(quickHost, 2, 0);
+            layout.Controls.Add(protocols, 0, 0);
 
             var tabBar = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2, Margin = new Padding(0, 0, 0, 1) };
             tabBar.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
@@ -179,12 +185,12 @@ namespace SshManager
             newTab.Height = 31;
             newTab.Click += (sender, args) => EditGroup(null);
             tabBar.Controls.Add(newTab, 1, 0);
-            layout.Controls.Add(tabBar, 0, 2);
+            layout.Controls.Add(tabBar, 0, 1);
 
             var tools = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2, Margin = new Padding(0) };
             tools.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
             tools.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
-            layout.Controls.Add(tools, 0, 3);
+            layout.Controls.Add(tools, 0, 2);
 
             var filter = new FlowLayoutPanel { Dock = DockStyle.Fill, WrapContents = false, Margin = new Padding(0) };
             var serverSearch = new ServerSearch();
@@ -230,7 +236,7 @@ namespace SshManager
             tools.Controls.Add(actions, 1, 0);
 
             var list = new Panel { Dock = DockStyle.Fill, Margin = new Padding(0), Padding = new Padding(1), BackColor = Theme.Line };
-            layout.Controls.Add(list, 0, 4);
+            layout.Controls.Add(list, 0, 3);
             grid = MakeGrid(DeviceDpi);
             grid.SelectionChanged += (sender, args) => UpdateActions();
             grid.CellMouseClick += (sender, args) =>
@@ -336,8 +342,9 @@ namespace SshManager
             footer.Controls.Add(source, 0, 0);
             footer.Controls.Add(status, 1, 0);
             footer.Controls.Add(updateButton, 2, 0);
-            frame.Controls.Add(footer, 0, 1);
+            frame.Controls.Add(footer, 0, 2);
 
+            SessionWorkspace().ShowCatalog();
             Theme.ScaleToDpi(this);
             ResumeLayout();
             Shown += (sender, args) => Reload(openStartupTab: true);
@@ -359,8 +366,8 @@ namespace SshManager
         {
             if (!catalogHeader.IsHandleCreated) return;
             Theme.RefreshSwitcher(themeButton);
-            var buttons = new[] { settingsButton, themeButton, sessionsButton, add };
-            int Needed() => Theme.Scaled(this, 63) + catalogTitle.PreferredWidth + buttons.Sum(button => button.Width + button.Margin.Horizontal);
+            var buttons = new Button[] { serversButton, settingsButton, themeButton, sessionsButton, add };
+            int Needed() => Theme.Scaled(this, 330) + catalogTitle.PreferredWidth + buttons.Sum(button => button.Width + button.Margin.Horizontal);
             void Compact(SurfaceButton button, bool compact, int logical)
             {
                 string label = button.AccessibleName;
@@ -370,8 +377,12 @@ namespace SshManager
             }
             Compact(settingsButton, false, 118);
             Compact(themeButton, false, 130);
+            Compact(serversButton, false, 94);
+            Compact(sessionsButton, false, 116);
             if (Needed() > catalogHeader.ClientSize.Width) Compact(settingsButton, true, 118);
             if (Needed() > catalogHeader.ClientSize.Width) Compact(themeButton, true, 130);
+            if (Needed() > catalogHeader.ClientSize.Width) Compact(serversButton, true, 94);
+            if (Needed() > catalogHeader.ClientSize.Width) Compact(sessionsButton, true, 116);
         }
 
         private void ApplyPreferences()
@@ -603,7 +614,6 @@ namespace SshManager
             sshTab.Style = next == CatalogKind.Ssh ? ButtonStyle.SelectedTab : ButtonStyle.Tab;
             rdpTab.Style = next == CatalogKind.Rdp ? ButtonStyle.SelectedTab : ButtonStyle.Tab;
             vncTab.Style = next == CatalogKind.Vnc ? ButtonStyle.SelectedTab : ButtonStyle.Tab;
-            catalogTitle.Text = next == CatalogKind.Rdp ? "RDP-подключения" : next == CatalogKind.Vnc ? "VNC-подключения" : "SSH-подключения";
             grid.Columns[0].HeaderText = desktop ? "Название" : "Псевдоним";
             grid.Columns[TerminalColumn].HeaderText = desktop ? "Рабочий стол" : "Терминал";
             grid.Columns[FilesColumn].Visible = !desktop;
@@ -739,12 +749,11 @@ namespace SshManager
             Theme.Apply(this);
             Theme.RefreshSwitcher(themeButton);
             FitHeader();
-            sessions?.RefreshThemeButton();
-            foreach (var window in fileWindows.Values) Theme.Apply(window);
         }
 
         private void RefreshList(string selectAlias)
         {
+            sessions?.RefreshServers();
             grid.Rows.Clear();
             var order = groups.Sort(ActiveTabId, kind);
             bool favorites = activeGroupId == FavoritesId;
@@ -1433,17 +1442,17 @@ namespace SshManager
 
         private void ShowFileWindow(string id, SessionTarget target, Func<IRemoteFiles> connect, Func<IRemoteFiles> fallback = null)
         {
+            // «Файлы» open in the workspace of this window and are listed under «Открытые файлы» (docs/ui-spec.md §3).
             if (fileWindows.TryGetValue(id, out var open))
             {
-                if (open.WindowState == FormWindowState.Minimized) open.WindowState = FormWindowState.Normal;
-                open.Show();
-                open.Activate();
+                SessionWorkspace().ShowFilesPanel(open);
                 return;
             }
             var window = new SftpWindow(target, connect, fallback);
+            window.Embed();
             fileWindows.Add(id, window);
             window.FormClosed += (sender, args) => fileWindows.Remove(id);
-            window.Show(this);
+            SessionWorkspace().AddFiles(window);
         }
 
         private SftpClient ConnectFileClient(SessionTarget target)
@@ -1460,13 +1469,13 @@ namespace SshManager
         private SessionsPage SessionWorkspace()
         {
             if (sessions != null) return sessions;
-            sessions = new SessionsPage { Visible = false };
-            Theme.ScaleToDpi(sessions);
+            sessions = new SessionsPage();
+            sessions.AttachCatalog(catalog);
+            sessions.CatalogVisibleChanged += visible => { source.Visible = visible; status.Visible = visible; };
             sessions.Preferences = groups.Preferences;
             sessions.Snippets = () => groups.Snippets;
             sessions.AddSnippet += AddSnippet;
             sessions.RemoveSnippet += RemoveSnippet;
-            sessions.ThemeRequested += ToggleTheme;
             sessions.ShowFiles += OpenFiles;
             sessions.ShowVncFiles += OpenVncFiles;
             sessions.LoadServers += picker =>
@@ -1497,8 +1506,8 @@ namespace SshManager
             sessions.Changed += () =>
             {
                 int open = sessions.CountOpen();
-                sessionsButton.Text = open == 0 ? "Сеансы" : "Сеансы · " + open;
-                sessionsButton.AccessibleName = sessionsButton.Text;
+                sessionsButton.AccessibleName = open == 0 ? "Сеансы" : "Сеансы · " + open;
+                FitHeader();
                 foreach (DataGridViewRow row in grid.Rows)
                 {
                     if (row.Tag is Connection connection) row.Cells[TerminalColumn].Value = SessionAction(connection.Alias);
@@ -1512,19 +1521,15 @@ namespace SshManager
 
         private void ShowSessions()
         {
-            var workspace = SessionWorkspace();
-            catalog.Hide();
+            SessionWorkspace().ShowSession();
             source.Hide();
             status.Hide();
-            workspace.Show();
-            workspace.BringToFront();
-            workspace.FocusTerminal();
+            sessions.FocusTerminal();
         }
 
         private void ShowServers()
         {
-            sessions.Hide();
-            catalog.Show();
+            SessionWorkspace().ShowCatalog();
             source.Show();
             status.Show();
             grid.Focus();
@@ -1538,19 +1543,21 @@ namespace SshManager
 
         protected override bool ProcessCmdKey(ref Message msg, Keys keyData)
         {
-            if (catalog.Visible)
+            // Ctrl+F, Ctrl+N, Ctrl+L and Ctrl+K belong to the shell (search, next command, clear screen, kill line)
+            // while the terminal or a remote desktop has the focus.
+            bool sessionKeys = sessions.SessionHasFocus;
+            if (keyData == (Keys.Control | Keys.F) && !sessionKeys)
             {
-                if (keyData == (Keys.Control | Keys.F)) { search.Focus(); search.SelectAll(); return true; }
-                if (keyData == (Keys.Control | Keys.N)) { add.PerformClick(); return true; }
-                if (keyData == (Keys.Control | Keys.L)) { quick.Focus(); quick.SelectAll(); return true; }
-                if (keyData == Keys.F5) { Reload(); return true; }
+                if (catalog.Visible) { search.Focus(); search.SelectAll(); }
+                else sessions.FocusServerSearch();
+                return true;
             }
-            if (sessions != null && sessions.Visible)
-            {
-                if (keyData == (Keys.Shift | Keys.Escape)) { ShowServers(); return true; }
-                if (keyData == (Keys.Control | Keys.Tab)) { sessions.Cycle(); return true; }
-                if (keyData == (Keys.Control | Keys.Shift | Keys.P)) { sessions.FocusSearch(); return true; }
-            }
+            if (keyData == (Keys.Control | Keys.N) && !sessionKeys) { add.PerformClick(); return true; }
+            if ((keyData == (Keys.Control | Keys.L) || keyData == (Keys.Control | Keys.K)) && !sessionKeys) { quick.Focus(); quick.SelectAll(); return true; }
+            if (keyData == Keys.F5 && catalog.Visible) { Reload(); return true; }
+            if (keyData == (Keys.Shift | Keys.Escape)) { ShowServers(); return true; }
+            if (keyData == (Keys.Control | Keys.Tab)) { sessions.Cycle(); return true; }
+            if (keyData == (Keys.Control | Keys.Shift | Keys.P)) { sessions.FocusSearch(); return true; }
             return base.ProcessCmdKey(ref msg, keyData);
         }
 

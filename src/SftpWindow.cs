@@ -20,8 +20,14 @@ namespace SshManager
         private readonly ProgressBar progressBar;
         private readonly ContextMenuStrip remoteMenu;
         private readonly System.Windows.Forms.Timer connectionWatch;
+        private readonly TableLayoutPanel layout, header;
+        private readonly Label title;
         private IRemoteFiles client;
         private CancellationTokenSource operation;
+
+        public SessionTarget Target => target;
+        /// <summary>«Файлы · SFTP» or «Файлы · TightVNC» once connected (the line under the server in «Открытые файлы»).</summary>
+        public string Transport { get; private set; } = "Файлы";
 
         public SftpWindow(SessionTarget target, Func<IRemoteFiles> connect, Func<IRemoteFiles> fallback = null)
         {
@@ -39,7 +45,7 @@ namespace SshManager
             ClientSize = new Size(1090, 620);
             MinimumSize = new Size(800, 440);
 
-            var layout = new TableLayoutPanel { Dock = DockStyle.Fill, Padding = new Padding(20, 14, 20, 12), ColumnCount = 2, RowCount = 4 };
+            layout = new TableLayoutPanel { Dock = DockStyle.Fill, Padding = new Padding(20, 14, 20, 12), ColumnCount = 2, RowCount = 4 };
             layout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50));
             layout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50));
             layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 55));
@@ -48,10 +54,11 @@ namespace SshManager
             layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 34));
             Controls.Add(layout);
 
-            var header = new TableLayoutPanel { Dock = DockStyle.Fill, Margin = Padding.Empty, ColumnCount = 2 };
+            header = new TableLayoutPanel { Dock = DockStyle.Fill, Margin = Padding.Empty, ColumnCount = 3 };
             header.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
             header.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
-            var title = new Label { Text = "Файлы · " + target.Alias, Font = Theme.Title, AutoEllipsis = true,
+            header.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+            title = new Label { Text = "Файлы · " + target.Alias, Font = Theme.Title, AutoEllipsis = true,
                 Dock = DockStyle.Fill, TextAlign = ContentAlignment.MiddleLeft, Margin = Padding.Empty };
             header.Controls.Add(title, 0, 0);
             reconnect = Theme.Button("Переподключить", 156, glyph: Glyph.Refresh);
@@ -210,6 +217,8 @@ namespace SshManager
             {
                 remote.Load(current.Path, current.Items);
                 status.Text = "Подключено к " + target.Alias + " · " + connection.Protocol;
+                Transport = "Файлы · " + connection.Protocol;
+                Text = "Файлы — " + target.Alias + " · " + connection.Protocol;
             });
             if (!IsDisposed && remote.DirectoryPath.Length == 0)
             {
@@ -413,6 +422,19 @@ namespace SshManager
                     }
                 }
             }
+        }
+
+        /// <summary>Inside the main window's workspace: no own frame or margins, «Закрыть» next to «Переподключить».</summary>
+        public void Embed()
+        {
+            MinimumSize = Size.Empty; // the workspace decides the size
+            title.Font = Theme.Emphasis; // as the session title next to it
+            layout.Padding = new Padding(0, 0, 0, 6);
+            var close = Theme.Button("Закрыть", 96, quiet: true, danger: true);
+            close.Anchor = AnchorStyles.Right;
+            close.Click += (sender, args) => Close();
+            Theme.ScaleToDpi(close);
+            header.Controls.Add(close, 2, 0);
         }
 
         private void Disconnect()

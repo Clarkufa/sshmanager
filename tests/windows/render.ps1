@@ -146,7 +146,8 @@ if ((Want 'main') -or (Want 'sessions')) {
         Call $page 'ShowServerList' @($true); Pump
         Call (Field $page 'serverPicker') 'SelectProtocol' @((Kind 'Vnc')); Pump
         Snap $main 'sessions-server-list'
-        Call $page 'ShowServerList' @($false); Pump
+        # Back to the default: the server column folds on its own when the window is narrow.
+        $page.GetType().GetField('serversForced', $NP).SetValue($page, $false); Call $page 'FitColumns'; Pump
         if (Want 'stage2') {
             Call $main 'Connect' @($connections[1], $false) | Out-Null; Pump 1.5
             Snap $main 'sessions-reconnecting'
@@ -167,6 +168,11 @@ if ((Want 'main') -or (Want 'sessions')) {
         Snap $main 'sessions-rdp-ended'
         Set-Minimum $main; Snap $main 'sessions-min'
         Call $main 'ShowServers' | Out-Null; Pump; Snap $main 'main-with-sessions'
+        # «Файлы» open in the workspace and appear under «Открытые файлы». Last, because the connection fails
+        # with a message box once ssh gives up; the window is disposed before that.
+        $main.ClientSize = New-Object Drawing.Size([int](1280 * $Scale), [int](720 * $Scale)); Pump
+        $main.GetType().GetMethod('OpenFiles', $NP, $null, [Type[]]@((T 'Connection')), $null).Invoke($main, @($connections[3])) | Out-Null; Pump 0.6
+        Snap $main 'sessions-files'
     }
     $main.Dispose()
 }
@@ -209,7 +215,7 @@ if (Want 'dialogs') {
 if (Want 'sftp') {
     $target = New 'SessionTarget' @($connections[0], $null)
     $connect = $null
-    $w = New 'SftpWindow' @($target, $connect); Show-Form $w
+    $w = New 'SftpWindow' @($target, $connect, $null); Show-Form $w
     Call $w 'NavigateLocal' @($data) | Out-Null; Pump
     Snap $w 'sftp'
     Set-Minimum $w; Snap $w 'sftp-min'
