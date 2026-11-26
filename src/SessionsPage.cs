@@ -184,7 +184,7 @@ namespace SshManager
         private readonly TableLayoutPanel columns, serverColumn;
         private readonly Panel workspaceHost;
         private readonly TableLayoutPanel workspace;
-        private Control catalogContent, shown;
+        private Control startContent, shown;
         private bool serversVisible = true, sessionsVisible = true, serversForced, sessionsForced;
         private readonly TableLayoutPanel sessionList;
         private readonly ListBox list, filesList;
@@ -209,13 +209,13 @@ namespace SshManager
         private bool refreshingList;
 
         public event Action Changed;
-        public event Action ShowServers;
+        /// <summary>«⋯» of the «Серверы» column: tabs, order, backups and import (docs/ui-spec.md §2.2).</summary>
+        public event Action<Control, Point> ServerColumnMenuRequested;
         public event Action PickServer;
         public event Action<SessionTarget> OpenServer;
         public event Action<ServerPickerPanel> LoadServers;
         public event Action<string> ServerSectionToggled;
         public event Action<object, Control, Point> ServerMenuRequested;
-        public event Action<bool> CatalogVisibleChanged;
         public event Action<SessionTarget> ShowFiles;
         public event Action<VncProfile, string> ShowVncFiles;
         public event Action AddSnippet;
@@ -254,10 +254,11 @@ namespace SshManager
             serverColumn.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
             serverColumn.RowStyles.Add(new RowStyle(SizeType.Absolute, 39));
             serverColumn.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
-            var catalogButton = Theme.Button("Каталог", 88, glyph: Glyph.Server, quiet: true);
-            catalogButton.Anchor = AnchorStyles.Right;
-            catalogButton.Click += (sender, args) => ShowServers?.Invoke();
-            serverColumn.Controls.Add(ColumnHeader("Серверы", catalogButton), 0, 0);
+            var more = Theme.Button("⋯", 38, quiet: true);
+            more.AccessibleName = "Действия со списком серверов";
+            more.Anchor = AnchorStyles.Right;
+            more.Click += (sender, args) => ServerColumnMenuRequested?.Invoke(more, new Point(0, more.Height));
+            serverColumn.Controls.Add(ColumnHeader("Серверы", more), 0, 0);
             columns.Controls.Add(serverColumn, 0, 0);
 
             sessionList = new TableLayoutPanel { Dock = DockStyle.Fill, Margin = new Padding(0, 0, 12, 0), ColumnCount = 1, RowCount = 6 };
@@ -460,13 +461,16 @@ namespace SshManager
             return header;
         }
 
-        public void AttachCatalog(Control catalog)
+        /// <summary>The page shown when no session or file panel is chosen (docs/ui-spec.md §2.3).</summary>
+        public void AttachStart(Control start)
         {
-            catalogContent = catalog;
-            workspaceHost.Controls.Add(catalog);
+            startContent = start;
+            workspaceHost.Controls.Add(start);
         }
 
-        public void ShowCatalog() => ShowContent(catalogContent);
+        public ServerPickerPanel Servers => serverPicker;
+        public bool ShowingStart => shown == startContent;
+        public void ShowStart() => ShowContent(startContent);
         public void ShowSession() => ShowContent(workspace);
 
         private void ShowContent(Control content)
@@ -485,7 +489,6 @@ namespace SshManager
                 filesList.SelectedItem = content is Form ? content : null;
             }
             finally { refreshingList = false; }
-            CatalogVisibleChanged?.Invoke(content == catalogContent);
         }
 
         protected override void OnHandleCreated(EventArgs e)
@@ -494,7 +497,11 @@ namespace SshManager
             FitButtons();
         }
 
-        public void RefreshServers() => LoadServers?.Invoke(serverPicker);
+        public void RefreshServers(string select = null)
+        {
+            LoadServers?.Invoke(serverPicker);
+            serverPicker.SelectServer(select);
+        }
 
         /// <summary>The terminal or a remote desktop of the shown session has the keyboard.</summary>
         public bool SessionHasFocus => shown == workspace && active != null && workspace.ContainsFocus;
@@ -534,7 +541,7 @@ namespace SshManager
             {
                 shown = null;
                 if (active != null) Activate(active, true);
-                else ShowServers?.Invoke();
+                else ShowStart();
             }
             Changed?.Invoke();
         }
@@ -626,18 +633,19 @@ namespace SshManager
             FitColumns();
         }
 
-        /// <summary>A narrow window folds the server column, then the session column, so the workspace keeps room
-        /// (620 for the catalog table, 460 for a session). The user's own choice of columns is kept for wider windows.</summary>
+        /// <summary>A narrow window folds the session column, then the server column, so the workspace keeps room
+        /// (460 for the start page, a session or files). The user's own choice of columns is kept for wider windows.</summary>
         private void FitColumns()
         {
             if (serverColumn == null || sessionList == null || workspaceHost == null) return;
             int free = columns.ClientSize.Width - columns.Padding.Horizontal;
             int serverWidth = Theme.Scaled(this, ServerWidth), sessionWidth = Theme.Scaled(this, SessionWidth);
-            int need = Theme.Scaled(this, shown == catalogContent ? 620 : 460);
+            int need = Theme.Scaled(this, 460);
             bool showServers = serversVisible, showSessions = sessionsVisible;
             int Room() => free - (showServers ? serverWidth : 0) - (showSessions ? sessionWidth : 0);
-            if (showServers && !serversForced && Room() < need) showServers = false;
+            // The server list is the way to every connection: the session column folds first.
             if (showSessions && !sessionsForced && Room() < need) showSessions = false;
+            if (showServers && !serversForced && Room() < need) showServers = false;
             bool reload = showServers && !serverColumn.Visible;
             if (serverColumn.Visible != showServers || sessionList.Visible != showSessions ||
                 (int)columns.ColumnStyles[0].Width != (showServers ? serverWidth : 0) ||

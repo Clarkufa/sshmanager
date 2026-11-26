@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Drawing;
 using System.Drawing.Drawing2D;
 using System.IO;
@@ -14,38 +15,27 @@ namespace SshManager
 {
     internal sealed class ConnectionsWindow : ThemedForm
     {
-        private const string PortColumn = "Port", FilesColumn = "FilesAction", TerminalColumn = "TerminalAction";
-        /// <summary>The «Избранное» tab; group ids are 32 hex digits, so this never collides with one.</summary>
-        private const string FavoritesId = "favorites";
-        private const int ActionOuterPadding = 5, ActionInnerPadding = 7, ActionIcon = 16, ActionGap = 6;
-        private const TextFormatFlags ActionText = TextFormatFlags.VerticalCenter | TextFormatFlags.SingleLine |
-            TextFormatFlags.NoPadding | TextFormatFlags.EndEllipsis | TextFormatFlags.NoPrefix | TextFormatFlags.PreserveGraphicsClipping;
         private readonly Dictionary<string, SftpWindow> fileWindows = new Dictionary<string, SftpWindow>(StringComparer.Ordinal);
         private readonly string sshDirectory;
         private readonly ConfigFile file;
         private readonly GroupFile groupFile;
-        private readonly DataGridView grid;
-        private readonly TabStrip tabs;
-        private readonly TextBox search;
         private readonly Button add;
-        private readonly Button edit;
-        private readonly Button delete;
         private readonly SurfaceButton serversButton, sessionsButton;
-        private readonly Button backupButton;
+        private bool backupRunning;
         private readonly SurfaceButton themeButton;
         private readonly SurfaceButton updateButton;
         private readonly CancellationTokenSource updateLifetime = new CancellationTokenSource();
         private AppUpdate availableUpdate;
         private readonly Panel pages;
-        private readonly TableLayoutPanel catalog;
-        private readonly ContextMenuStrip backupMenu;
+        private readonly Control start;
+        private Label startTitle, startDetail;
+        private Button startRetry;
+        private ContextMenuStrip columnMenu;
         private readonly BackupCommands backup;
         private readonly PathLabel source;
         private readonly ToolTip hints = new ToolTip();
         private readonly Label status;
-        private readonly Label empty;
         private readonly Label catalogTitle;
-        private readonly SurfaceButton sshTab, rdpTab, vncTab;
         private readonly string settingsPath;
         private readonly ContextMenuStrip serverMenu;
         private ContextMenuStrip desktopMenu;
@@ -53,7 +43,8 @@ namespace SshManager
         private readonly ToolStripMenuItem tabColorMenu;
         private readonly ToolStripMenuItem moveTabLeft;
         private readonly ToolStripMenuItem moveTabRight;
-        private readonly ToolStripMenuItem startupTab;
+        private readonly ToolStripMenuItem foldTab, renameTab, deleteTab;
+        private readonly ToolStripSeparator tabSeparator;
         private readonly ToolStripMenuItem moveMenu;
         private readonly ToolStripMenuItem favoriteItem;
         private readonly TextBox quick;
@@ -62,10 +53,11 @@ namespace SshManager
         private Groups groups = new Groups();
         private Connection menuConnection;
         private ConfigDocument document;
-        private string activeGroupId;
+        /// <summary>The tab of the group header menu.</summary>
+        private string menuGroupId;
         private SessionsPage sessions;
+        /// <summary>The protocol chosen in the «Серверы» column: «Добавить сервер» creates one of this kind.</summary>
         private CatalogKind kind = CatalogKind.Ssh;
-        private bool showRdp => kind == CatalogKind.Rdp;
 
         public ConnectionsWindow(string sshDirectory, string groupsPath)
         {
@@ -77,7 +69,7 @@ namespace SshManager
             try { groups = groupFile.Load(); }
             catch (Exception ex) when (Theme.IsFileError(ex)) { /* Reload reports this when the window opens. */ }
             Theme.IsDark = groups.DarkTheme;
-            backup = new BackupCommands(this, sshDirectory, groupsPath, () => Reload(openStartupTab: true));
+            backup = new BackupCommands(this, sshDirectory, groupsPath, () => Reload());
             Text = "SSH Manager " + AppUpdates.CurrentVersion.ToString(3);
             Icon = Icon.ExtractAssociatedIcon(Application.ExecutablePath);
             Font = Theme.Body;
@@ -97,14 +89,6 @@ namespace SshManager
             pages = new Panel { Dock = DockStyle.Fill, Margin = Padding.Empty };
             frame.Controls.Add(pages, 0, 1);
             Controls.Add(frame);
-
-            var layout = new TableLayoutPanel { Dock = DockStyle.Fill, Padding = new Padding(0), Margin = Padding.Empty, ColumnCount = 1, RowCount = 4 };
-            layout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-            catalog = layout;
-            layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 39));
-            layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 49));
-            layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 46));
-            layout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
 
             add = Theme.Button("Добавить сервер", 158, true, Glyph.Plus);
             add.Click += (sender, args) =>
@@ -141,17 +125,6 @@ namespace SshManager
             frame.Controls.Add(header, 0, 0);
             header.Resize += (sender, args) => FitHeader();
 
-            var protocols = new FlowLayoutPanel { Dock = DockStyle.Fill, WrapContents = false, Margin = Padding.Empty };
-            sshTab = Theme.Button("SSH", 86, glyph: Glyph.Terminal);
-            rdpTab = Theme.Button("RDP", 86, glyph: Glyph.Server);
-            vncTab = Theme.Button("VNC", 86, glyph: Glyph.Server);
-            sshTab.AccessibleRole = rdpTab.AccessibleRole = vncTab.AccessibleRole = AccessibleRole.PageTab;
-            sshTab.Style = ButtonStyle.SelectedTab;
-            rdpTab.Style = vncTab.Style = ButtonStyle.Tab;
-            sshTab.Click += (sender, args) => SelectProtocol(CatalogKind.Ssh);
-            rdpTab.Click += (sender, args) => SelectProtocol(CatalogKind.Rdp);
-            vncTab.Click += (sender, args) => SelectProtocol(CatalogKind.Vnc);
-            protocols.Controls.AddRange(new Control[] { sshTab, rdpTab, vncTab });
             quick = new TextBox { AccessibleName = "Быстрое подключение", MaxLength = 300 };
             Theme.SetCue(quick, "Быстрое подключение: user@host, rdp:// или vnc://");
             hints.SetToolTip(quick, "Подключиться без сохранения профиля. Enter — подключиться.");
@@ -172,111 +145,7 @@ namespace SshManager
                 quickFrame.Bounds = new Rectangle((quickHost.ClientSize.Width - width) / 2, (quickHost.ClientSize.Height - height) / 2, width, height);
             };
             header.Controls.Add(quickHost, 2, 0);
-            layout.Controls.Add(protocols, 0, 0);
-
-            var tabBar = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2, Margin = new Padding(0, 0, 0, 1) };
-            tabBar.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-            tabBar.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
-            tabs = new TabStrip { Dock = DockStyle.Fill, Margin = new Padding(0) };
-            tabs.ReorderRequested += (id, anchorId, before) =>
-                UpdateGroups(items => items.PlaceTab(id, anchorId, before), activeGroupId, SelectedKey);
-            tabBar.Controls.Add(tabs, 0, 0);
-            var newTab = Theme.Button("Новая вкладка", 140, glyph: Glyph.Plus, quiet: true);
-            newTab.Height = 31;
-            newTab.Click += (sender, args) => EditGroup(null);
-            tabBar.Controls.Add(newTab, 1, 0);
-            layout.Controls.Add(tabBar, 0, 1);
-
-            var tools = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2, Margin = new Padding(0) };
-            tools.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-            tools.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
-            layout.Controls.Add(tools, 0, 2);
-
-            var filter = new FlowLayoutPanel { Dock = DockStyle.Fill, WrapContents = false, Margin = new Padding(0) };
-            var serverSearch = new ServerSearch();
-            search = serverSearch.Input;
-            search.TextChanged += (sender, args) => RefreshList(null);
-            filter.Controls.Add(serverSearch);
-            filter.Resize += (sender, args) =>
-            {
-                if (filter.IsHandleCreated)
-                    serverSearch.Width = Math.Max(Theme.Scaled(this, 140), Math.Min(Theme.Scaled(this, 265), filter.ClientSize.Width - 2));
-            };
-            search.KeyDown += (sender, args) =>
-            {
-                if (args.KeyCode == Keys.Escape && search.TextLength > 0) { search.Clear(); args.SuppressKeyPress = true; }
-                else if (args.KeyCode == Keys.Down && grid.Rows.Count > 0) { grid.Focus(); args.SuppressKeyPress = true; }
-            };
-            tools.Controls.Add(filter, 0, 0);
-
-            var actions = new FlowLayoutPanel { AutoSize = true, WrapContents = false, Margin = new Padding(0) };
-            edit = Theme.Button("Изменить", 105, glyph: Glyph.Edit, quiet: true);
-            delete = Theme.Button("Удалить", 95, glyph: Glyph.Delete, danger: true, quiet: true);
-            var refresh = Theme.Button("Обновить", 106, glyph: Glyph.Refresh, quiet: true);
-            backupButton = Theme.Button("Резервные копии", 154, glyph: Glyph.Folder, quiet: true);
-            backupMenu = Theme.Menu();
-            backupMenu.Items.Add(Theme.MenuItem("Экспорт архива…", Glyph.Copy, async (sender, args) => await RunBackup(backup.Export)));
-            backupMenu.Items.Add(Theme.MenuItem("Импорт архива…", Glyph.Folder, async (sender, args) => await RunBackup(backup.Import)));
-            backupMenu.Items.Add(new ToolStripSeparator());
-            backupMenu.Items.Add(Theme.MenuItem("Импорт из других программ…", Glyph.Folder, (sender, args) => ImportOther()));
-            backupButton.Click += (sender, args) => backupMenu.Show(backupButton, new Point(0, backupButton.Height));
-            edit.Click += (sender, args) => EditRow(grid.CurrentRow?.Tag);
-            delete.Click += (sender, args) =>
-            {
-                if (kind == CatalogKind.Rdp) DeleteDesktop(SelectedDesktop);
-                else if (kind == CatalogKind.Vnc) DeleteVnc(SelectedVnc);
-                else DeleteConnection(Selected);
-            };
-            refresh.Click += (sender, args) => Reload();
-            actions.Controls.AddRange(new Control[] { backupButton, refresh, edit, delete });
             hints.SetToolTip(add, "Ctrl+N");
-            hints.SetToolTip(refresh, "Перечитать SSH config и настройки (F5)");
-            hints.SetToolTip(edit, "Изменить выбранное подключение (F2)");
-            hints.SetToolTip(delete, "Удалить выбранное подключение (Delete)");
-            tools.Controls.Add(actions, 1, 0);
-
-            var list = new Panel { Dock = DockStyle.Fill, Margin = new Padding(0), Padding = new Padding(1), BackColor = Theme.Line };
-            layout.Controls.Add(list, 0, 3);
-            grid = MakeGrid(DeviceDpi);
-            grid.SelectionChanged += (sender, args) => UpdateActions();
-            grid.CellMouseClick += (sender, args) =>
-            {
-                if (args.Button == MouseButtons.Left && args.RowIndex >= 0 && args.ColumnIndex >= 0)
-                    RunGridAction(grid.Columns[args.ColumnIndex], grid.Rows[args.RowIndex].Tag);
-            };
-            grid.CellDoubleClick += (sender, args) =>
-            {
-                if (args.RowIndex >= 0 && args.ColumnIndex >= 0 && !(grid.Columns[args.ColumnIndex] is DataGridViewButtonColumn))
-                    EditRow(grid.Rows[args.RowIndex].Tag);
-            };
-            grid.ColumnHeaderMouseClick += (sender, args) =>
-            {
-                if (args.Button == MouseButtons.Left && args.ColumnIndex >= 0 && args.ColumnIndex <= 1) SortColumn(args.ColumnIndex);
-            };
-            grid.CellPainting += PaintGridCell;
-            grid.MouseUp += (sender, args) =>
-            {
-                if (args.Button != MouseButtons.Right) return;
-                var hit = grid.HitTest(args.X, args.Y);
-                if (hit.RowIndex >= 0 && hit.ColumnIndex >= 0) ShowServerMenu(hit.RowIndex, args.Location);
-            };
-            grid.KeyDown += (sender, args) =>
-            {
-                if (grid.CurrentRow?.Tag == null) return;
-                if (args.KeyCode == Keys.Delete && args.Modifiers == Keys.None) { args.Handled = true; delete.PerformClick(); return; }
-                if (args.KeyCode == Keys.F2 && args.Modifiers == Keys.None) { args.Handled = true; EditRow(grid.CurrentRow.Tag); return; }
-                if ((args.KeyCode == Keys.Enter || args.KeyCode == Keys.Space) &&
-                    RunGridAction(grid.CurrentCell.OwningColumn, grid.CurrentRow.Tag))
-                {
-                    args.Handled = args.SuppressKeyPress = true;
-                    return;
-                }
-                if (!IsMenuKey(args)) return;
-                args.Handled = true;
-                int row = grid.CurrentRow.Index;
-                ShowServerMenu(row, new Point(12, grid.GetCellDisplayRectangle(0, row, true).Bottom));
-            };
-            list.Controls.Add(grid);
 
             moveMenu = Theme.MenuItem("Переместить во вкладку", Glyph.Move);
             favoriteItem = Theme.MenuItem("В избранное", Glyph.Star, (sender, args) => ToggleFavorite(Groups.Key(menuConnection.Alias), menuConnection.Alias));
@@ -296,36 +165,24 @@ namespace SshManager
                 new ToolStripSeparator(),
                 Theme.MenuItem("Удалить", Glyph.Delete, (sender, args) => DeleteConnection(menuConnection))
             });
+            // Header of a group in the «Серверы» column (docs/ui-spec.md §2.2).
             tabMenu = Theme.Menu();
             tabColorMenu = Theme.MenuItem("Цветовая метка", Glyph.Dot);
             AddColorMenuItem(null);
             foreach (var color in TabColor.Palette) AddColorMenuItem(color);
-            moveTabLeft = Theme.MenuItem("Переместить влево", Glyph.MoveLeft, (sender, args) => ShiftActiveTab(-1));
-            moveTabRight = Theme.MenuItem("Переместить вправо", Glyph.Move, (sender, args) => ShiftActiveTab(1));
-            startupTab = Theme.MenuItem("Открывать при запуске", Glyph.None, (sender, args) =>
-            {
-                string id = activeGroupId;
-                if (groups.StartupTabId != id)
-                    UpdateGroups(items => items.SetStartupTab(id), id, SelectedKey);
-            });
+            foldTab = Theme.MenuItem("Свернуть", Glyph.None, (sender, args) => ToggleSection(menuGroupId));
+            renameTab = Theme.MenuItem("Переименовать вкладку", Glyph.Edit, (sender, args) => EditGroup(menuGroupId));
+            moveTabLeft = Theme.MenuItem("Переместить выше", Glyph.MoveLeft, (sender, args) => ShiftMenuTab(-1));
+            moveTabRight = Theme.MenuItem("Переместить ниже", Glyph.Move, (sender, args) => ShiftMenuTab(1));
+            deleteTab = Theme.MenuItem("Удалить вкладку", Glyph.Delete, (sender, args) => DeleteGroup(menuGroupId));
+            tabSeparator = new ToolStripSeparator();
             tabMenu.Items.AddRange(new ToolStripItem[]
             {
-                Theme.MenuItem("Переименовать вкладку", Glyph.Edit, (sender, args) => EditGroup(activeGroupId)),
-                tabColorMenu,
-                moveTabLeft,
-                moveTabRight,
-                startupTab,
-                new ToolStripSeparator(),
-                Theme.MenuItem("Удалить вкладку", Glyph.Delete, (sender, args) => DeleteGroup())
+                foldTab, renameTab, tabColorMenu, moveTabLeft, moveTabRight, tabSeparator,
+                Theme.MenuItem("Новая вкладка…", Glyph.Plus, (sender, args) => EditGroup(null)),
+                deleteTab
             });
-
-            empty = new Label
-            {
-                TextAlign = ContentAlignment.MiddleCenter, Dock = DockStyle.Fill, BackColor = Theme.Surface,
-                ForeColor = Theme.Muted, Padding = new Padding(16)
-            };
-            list.Controls.Add(empty);
-            empty.BringToFront();
+            start = MakeStartPage();
 
             var footer = new TableLayoutPanel
             {
@@ -345,19 +202,15 @@ namespace SshManager
             footer.Controls.Add(updateButton, 2, 0);
             frame.Controls.Add(footer, 0, 2);
 
-            SessionWorkspace().ShowCatalog();
+            SessionWorkspace().ShowStart();
             Theme.ScaleToDpi(this);
             ResumeLayout();
-            Shown += (sender, args) => Reload(openStartupTab: true);
+            Shown += (sender, args) => Reload();
             Shown += async (sender, args) => await CheckUpdates(interactive: false);
         }
 
-        private const string FavoritesHint = "Отметьте серверы звёздочкой: «В избранное» в меню строки.";
-
-        /// <summary>The open user tab: null for «Все серверы» and «Избранное».</summary>
-        private string ActiveTabId => activeGroupId == FavoritesId ? null : activeGroupId;
-
-        private Connection Selected => grid.CurrentRow?.Tag as Connection;
+        /// <summary>A new server goes to the tab of the server or group chosen in the «Серверы» column.</summary>
+        private string TargetGroupId => sessions?.Servers.SelectedGroupId;
 
         /// <summary>
         /// Keeps the page title whole: in a narrow window «Настройки» and then the theme switcher show only their
@@ -400,8 +253,7 @@ namespace SshManager
 
         private void ToggleFavorite(string key, string select)
         {
-            string tab = activeGroupId == FavoritesId && groups.Favorites.Count == 1 && groups.IsFavorite(key) ? null : activeGroupId;
-            UpdateGroups(items => items.ToggleFavorite(key), tab, select);
+            UpdateGroups(items => items.ToggleFavorite(key), select);
         }
 
         /// <summary>«Известные хосты» (docs/ui-spec.md §9.2): for a server — its file and its host in the search.</summary>
@@ -470,23 +322,23 @@ namespace SshManager
             if (target.Vnc)
             {
                 VncProfile vnc;
-                try { vnc = new VncProfile(Guid.NewGuid().ToString("N"), target.Host, target.Host, target.Port, target.User, ActiveTabId); }
+                try { vnc = new VncProfile(Guid.NewGuid().ToString("N"), target.Host, target.Host, target.Port, target.User, TargetGroupId); }
                 catch (ArgumentException error) { Theme.ShowError(this, error); return; }
                 quick.Clear();
                 ConnectVnc(vnc, forceNew: true);
                 if (!Ask("Сохранить подключение «" + vnc.Name + "»?")) return;
-                UpdateGroups(items => items.SaveVnc(vnc, false), activeGroupId, vnc.Id);
+                UpdateGroups(items => items.SaveVnc(vnc, false), vnc.Id);
                 return;
             }
             if (target.Rdp)
             {
                 RdpProfile profile;
-                try { profile = new RdpProfile(Guid.NewGuid().ToString("N"), target.Host, target.Host, target.Port, target.User, "", ActiveTabId); }
+                try { profile = new RdpProfile(Guid.NewGuid().ToString("N"), target.Host, target.Host, target.Port, target.User, "", TargetGroupId); }
                 catch (ArgumentException error) { Theme.ShowError(this, error); return; }
                 quick.Clear();
                 ConnectDesktop(profile, forceNew: true);
                 if (!Ask("Сохранить подключение «" + profile.Name + "»?")) return;
-                UpdateGroups(items => items.SaveDesktop(profile, false), activeGroupId, profile.Id);
+                UpdateGroups(items => items.SaveDesktop(profile, false), profile.Id);
                 return;
             }
             if (document == null) { Theme.ShowError(this, new IOException("Не удалось прочитать SSH config. Нажмите «Обновить».")); return; }
@@ -511,7 +363,7 @@ namespace SshManager
                     Keys = new List<Identity>() });
                 file.Save(next);
                 document = next;
-                string tab = ActiveTabId;
+                string tab = TargetGroupId;
                 if (tab != null) groups = groupFile.Update(items => items.Move(alias, tab));
             }
             catch (Exception ex) when (Theme.IsFileError(ex) || ex is ArgumentException || ex is InvalidOperationException) { Theme.ShowError(this, ex); }
@@ -533,7 +385,7 @@ namespace SshManager
             if (chosen.Count == 0) return;
             int added = 0;
             var problems = new List<string>();
-            string tab = ActiveTabId;
+            string tab = TargetGroupId;
             var ssh = chosen.Where(item => !item.Rdp && !item.Vnc).ToList();
             if (ssh.Count > 0 && document != null)
             {
@@ -586,7 +438,6 @@ namespace SshManager
                 }
                 catch (Exception ex) when (Theme.IsFileError(ex) || ex is InvalidOperationException) { problems.Add(ex.Message); }
             }
-            RefreshTabs(activeGroupId);
             RefreshList(null);
             string report = "Импортировано подключений: " + added + ".";
             if (problems.Count > 0) report += "\n\nНе импортированы:\n" + String.Join("\n", problems.Take(10));
@@ -622,38 +473,6 @@ namespace SshManager
             }
             catch (Exception ex) when (Theme.IsFileError(ex) || ex is ArgumentException || ex is ExternalException) { Theme.ShowError(this, ex); }
         }
-        private RdpProfile SelectedDesktop => grid.CurrentRow?.Tag as RdpProfile;
-        private VncProfile SelectedVnc => grid.CurrentRow?.Tag as VncProfile;
-        private string SelectedKey => SelectedDesktop?.Id ?? SelectedVnc?.Id ?? Selected?.Alias;
-
-        private void SelectProtocol(CatalogKind next)
-        {
-            if (kind == next) return;
-            kind = next;
-            bool desktop = next != CatalogKind.Ssh;
-            sshTab.Style = next == CatalogKind.Ssh ? ButtonStyle.SelectedTab : ButtonStyle.Tab;
-            rdpTab.Style = next == CatalogKind.Rdp ? ButtonStyle.SelectedTab : ButtonStyle.Tab;
-            vncTab.Style = next == CatalogKind.Vnc ? ButtonStyle.SelectedTab : ButtonStyle.Tab;
-            grid.Columns[0].HeaderText = desktop ? "Название" : "Псевдоним";
-            grid.Columns[TerminalColumn].HeaderText = desktop ? "Рабочий стол" : "Терминал";
-            grid.Columns[FilesColumn].Visible = !desktop;
-            source.Text = desktop ? settingsPath : Path.Combine(sshDirectory, "config");
-            hints.SetToolTip(source, source.Text);
-            search.Clear();
-            RefreshList(null);
-        }
-
-        private void SortColumn(int index)
-        {
-            string tab = ActiveTabId;
-            var current = groups.Sort(tab, kind);
-            var ascending = index == 0 ? ServerSort.Name : ServerSort.Address;
-            var descending = index == 0 ? ServerSort.NameDescending : ServerSort.AddressDescending;
-            var next = current == ascending ? descending : current == descending ? ServerSort.Original : ascending;
-            var protocol = kind;
-            UpdateGroups(items => items.SetSort(tab, protocol, next), activeGroupId, SelectedKey);
-        }
-
         private async Task CheckUpdates(bool interactive)
         {
             if (!updateButton.Enabled || (!interactive && !groups.Preferences.CheckUpdates)) return;
@@ -687,7 +506,7 @@ namespace SshManager
                 });
                 staged = await Task.Run(() => AppUpdates.Download(update, progress, token));
                 if (IsDisposed) return;
-                if (!backupButton.Enabled || Application.OpenForms.Cast<Form>().Any(window => window.Modal && window.Visible))
+                if (backupRunning || Application.OpenForms.Cast<Form>().Any(window => window.Modal && window.Visible))
                     throw new IOException("Завершите текущее действие перед установкой обновления.");
 
                 bool sessionsOpen = (sessions?.CountOpen() ?? 0) > 0 || fileWindows.Count > 0;
@@ -731,17 +550,15 @@ namespace SshManager
 
         private async Task RunBackup(Func<Task> action)
         {
-            if (!backupButton.Enabled) return;
-            backupButton.Enabled = false;
+            if (backupRunning) return;
+            backupRunning = true;
             try { await action(); }
             catch (Exception ex) when (BackupCommands.IsBackupError(ex)) { if (!IsDisposed) Theme.ShowError(this, ex); }
-            finally { if (!IsDisposed) backupButton.Enabled = true; }
+            finally { backupRunning = false; }
         }
 
-        private void Reload(bool openStartupTab = false)
+        private void Reload()
         {
-            var selected = SelectedKey;
-            var groupId = activeGroupId;
             try { document = file.Load(); }
             catch (Exception ex) when (Theme.IsFileError(ex))
             {
@@ -752,8 +569,7 @@ namespace SshManager
             catch (Exception ex) when (Theme.IsFileError(ex)) { Theme.ShowError(this, ex); }
             if (Theme.IsDark != groups.DarkTheme) ApplySelectedTheme();
             ApplyPreferences();
-            RefreshTabs(openStartupTab ? groups.StartupTabId : groupId);
-            RefreshList(selected);
+            RefreshList(null);
         }
 
         private void ToggleTheme()
@@ -771,103 +587,142 @@ namespace SshManager
             FitHeader();
         }
 
-        private void RefreshList(string selectAlias)
+        /// <summary>Refills the «Серверы» column (selecting a saved server) and the footer.</summary>
+        private void RefreshList(string select)
         {
-            sessions?.RefreshServers();
-            grid.Rows.Clear();
-            var order = groups.Sort(ActiveTabId, kind);
-            bool favorites = activeGroupId == FavoritesId;
-            grid.Columns[0].HeaderCell.SortGlyphDirection = order == ServerSort.Name ? SortOrder.Ascending :
-                order == ServerSort.NameDescending ? SortOrder.Descending : SortOrder.None;
-            grid.Columns[1].HeaderCell.SortGlyphDirection = order == ServerSort.Address ? SortOrder.Ascending :
-                order == ServerSort.AddressDescending ? SortOrder.Descending : SortOrder.None;
-            var activeGroup = groups.Find(activeGroupId);
-            if (kind == CatalogKind.Rdp) { RefreshDesktops(selectAlias, order, activeGroup); return; }
-            if (kind == CatalogKind.Vnc) { RefreshVnc(selectAlias, order, activeGroup); return; }
-            var connections = document == null ? new Connection[0] : document.Connections()
-                .Where(connection => (activeGroup == null || activeGroup.Aliases.Contains(connection.Alias)) &&
-                    (!favorites || groups.IsFavorite(Groups.Key(connection.Alias)))).ToArray();
-            string query = search.Text.Trim();
-            DataGridViewRow toSelect = null;
-            foreach (var connection in ServerOrder.Apply(connections, order, item => item.Alias, item => HostOrAlias(item)))
-            {
-                var host = connection.Get("hostname");
-                var user = connection.Get("user");
-                var group = groups.ForAlias(connection.Alias);
-                var groupName = group == null ? "" : group.Name;
-                if (query.Length > 0 && !new[] { connection.Alias, host, user, groupName }.Any(text => text.IndexOf(query, StringComparison.OrdinalIgnoreCase) >= 0)) continue;
-                var port = connection.Get("port");
-                var row = grid.Rows[grid.Rows.Add(connection.Alias, Dash(host), Dash(user), Dash(port), Dash(groupName),
-                    "Файлы", SessionAction(connection.Alias))];
-                row.Tag = connection;
-                if (String.Equals(selectAlias, connection.Alias, StringComparison.Ordinal)) toSelect = row;
-            }
-            if (toSelect != null) grid.CurrentCell = toSelect.Cells[0];
-            empty.Text = "По вашему запросу ничего не найдено.";
-            if (document == null) empty.Text = "Не удалось прочитать SSH config. Нажмите «Обновить», чтобы повторить попытку.";
-            else if (connections.Length == 0) empty.Text = favorites ? FavoritesHint : activeGroup == null
-                ? "Добавьте сервер, чтобы создать первое подключение."
-                : "Добавьте сервер или перенесите сюда подключение из «Все серверы».";
-            UpdateListStatus(connections.Length);
+            sessions?.RefreshServers(select);
+            UpdateStatus();
         }
 
-        private void RefreshDesktops(string selected, ServerSort order, ServerGroup activeGroup)
+        /// <summary>Footer: the file of the chosen protocol and its number of servers; the start page text.</summary>
+        private void UpdateStatus()
         {
-            var desktops = groups.Desktops.Where(profile => (activeGroup == null || profile.GroupId == activeGroup.Id) &&
-                (activeGroupId != FavoritesId || groups.IsFavorite(Groups.Key(profile)))).ToArray();
-            var query = search.Text.Trim();
-            foreach (var profile in ServerOrder.Apply(desktops, order, item => item.Name, item => item.Host))
-            {
-                var groupName = groups.Find(profile.GroupId)?.Name ?? "";
-                if (!new[] { profile.Name, profile.Address, profile.Account, groupName }
-                    .Any(value => value.IndexOf(query, StringComparison.OrdinalIgnoreCase) >= 0)) continue;
-                var row = grid.Rows[grid.Rows.Add(profile.Name, profile.Host, Dash(profile.Account), profile.Port, Dash(groupName),
-                    "", SessionAction(SessionTarget.RdpKey(profile)))];
-                row.Tag = profile;
-                if (profile.Id == selected) grid.CurrentCell = row.Cells[0];
-            }
-            empty.Text = desktops.Length > 0 ? "По вашему запросу ничего не найдено." : activeGroupId == FavoritesId ? FavoritesHint :
-                "Добавьте RDP-подключение или импортируйте профиль .rdp.";
-            UpdateListStatus(desktops.Length);
-        }
-
-        private void RefreshVnc(string selected, ServerSort order, ServerGroup activeGroup)
-        {
-            var profiles = groups.Vnc.Where(profile => (activeGroup == null || profile.GroupId == activeGroup.Id) &&
-                (activeGroupId != FavoritesId || groups.IsFavorite(Groups.Key(profile)))).ToArray();
-            var query = search.Text.Trim();
-            foreach (var profile in ServerOrder.Apply(profiles, order, item => item.Name, item => item.Host))
-            {
-                var groupName = groups.Find(profile.GroupId)?.Name ?? "";
-                if (!new[] { profile.Name, profile.Address, profile.User, groupName, profile.Via }
-                    .Any(value => value.IndexOf(query, StringComparison.OrdinalIgnoreCase) >= 0)) continue;
-                var row = grid.Rows[grid.Rows.Add(profile.Name, profile.Host, Dash(profile.User), profile.Port, Dash(groupName),
-                    "", SessionAction(profile.Key))];
-                row.Tag = profile;
-                if (profile.Id == selected) grid.CurrentCell = row.Cells[0];
-            }
-            empty.Text = profiles.Length > 0 ? "По вашему запросу ничего не найдено." : activeGroupId == FavoritesId ? FavoritesHint :
-                "Добавьте VNC-подключение.";
-            UpdateListStatus(profiles.Length);
-        }
-
-        private void UpdateListStatus(int total)
-        {
-            empty.Visible = grid.Rows.Count == 0;
-            status.Text = grid.Rows.Count == total ? "Подключений: " + total : "Найдено: " + grid.Rows.Count + " из " + total;
-            UpdateActions();
-        }
-
-        private void UpdateActions()
-        {
+            string path = kind == CatalogKind.Ssh ? Path.Combine(sshDirectory, "config") : settingsPath;
+            source.Text = path;
+            hints.SetToolTip(source, path);
+            int count = sessions?.Servers.Count ?? 0;
+            status.Text = "Подключений: " + count;
             add.Enabled = kind != CatalogKind.Ssh || document != null;
-            edit.Enabled = delete.Enabled = grid.CurrentRow?.Tag != null;
+            if (startTitle == null) return;
+            bool none = document != null && !document.Connections().Any() && groups.Desktops.Count == 0 && groups.Vnc.Count == 0;
+            startTitle.Text = document == null ? "Не удалось прочитать SSH config" : none ? "Добавьте первый сервер" : "Выберите сервер слева";
+            startDetail.Text = document == null ? "Проверьте файл " + Path.Combine(sshDirectory, "config") + " и нажмите «Обновить»."
+                : none ? "SSH-серверы сохраняются в ~/.ssh/config, RDP и VNC — в настройках приложения. Можно перенести подключения из PuTTY, mRemoteNG или MobaXterm."
+                : "Двойной щелчок или Enter открывает сеанс. Правая кнопка — изменить, открыть файлы, перенести во вкладку. Быстрое подключение — Ctrl+K.";
+            startRetry.Visible = document == null;
         }
 
-        private static string HostOrAlias(Connection connection)
+        /// <summary>The workspace without a session (docs/ui-spec.md §2.3).</summary>
+        private Control MakeStartPage()
         {
-            string host = connection.Get("hostname");
-            return host.Length == 0 ? connection.Alias : host;
+            var page = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 5, Margin = Padding.Empty };
+            page.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+            page.RowStyles.Add(new RowStyle(SizeType.Percent, 40));
+            page.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+            page.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+            page.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+            page.RowStyles.Add(new RowStyle(SizeType.Percent, 60));
+            startTitle = new Label { Font = Theme.Title, AutoSize = true, Anchor = AnchorStyles.None, Margin = new Padding(0, 0, 0, 8) };
+            startDetail = new Label { AutoSize = true, Anchor = AnchorStyles.None, ForeColor = Theme.Muted, TextAlign = ContentAlignment.MiddleCenter,
+                MaximumSize = new Size(Theme.Scaled(this, 560), 0), Margin = new Padding(0, 0, 0, 18) };
+            var actions = new FlowLayoutPanel { AutoSize = true, Anchor = AnchorStyles.None, WrapContents = false, Margin = Padding.Empty };
+            var addServer = Theme.Button("Добавить сервер", 170, true, Glyph.Plus);
+            addServer.Click += (sender, args) => add.PerformClick();
+            var import = Theme.Button("Импорт из других программ…", 272, glyph: Glyph.Folder);
+            import.Click += (sender, args) => ImportOther();
+            startRetry = Theme.Button("Обновить", 120, glyph: Glyph.Refresh);
+            startRetry.Click += (sender, args) => Reload();
+            actions.Controls.AddRange(new Control[] { addServer, import, startRetry });
+            page.Controls.Add(startTitle, 0, 1);
+            page.Controls.Add(startDetail, 0, 2);
+            page.Controls.Add(actions, 0, 3);
+            return page;
+        }
+
+        /// <summary>«⋯» of the «Серверы» column: tabs, order, refresh, backups and import (docs/ui-spec.md §2.2).</summary>
+        private void ShowColumnMenu(Control at, Point point)
+        {
+            columnMenu?.Dispose();
+            columnMenu = Theme.Menu();
+            var order = Theme.MenuItem("Сортировка", Glyph.Move);
+            var current = groups.Sort(null, kind);
+            foreach (var pair in new[] { Tuple.Create(ServerSort.Original, "Исходный порядок"), Tuple.Create(ServerSort.Name, "По названию ↑"),
+                Tuple.Create(ServerSort.NameDescending, "По названию ↓"), Tuple.Create(ServerSort.Address, "По адресу ↑"),
+                Tuple.Create(ServerSort.AddressDescending, "По адресу ↓") })
+            {
+                var sort = pair.Item1;
+                var protocol = kind;
+                var item = Theme.MenuItem(pair.Item2, Glyph.None, (sender, args) => UpdateGroups(items => items.SetSort(null, protocol, sort)));
+                item.Checked = current == sort;
+                order.DropDownItems.Add(item);
+            }
+            columnMenu.Items.AddRange(new ToolStripItem[]
+            {
+                Theme.MenuItem("Новая вкладка…", Glyph.Plus, (sender, args) => EditGroup(null)),
+                order,
+                new ToolStripSeparator(),
+                Theme.MenuItem("Обновить список", Glyph.Refresh, (sender, args) => Reload()),
+                Theme.MenuItem("Экспорт архива…", Glyph.Copy, async (sender, args) => await RunBackup(backup.Export)),
+                Theme.MenuItem("Импорт архива…", Glyph.Folder, async (sender, args) => await RunBackup(backup.Import)),
+                Theme.MenuItem("Импорт из других программ…", Glyph.Folder, (sender, args) => ImportOther()),
+                Theme.MenuItem("Импорт .rdp…", Glyph.Server, (sender, args) => TransferDesktop(null)),
+                new ToolStripSeparator(),
+                Theme.MenuItem("Открыть SSH config", Glyph.Edit, (sender, args) => OpenConfig()),
+                Theme.MenuItem("Известные хосты…", Glyph.Key, (sender, args) => OpenKnownHosts(null))
+            });
+            foreach (ToolStripItem item in columnMenu.Items)
+                if (item.Text == "Обновить список") item.ToolTipText = "F5";
+            columnMenu.Show(at, point);
+        }
+
+        private void OpenConfig()
+        {
+            string path = Path.Combine(sshDirectory, "config");
+            try
+            {
+                if (!File.Exists(path)) throw new FileNotFoundException("Файл ~/.ssh/config появится после добавления первого сервера.");
+                Process.Start(new ProcessStartInfo("notepad.exe", "\"" + path + "\"") { UseShellExecute = false });
+            }
+            catch (Exception error) when (Theme.IsFileError(error) || error is System.ComponentModel.Win32Exception) { Theme.ShowError(this, error); }
+        }
+
+        /// <summary>Menu of a group header: fold, rename, color, order and delete for a tab; only folding for the others.</summary>
+        private void ShowSectionMenu(string key, Control at, Point point)
+        {
+            menuGroupId = key;
+            var group = groups.Find(key);
+            foldTab.Text = groups.Collapsed.Contains(key) ? "Развернуть" : "Свернуть";
+            foreach (var item in new ToolStripItem[] { renameTab, tabColorMenu, moveTabLeft, moveTabRight, deleteTab }) item.Available = group != null;
+            if (group != null)
+            {
+                int index = groups.Items.IndexOf(group);
+                moveTabLeft.Enabled = index > 0;
+                moveTabRight.Enabled = index < groups.Items.Count - 1;
+                var color = TabColor.Find(group.ColorId);
+                foreach (ToolStripMenuItem item in tabColorMenu.DropDownItems)
+                    item.Checked = (string)item.Tag == (color == null ? null : color.Id);
+            }
+            tabMenu.Show(at, point);
+        }
+
+        private void ShiftMenuTab(int offset)
+        {
+            string id = menuGroupId;
+            UpdateGroups(items => items.ShiftTab(id, offset));
+        }
+
+        private void ToggleSection(string key)
+        {
+            try { groups = groupFile.Update(items => items.ToggleCollapsed(key)); }
+            catch (Exception error) when (Theme.IsFileError(error) || error is System.Xml.XmlException) { Theme.ShowError(this, error); }
+            sessions?.RefreshServers();
+        }
+
+        private void DeleteEntry(object entry)
+        {
+            if (entry is Connection connection) DeleteConnection(connection);
+            else if (entry is RdpProfile profile) DeleteDesktop(profile);
+            else if (entry is VncProfile vnc) DeleteVnc(vnc);
         }
 
         private void EditRow(object entry)
@@ -885,7 +740,7 @@ namespace SshManager
             try { hasPassword = profile != null && VncPasswords.Exists(profile); }
             catch (IOException error) { Theme.ShowError(this, error); }
             var aliases = document == null ? new string[0] : document.Connections().Select(item => item.Alias).ToArray();
-            using (var dialog = new VncDialog(profile, ActiveTabId, hasPassword, aliases, (replacement, password, forgetPassword) =>
+            using (var dialog = new VncDialog(profile, TargetGroupId, hasPassword, aliases, (replacement, password, forgetPassword) =>
             {
                 groups = groupFile.Update(items => items.SaveVnc(replacement, profile != null));
                 if (forgetPassword) VncPasswords.Set(replacement, null);
@@ -895,7 +750,6 @@ namespace SshManager
             {
                 if (dialog.ShowDialog(this) != DialogResult.OK || selected == null) return;
             }
-            search.Clear();
             RefreshList(selected);
         }
 
@@ -907,7 +761,7 @@ namespace SshManager
             {
                 items.Vnc.RemoveAll(item => item.Id == profile.Id);
                 items.RenameKey(Groups.Key(profile), null);
-            }, activeGroupId);
+            });
             if (groups.Vnc.Any(item => item.Id == profile.Id)) return;
             try { VncPasswords.Set(profile, null); }
             catch (IOException error) { Theme.ShowError(this, error); }
@@ -953,7 +807,7 @@ namespace SshManager
             void AddDestination(string name, string id)
             {
                 var item = Theme.MenuItem(SafeMenuText(name), Glyph.Folder, (sender, args) =>
-                    UpdateGroups(items => items.MoveVnc(profile.Id, id), activeGroupId, profile.Id));
+                    UpdateGroups(items => items.MoveVnc(profile.Id, id), profile.Id));
                 item.Checked = profile.GroupId == id;
                 move.DropDownItems.Add(item);
             }
@@ -965,7 +819,7 @@ namespace SshManager
             bool import, hasPassword = false;
             try { hasPassword = profile != null && RdpPasswords.Exists(profile); }
             catch (IOException error) { Theme.ShowError(this, error); }
-            using (var dialog = new RdpDialog(profile, ActiveTabId, hasPassword, (replacement, password, forgetPassword) =>
+            using (var dialog = new RdpDialog(profile, TargetGroupId, hasPassword, (replacement, password, forgetPassword) =>
             {
                 bool changePassword = forgetPassword || password.Length > 0 ||
                     (hasPassword && profile != null && profile.Account != replacement.Account);
@@ -995,7 +849,6 @@ namespace SshManager
             }
             if (import) { TransferDesktop(null); return; }
             if (selected == null) return;
-            search.Clear();
             RefreshList(selected);
         }
 
@@ -1007,7 +860,7 @@ namespace SshManager
             {
                 items.Desktops.RemoveAll(item => item.Id == profile.Id);
                 items.RenameKey(Groups.Key(profile), null);
-            }, activeGroupId);
+            });
             if (groups.Desktops.Any(item => item.Id == profile.Id)) return;
             try { RdpPasswords.Set(profile, null); }
             catch (IOException error) { Theme.ShowError(this, error); }
@@ -1026,9 +879,8 @@ namespace SshManager
                     if (!import) profile.Export(dialog.FileName);
                     else
                     {
-                        var imported = RdpProfile.Import(dialog.FileName, ActiveTabId);
+                        var imported = RdpProfile.Import(dialog.FileName, TargetGroupId);
                         groups = groupFile.Update(items => items.SaveDesktop(imported, false));
-                        search.Clear();
                         RefreshList(imported.Id);
                     }
                 }
@@ -1073,7 +925,7 @@ namespace SshManager
                 {
                     if (connection != null && !String.Equals(connection.Alias, values.Alias, StringComparison.OrdinalIgnoreCase))
                         groups = groupFile.Update(items => items.RenameKey(Groups.Key(connection.Alias), Groups.Key(values.Alias)));
-                    string groupId = ActiveTabId;
+                    string groupId = TargetGroupId;
                     if (connection == null && groupId != null)
                         groups = groupFile.Update(items => items.Move(values.Alias, groupId));
                     else if (connection != null && connection.Alias != values.Alias && groups.ForAlias(connection.Alias) != null)
@@ -1090,8 +942,6 @@ namespace SshManager
             }, groups.Preferences))
             {
                 if (dialog.ShowDialog(this) != DialogResult.OK) return;
-                search.Clear();
-                RefreshTabs(activeGroupId);
                 RefreshList(dialog.Alias);
                 if (tabError != null) Theme.ShowError(this, new IOException("Подключение сохранено. Не удалось обновить вкладки.\n" + tabError.Message));
             }
@@ -1121,98 +971,13 @@ namespace SshManager
                 {
                     items.Move(connection.Alias, null);
                     items.RenameKey(Groups.Key(connection.Alias), null);
-                }, activeGroupId);
+                });
             else RefreshList(null);
         }
 
         private static bool ContainsPasswordTarget(ConfigDocument configuration, PasswordTarget target)
         {
             return configuration.Connections().Any(connection => PasswordTarget.From(connection)?.Id == target.Id);
-        }
-
-        private void RefreshTabs(string selected)
-        {
-            tabs.SuspendLayout();
-            try
-            {
-                var previous = tabs.Controls.Cast<Control>().ToArray();
-                tabs.Controls.Clear();
-                foreach (var page in previous) page.Dispose();
-                if (groups.Favorites.Count > 0) AddGroupTab("Избранное", FavoritesId, glyph: Glyph.Star);
-                AddGroupTab(Groups.AllName, null);
-                foreach (var group in groups.Items) AddGroupTab(group.Name, group.Id, TabColor.Find(group.ColorId));
-            }
-            finally { tabs.ResumeLayout(); }
-            SelectGroup(selected == FavoritesId && groups.Favorites.Count > 0 ? FavoritesId : groups.Find(selected) == null ? null : selected);
-        }
-
-        private void AddGroupTab(string title, string id, TabColor color = null, Glyph glyph = Glyph.None)
-        {
-            int padding = color == null && glyph == Glyph.None ? 22 : 39;
-            int desiredWidth = TextRenderer.MeasureText(title, Theme.Emphasis).Width + padding * DeviceDpi / 96;
-            var tab = Theme.Button(title, Math.Min(250 * DeviceDpi / 96, desiredWidth));
-            tab.Height = 30 * DeviceDpi / 96;
-            tab.Margin = new Padding(0, 2, 5, 0);
-            tab.Tag = id;
-            tab.Symbol = glyph;
-            tab.AccessibleRole = AccessibleRole.PageTab;
-            if (color != null)
-            {
-                tab.Marker = color.Swatch;
-                tab.AccessibleDescription = "Цветовая метка — " + color.Name.ToLowerInvariant();
-            }
-            tab.Click += (sender, args) => { SelectGroup(id); RefreshList(null); };
-            tab.MouseUp += (sender, args) =>
-            {
-                if (args.Button == MouseButtons.Right) ShowTabMenu(tab, id, args.Location);
-            };
-            tab.KeyDown += (sender, args) =>
-            {
-                if (!IsMenuKey(args)) return;
-                args.Handled = true;
-                ShowTabMenu(tab, id, new Point(0, tab.Height));
-            };
-            tabs.AddTab(tab, id);
-        }
-
-        private void SelectGroup(string id)
-        {
-            activeGroupId = id;
-            foreach (SurfaceButton tab in tabs.Controls)
-            {
-                bool selected = (string)tab.Tag == id;
-                tab.Style = selected ? ButtonStyle.SelectedTab : ButtonStyle.Tab;
-                if (selected) tabs.ScrollControlIntoView(tab);
-            }
-            tabs.Invalidate(true);
-        }
-
-        private void ShowTabMenu(Control tab, string id, Point location)
-        {
-            if (id == FavoritesId) return;
-            string alias = SelectedKey;
-            SelectGroup(id);
-            RefreshList(alias);
-            var group = groups.Find(id);
-            foreach (ToolStripItem item in tabMenu.Items)
-                item.Available = item == startupTab || group != null;
-            startupTab.Checked = groups.StartupTabId == id;
-            if (group != null)
-            {
-                int index = groups.Items.IndexOf(group);
-                moveTabLeft.Enabled = index > 0;
-                moveTabRight.Enabled = index < groups.Items.Count - 1;
-            }
-            var color = TabColor.Find(group?.ColorId);
-            foreach (ToolStripMenuItem item in tabColorMenu.DropDownItems)
-                item.Checked = (string)item.Tag == (color == null ? null : color.Id);
-            tabMenu.Show(tab, location);
-        }
-
-        private void ShiftActiveTab(int offset)
-        {
-            string id = activeGroupId;
-            UpdateGroups(items => items.ShiftTab(id, offset), id, SelectedKey);
         }
 
         private void AddColorMenuItem(TabColor color)
@@ -1222,8 +987,8 @@ namespace SshManager
             var item = new ToolStripMenuItem(color == null ? "Без метки" : color.Name, swatch) { Tag = colorId };
             item.Click += (sender, args) =>
             {
-                string groupId = activeGroupId;
-                UpdateGroups(items => items.Mark(groupId, colorId), groupId);
+                string groupId = menuGroupId;
+                UpdateGroups(items => items.Mark(groupId, colorId));
             };
             tabColorMenu.DropDownItems.Add(item);
         }
@@ -1240,26 +1005,16 @@ namespace SshManager
                 })))
             {
                 if (dialog.ShowDialog(this) != DialogResult.OK) return;
-                search.Clear();
-                RefreshTabs(groupId);
                 RefreshList(null);
             }
         }
 
-        private void DeleteGroup()
+        private void DeleteGroup(string id)
         {
-            var group = groups.Find(activeGroupId);
-            if (group == null || MessageBox.Show(this, "Удалить вкладку «" + group.Name + "»? Её подключения будут доступны во вкладке «Все серверы».",
+            var group = groups.Find(id);
+            if (group == null || MessageBox.Show(this, "Удалить вкладку «" + group.Name + "»? Её подключения перейдут в «Без вкладки».",
                 Text, MessageBoxButtons.YesNo, MessageBoxIcon.Warning, MessageBoxDefaultButton.Button2) != DialogResult.Yes) return;
-            UpdateGroups(items => items.RemoveTab(group.Id), null);
-        }
-
-        private void ShowServerMenu(int index, Point point)
-        {
-            grid.CurrentCell = grid.Rows[index].Cells[0];
-            if (SelectedDesktop is RdpProfile desktop) { ShowDesktopMenu(desktop, grid, point); return; }
-            if (SelectedVnc is VncProfile vnc) { ShowVncMenu(vnc, grid, point); return; }
-            if (Selected != null) ShowConnectionMenu(Selected, grid, point);
+            UpdateGroups(items => items.RemoveTab(group.Id));
         }
 
         /// <summary>The SSH row menu for the catalog table and the «Серверы» column (docs/ui-spec.md §2.7).</summary>
@@ -1283,8 +1038,6 @@ namespace SshManager
                 })))
                 {
                     if (dialog.ShowDialog(this) != DialogResult.OK) return;
-                    search.Clear();
-                    RefreshTabs(id);
                     RefreshList(connection.Alias);
                 }
             }));
@@ -1322,7 +1075,7 @@ namespace SshManager
             void AddDestination(string name, string id)
             {
                 var item = Theme.MenuItem(SafeMenuText(name), Glyph.Folder, (sender, args) =>
-                    UpdateGroups(items => items.MoveDesktop(profile.Id, id), activeGroupId, profile.Id));
+                    UpdateGroups(items => items.MoveDesktop(profile.Id, id), profile.Id));
                 item.Checked = profile.GroupId == id;
                 move.DropDownItems.Add(item);
             }
@@ -1331,20 +1084,17 @@ namespace SshManager
         private void AddMoveItem(Connection connection, string name, string groupId, string current)
         {
             var item = Theme.MenuItem(SafeMenuText(name), Glyph.Folder, (sender, args) =>
-                UpdateGroups(items => items.Move(connection.Alias, groupId), activeGroupId, connection.Alias));
+                UpdateGroups(items => items.Move(connection.Alias, groupId), connection.Alias));
             item.Checked = groupId == current;
             moveMenu.DropDownItems.Add(item);
         }
 
-        private void UpdateGroups(Action<Groups> change, string selected, string alias = null)
+        /// <summary>Changes tabs.xml and refills the column, selecting <paramref name="select"/> (an alias or a profile id).</summary>
+        private void UpdateGroups(Action<Groups> change, string select = null)
         {
-            try
-            {
-                groups = groupFile.Update(change);
-                RefreshTabs(selected);
-            }
+            try { groups = groupFile.Update(change); }
             catch (Exception ex) when (Theme.IsFileError(ex) || ex is InvalidOperationException) { Theme.ShowError(this, ex); }
-            RefreshList(alias);
+            RefreshList(select);
         }
 
         private static string SafeMenuText(string name) { return name.Replace("&", "&&"); }
@@ -1398,17 +1148,17 @@ namespace SshManager
                 catch (Exception error) when (Theme.IsFileError(error) || error is System.ComponentModel.Win32Exception) { Theme.ShowError(this, error); }
                 return;
             }
-            bool fromCatalog = catalog.Visible;
+            bool fromStart = sessions == null || sessions.ShowingStart;
             try
             {
                 var workspace = SessionWorkspace();
                 ShowSessions();
-                if (!workspace.Open(new SessionTarget(profile, groups.Find(profile.GroupId)), forceNew) && fromCatalog) ShowServers();
+                if (!workspace.Open(new SessionTarget(profile, groups.Find(profile.GroupId)), forceNew) && fromStart) workspace.ShowStart();
             }
             catch (Exception error) when (error is ExternalException || error is TargetInvocationException ||
                 error is InvalidOperationException || error is ArgumentException)
             {
-                if (fromCatalog) ShowServers();
+                if (fromStart) sessions?.ShowStart();
                 Theme.ShowError(this, new IOException("Не удалось открыть встроенный RDP-сеанс. Попробуйте «Открыть в клиенте Windows» в меню подключения.\n" +
                     (error.InnerException ?? error).Message, error));
             }
@@ -1422,16 +1172,6 @@ namespace SshManager
             {
                 Theme.ShowError(this, new IOException("Не удалось открыть RDP-окно.\n" + (error.InnerException ?? error).Message, error));
             }
-        }
-
-        private bool RunGridAction(DataGridViewColumn column, object entry)
-        {
-            if (column.Name == FilesColumn && entry is Connection fileSource) OpenFiles(fileSource);
-            else if (column.Name == TerminalColumn && entry is Connection connection) Connect(connection);
-            else if (column.Name == TerminalColumn && entry is RdpProfile profile) ConnectDesktop(profile);
-            else if (column.Name == TerminalColumn && entry is VncProfile vnc) ConnectVnc(vnc);
-            else return false;
-            return true;
         }
 
         private void OpenFiles(Connection connection)
@@ -1494,8 +1234,12 @@ namespace SshManager
         {
             if (sessions != null) return sessions;
             sessions = new SessionsPage();
-            sessions.AttachCatalog(catalog);
-            sessions.CatalogVisibleChanged += visible => { source.Visible = visible; status.Visible = visible; };
+            sessions.AttachStart(start);
+            sessions.ServerColumnMenuRequested += ShowColumnMenu;
+            sessions.Servers.SectionMenuRequested += ShowSectionMenu;
+            sessions.Servers.EditRequested += EditRow;
+            sessions.Servers.DeleteRequested += DeleteEntry;
+            sessions.Servers.ProtocolChanged += next => { kind = next; UpdateStatus(); };
             sessions.Preferences = groups.Preferences;
             sessions.Snippets = () => groups.Snippets;
             sessions.AddSnippet += AddSnippet;
@@ -1504,12 +1248,7 @@ namespace SshManager
             sessions.ShowVncFiles += OpenVncFiles;
             sessions.LoadServers += picker =>
                 picker.UpdateServers(document == null ? new Connection[0] : document.Connections().ToArray(), groups);
-            sessions.ServerSectionToggled += key =>
-            {
-                try { groups = groupFile.Update(items => items.ToggleCollapsed(key)); }
-                catch (Exception error) when (Theme.IsFileError(error) || error is System.Xml.XmlException) { Theme.ShowError(this, error); }
-                sessions.RefreshServers();
-            };
+            sessions.ServerSectionToggled += ToggleSection;
             sessions.ServerMenuRequested += (profile, at, point) =>
             {
                 if (profile is RdpProfile desktop) ShowDesktopMenu(desktop, at, point);
@@ -1538,18 +1277,12 @@ namespace SshManager
                     else Connect(picker.SelectedConnection, forceNew: true);
                 }
             };
-            sessions.ShowServers += ShowServers;
             sessions.Changed += () =>
             {
                 int open = sessions.CountOpen();
                 sessionsButton.AccessibleName = open == 0 ? "Сеансы" : "Сеансы · " + open;
                 FitHeader();
-                foreach (DataGridViewRow row in grid.Rows)
-                {
-                    if (row.Tag is Connection connection) row.Cells[TerminalColumn].Value = SessionAction(connection.Alias);
-                    else if (row.Tag is RdpProfile profile) row.Cells[TerminalColumn].Value = SessionAction(SessionTarget.RdpKey(profile));
-                    else if (row.Tag is VncProfile vnc) row.Cells[TerminalColumn].Value = SessionAction(vnc.Key);
-                }
+                sessions.RefreshServers();
             };
             pages.Controls.Add(sessions);
             return sessions;
@@ -1558,23 +1291,7 @@ namespace SshManager
         private void ShowSessions()
         {
             SessionWorkspace().ShowSession();
-            source.Hide();
-            status.Hide();
             sessions.FocusTerminal();
-        }
-
-        private void ShowServers()
-        {
-            SessionWorkspace().ShowCatalog();
-            source.Show();
-            status.Show();
-            grid.Focus();
-        }
-
-        private string SessionAction(string key)
-        {
-            int count = sessions == null ? 0 : sessions.CountOpen(key);
-            return count == 0 ? "Подключиться" : "К сеансу · " + count;
         }
 
         protected override bool ProcessCmdKey(ref Message msg, Keys keyData)
@@ -1582,139 +1299,13 @@ namespace SshManager
             // Ctrl+F, Ctrl+N, Ctrl+L and Ctrl+K belong to the shell (search, next command, clear screen, kill line)
             // while the terminal or a remote desktop has the focus.
             bool sessionKeys = sessions.SessionHasFocus;
-            if (keyData == (Keys.Control | Keys.F) && !sessionKeys)
-            {
-                if (catalog.Visible) { search.Focus(); search.SelectAll(); }
-                else sessions.FocusServerSearch();
-                return true;
-            }
+            if (keyData == (Keys.Control | Keys.F) && !sessionKeys) { sessions.FocusServerSearch(); return true; }
             if (keyData == (Keys.Control | Keys.N) && !sessionKeys) { add.PerformClick(); return true; }
             if ((keyData == (Keys.Control | Keys.L) || keyData == (Keys.Control | Keys.K)) && !sessionKeys) { quick.Focus(); quick.SelectAll(); return true; }
-            if (keyData == Keys.F5 && catalog.Visible) { Reload(); return true; }
-            if (keyData == (Keys.Shift | Keys.Escape)) { ShowServers(); return true; }
+            if (keyData == Keys.F5 && !sessionKeys) { Reload(); return true; }
             if (keyData == (Keys.Control | Keys.Tab)) { sessions.Cycle(); return true; }
             if (keyData == (Keys.Control | Keys.Shift | Keys.P)) { sessions.FocusSearch(); return true; }
             return base.ProcessCmdKey(ref msg, keyData);
-        }
-
-        private static string Dash(string value) { return value.Length == 0 ? "—" : value; }
-
-        private static DataGridView MakeGrid(int dpi)
-        {
-            var list = new DataGridView
-            {
-                AccessibleName = "Список SSH-подключений", Dock = DockStyle.Fill, BorderStyle = BorderStyle.None,
-                BackgroundColor = Theme.Surface, GridColor = Theme.Line, AllowUserToAddRows = false,
-                AllowUserToDeleteRows = false, AllowUserToResizeRows = false, RowHeadersVisible = false,
-                MultiSelect = false, ReadOnly = true, SelectionMode = DataGridViewSelectionMode.FullRowSelect,
-                CellBorderStyle = DataGridViewCellBorderStyle.SingleHorizontal, EnableHeadersVisualStyles = false,
-                ColumnHeadersBorderStyle = DataGridViewHeaderBorderStyle.None,
-                ColumnHeadersHeightSizeMode = DataGridViewColumnHeadersHeightSizeMode.DisableResizing,
-                ColumnHeadersHeight = GridPixels(37, dpi), RowTemplate = { Height = GridPixels(45, dpi) },
-                ColumnHeadersDefaultCellStyle = new DataGridViewCellStyle { BackColor = Theme.Canvas, ForeColor = Theme.Muted, Padding = new Padding(8, 0, 4, 0) },
-                DefaultCellStyle = new DataGridViewCellStyle { Padding = new Padding(8, 0, 4, 0) },
-                RowsDefaultCellStyle = new DataGridViewCellStyle { BackColor = Theme.Surface, ForeColor = Theme.Ink,
-                    SelectionBackColor = Theme.Selection, SelectionForeColor = Theme.Ink }
-            };
-            list.Columns.Add(MakeColumn("Псевдоним", 36, GridPixels(140, dpi)));
-            list.Columns.Add(MakeColumn("Адрес", 30, GridPixels(100, dpi)));
-            for (int column = 0; column <= 1; column++)
-            {
-                list.Columns[column].SortMode = DataGridViewColumnSortMode.Programmatic;
-                list.Columns[column].HeaderCell.ToolTipText = "Нажмите для сортировки";
-            }
-            list.Columns.Add(MakeColumn("Пользователь", 21, GridPixels(85, dpi)));
-            list.Columns.Add(new DataGridViewTextBoxColumn { Name = PortColumn, HeaderText = "Порт", Width = 64, SortMode = DataGridViewColumnSortMode.NotSortable });
-            list.Columns.Add(MakeColumn("Вкладка", 20, GridPixels(65, dpi)));
-            list.Columns.Add(new DataGridViewButtonColumn
-            {
-                Name = FilesColumn, HeaderText = "SFTP", Width = 100, FlatStyle = FlatStyle.Flat, Resizable = DataGridViewTriState.False
-            });
-            list.Columns.Add(new DataGridViewButtonColumn
-            {
-                Name = TerminalColumn, HeaderText = "Терминал",
-                Width = 159, FlatStyle = FlatStyle.Flat, Resizable = DataGridViewTriState.False
-            });
-            list.HandleCreated += (sender, args) => FitGridColumns(list, list.DeviceDpi);
-            list.FontChanged += (sender, args) => FitGridColumns(list, list.DeviceDpi);
-            list.DpiChangedAfterParent += (sender, args) => FitGridColumns(list, list.DeviceDpi);
-            return list;
-        }
-
-        private static int GridPixels(int logical, int dpi) => Math.Max(1, (logical * dpi + 48) / 96);
-
-        private static void FitGridColumns(DataGridView list, int dpi)
-        {
-            if (!list.IsHandleCreated || list.IsDisposed) return;
-            using (var graphics = list.CreateGraphics())
-            {
-                var unlimited = new Size(Int32.MaxValue, Int32.MaxValue);
-                int portText = TextRenderer.MeasureText(graphics, "65535", list.Font, unlimited, TextFormatFlags.SingleLine).Width;
-                int portWidth = Math.Max(GridPixels(64, dpi), portText + list.DefaultCellStyle.Padding.Horizontal + GridPixels(4, dpi));
-                var port = list.Columns[PortColumn];
-                bool standardWidth = port.Width <= port.MinimumWidth;
-                port.MinimumWidth = portWidth;
-                if (standardWidth) port.Width = portWidth;
-
-                int padding = GridPixels(ActionIcon, dpi) + GridPixels(ActionGap, dpi) +
-                    2 * (GridPixels(ActionOuterPadding, dpi) + GridPixels(ActionInnerPadding, dpi));
-                int WidthFor(string text, int minimum) => Math.Max(GridPixels(minimum, dpi),
-                    TextRenderer.MeasureText(graphics, text, Theme.Emphasis, unlimited, ActionText).Width + padding + GridPixels(2, dpi));
-                list.Columns[FilesColumn].Width = WidthFor("Файлы", 100);
-                list.Columns[TerminalColumn].Width = Math.Max(WidthFor("Подключиться", 159), WidthFor("К сеансу · 999", 159));
-            }
-        }
-
-        private static DataGridViewTextBoxColumn MakeColumn(string label, float weight, int minimum)
-        {
-            return new DataGridViewTextBoxColumn { HeaderText = label, AutoSizeMode = DataGridViewAutoSizeColumnMode.Fill,
-                FillWeight = weight, MinimumWidth = minimum, SortMode = DataGridViewColumnSortMode.NotSortable };
-        }
-        private void PaintGridCell(object sender, DataGridViewCellPaintingEventArgs args)
-        {
-            if (args.RowIndex < 0 || args.ColumnIndex < 0) return;
-            var column = grid.Columns[args.ColumnIndex];
-            if (args.ColumnIndex != 0 && !(column is DataGridViewButtonColumn)) return;
-            args.Paint(args.ClipBounds, DataGridViewPaintParts.Background | DataGridViewPaintParts.SelectionBackground | DataGridViewPaintParts.Border);
-            var box = args.CellBounds;
-            var graphics = args.Graphics;
-            var previous = graphics.Save();
-            graphics.SetClip(box, CombineMode.Intersect);
-            graphics.SmoothingMode = SmoothingMode.AntiAlias;
-            int scale = DeviceDpi;
-            int iconSize = GridPixels(ActionIcon, scale);
-            int inset = GridPixels(9, scale);
-            string content = Convert.ToString(args.FormattedValue);
-            if (args.ColumnIndex == 0)
-            {
-                var tag = grid.Rows[args.RowIndex].Tag;
-                bool favorite = tag is Connection item ? groups.IsFavorite(Groups.Key(item.Alias)) :
-                    tag is RdpProfile desktop ? groups.IsFavorite(Groups.Key(desktop)) : tag is VncProfile vnc && groups.IsFavorite(Groups.Key(vnc));
-                var icon = favorite ? Theme.Icon(Glyph.Star, TabColor.Find("amber").Swatch) : Theme.Icon(Glyph.Server, Theme.Teal);
-                graphics.DrawImage(icon, new Rectangle(box.Left + inset, box.Top + (box.Height - iconSize) / 2, iconSize, iconSize));
-                var text = new Rectangle(box.Left + iconSize + inset * 2, box.Top, box.Width - iconSize - inset * 3, box.Height);
-                TextRenderer.DrawText(graphics, content, Theme.Emphasis, text, Theme.Ink, TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis | TextFormatFlags.NoPrefix);
-            }
-            else
-            {
-                int outside = GridPixels(ActionOuterPadding, scale), inside = GridPixels(ActionInnerPadding, scale),
-                    gap = GridPixels(ActionGap, scale);
-                var pill = Rectangle.Inflate(box, -outside, -(box.Height / 6));
-                if (pill.Width > 2 && pill.Height > 2)
-                {
-                    int radius = Math.Min(GridPixels(7, scale), Math.Min(pill.Width, pill.Height) / 2);
-                    using (var path = Theme.Round(pill, radius))
-                    using (var fill = new SolidBrush(Theme.Mint)) graphics.FillPath(fill, path);
-                    graphics.DrawImage(Theme.Icon(column.Name == FilesColumn ? Glyph.Folder : Glyph.Terminal, Theme.Teal),
-                        new Rectangle(pill.Left + inside, pill.Top + (pill.Height - iconSize) / 2, iconSize, iconSize));
-                    var text = new Rectangle(pill.Left + inside + iconSize + gap, pill.Top,
-                        Math.Max(0, pill.Width - iconSize - gap - 2 * inside), pill.Height);
-                    TextRenderer.DrawText(graphics, content, Theme.Emphasis, text, Theme.Teal, ActionText);
-                }
-            }
-            graphics.Restore(previous);
-            args.Paint(args.ClipBounds, DataGridViewPaintParts.Focus);
-            args.Handled = true;
         }
 
         protected override void Dispose(bool disposing)
@@ -1724,7 +1315,7 @@ namespace SshManager
                 updateLifetime.Cancel();
                 if (serverMenu != null) serverMenu.Dispose();
                 desktopMenu?.Dispose();
-                if (backupMenu != null) backupMenu.Dispose();
+                columnMenu?.Dispose();
                 if (tabMenu != null) tabMenu.Dispose();
                 hints.Dispose();
             }

@@ -109,26 +109,22 @@ $profiles = @($groups.Desktops)
 if ((Want 'main') -or (Want 'sessions')) {
     $main = New 'ConnectionsWindow' @($ssh.FullName, $tabsPath)
     Show-Form $main
-    Call $main 'Reload' @($true) | Out-Null; Pump
+    Call $main 'Reload' | Out-Null; Pump
     if (Want 'main') {
-        Snap $main 'main-ssh'
-                Set-Minimum $main; "DIAG form client=$($main.ClientSize) display=$($main.DisplayRectangle) frame=$($main.Controls[0].Bounds) layoutSuspended=$($main.GetType().GetProperty('IsLayoutSuspended', $NP).GetValue($main))"
-        $pages = Field $main 'pages'; $cat = Field $main 'catalog'; $add = Field $main 'add'; $grid = Field $main 'grid'
-        "DIAG pages=$($pages.Bounds) catalog=$($cat.Bounds) add=$($add.Bounds) addParent=$($add.Parent.Bounds) grid=$($grid.Bounds) gridParent=$($grid.Parent.Bounds)"
-        "DIAG rowstyles=$(($cat.RowStyles | % { $_.SizeType.ToString()[0] + [string]$_.Height }) -join ',') padding=$($cat.Padding)"
-        Snap $main 'main-minimum-size'
+        # No catalog table: the start page in the workspace, servers grouped in the column (docs/ui-spec.md §2).
+        Snap $main 'main-start'
+        $servers = (Call $main 'SessionWorkspace').Servers
+        Call $servers 'SelectProtocol' @((Kind 'Rdp')) | Out-Null; Pump; Snap $main 'main-rdp'
+        Call $servers 'SelectProtocol' @((Kind 'Vnc')) | Out-Null; Pump; Snap $main 'main-vnc'
+        Call $servers 'SelectProtocol' @((Kind 'Ssh')) | Out-Null; Pump
+        Call $main 'ShowColumnMenu' @($servers, (New-Object Drawing.Point(0, 0))) | Out-Null; Pump
+        "COLUMN MENU: " + (((Field $main 'columnMenu').Items | ForEach-Object { $_.Text }) -join ' | ')
+        (Field $main 'columnMenu').Close()
+        Call $main 'ShowSectionMenu' @($tabA, $servers, (New-Object Drawing.Point(0, 0))) | Out-Null; Pump
+        "TAB MENU: " + (((Field $main 'tabMenu').Items | Where-Object { $_.Available } | ForEach-Object { $_.Text }) -join ' | ')
+        (Field $main 'tabMenu').Close()
+        Set-Minimum $main; Snap $main 'main-minimum-size'
         $main.ClientSize = New-Object Drawing.Size([int](980 * $Scale), [int](570 * $Scale)); Pump
-        Call $main 'SelectProtocol' @((Kind 'Rdp')) | Out-Null; Pump; Snap $main 'main-rdp'
-        Call $main 'SelectProtocol' @((Kind 'Vnc')) | Out-Null; Pump; Snap $main 'main-vnc'
-        Call $main 'SelectProtocol' @((Kind 'Ssh')) | Out-Null
-        Call $main 'SelectGroup' @($tabC) | Out-Null; Call $main 'RefreshList' @($null) | Out-Null; Pump; Snap $main 'main-empty-tab'
-        Call $main 'SelectGroup' @($null) | Out-Null; Call $main 'RefreshList' @($null) | Out-Null; Pump
-        if (Want 'stage2') {
-            Call $main 'SelectGroup' @('favorites') | Out-Null; Call $main 'RefreshList' @($null) | Out-Null; Pump; Snap $main 'main-favorites'
-            Call $main 'SelectProtocol' @((Kind 'Rdp')) | Out-Null; Pump; Snap $main 'main-favorites-rdp'
-            Call $main 'SelectProtocol' @((Kind 'Ssh')) | Out-Null
-            Call $main 'SelectGroup' @($null) | Out-Null; Call $main 'RefreshList' @($null) | Out-Null; Pump
-        }
     }
     if (Want 'sessions') {
         $page = Call $main 'SessionWorkspace'
@@ -179,7 +175,7 @@ if ((Want 'main') -or (Want 'sessions')) {
         Pump 0.5
         Snap $main 'sessions-rdp-ended'
         Set-Minimum $main; Snap $main 'sessions-min'
-        Call $main 'ShowServers' | Out-Null; Pump; Snap $main 'main-with-sessions'
+        Call $page 'ShowStart' | Out-Null; Pump; Snap $main 'main-with-sessions'
         # «Файлы» open in the workspace and appear under «Открытые файлы». Last, because the connection fails
         # with a message box once ssh gives up; the window is disposed before that.
         $main.ClientSize = New-Object Drawing.Size([int](1280 * $Scale), [int](720 * $Scale)); Pump

@@ -50,6 +50,17 @@ namespace SshManager
         public event Action<string> SectionToggled;
         /// <summary>Right click on a server: the Connection, RdpProfile or VncProfile, where and at which point.</summary>
         public event Action<object, Control, Point> MenuRequested;
+        /// <summary>Right click, the menu key or Shift+F10 on a group header.</summary>
+        public event Action<string, Control, Point> SectionMenuRequested;
+        /// <summary>F2 and Delete on a server (docs/ui-spec.md §2.2).</summary>
+        public event Action<object> EditRequested, DeleteRequested;
+        public event Action<CatalogKind> ProtocolChanged;
+        public CatalogKind Kind => kind;
+        /// <summary>The tab of the selected server or group header, for a new server; null for «Без вкладки».</summary>
+        public string SelectedGroupId => list.SelectedItem is Choice choice ? choice.GroupId :
+            list.SelectedItem is Section section && section.Key != null && !Groups.IsSection(section.Key) ? section.Key : null;
+        /// <summary>Servers of the chosen protocol (the footer counter).</summary>
+        public int Count => choices.Count(choice => choice.Kind == kind);
         private readonly TextBox search;
         private readonly ListBox list;
         private readonly Button connect;
@@ -114,6 +125,11 @@ namespace SshManager
                     list.SelectedIndex = index;
                     MenuRequested?.Invoke(choice.Profile, list, args.Location);
                 }
+                else if (args.Button == MouseButtons.Right && list.Items[index] is Section header && header.Key != null)
+                {
+                    list.SelectedIndex = index;
+                    SectionMenuRequested?.Invoke(header.Key, list, args.Location);
+                }
             };
             list.KeyDown += (sender, args) =>
             {
@@ -129,11 +145,23 @@ namespace SshManager
                     args.SuppressKeyPress = true;
                     if (section.Folded == (args.KeyCode == Keys.Right)) SectionToggled?.Invoke(section.Key);
                 }
-                else if ((args.KeyCode == Keys.Apps || args.KeyData == (Keys.Shift | Keys.F10)) && list.SelectedItem is Choice choice)
+                else if ((args.KeyCode == Keys.Apps || args.KeyData == (Keys.Shift | Keys.F10)) && list.SelectedIndex >= 0)
                 {
                     args.SuppressKeyPress = true;
                     var bounds = list.GetItemRectangle(list.SelectedIndex);
-                    MenuRequested?.Invoke(choice.Profile, list, new Point(bounds.Left + 12, bounds.Bottom));
+                    var at = new Point(bounds.Left + 12, bounds.Bottom);
+                    if (list.SelectedItem is Choice choice) MenuRequested?.Invoke(choice.Profile, list, at);
+                    else if (section?.Key != null) SectionMenuRequested?.Invoke(section.Key, list, at);
+                }
+                else if (args.KeyData == Keys.F2 && list.SelectedItem is Choice edited)
+                {
+                    args.SuppressKeyPress = true;
+                    EditRequested?.Invoke(edited.Profile);
+                }
+                else if (args.KeyData == Keys.Delete && list.SelectedItem is Choice removed)
+                {
+                    args.SuppressKeyPress = true;
+                    DeleteRequested?.Invoke(removed.Profile);
                 }
             };
             layout.Controls.Add(Theme.Frame(list, Padding.Empty), 0, 2);
@@ -177,16 +205,31 @@ namespace SshManager
         {
             this.groups = groups;
             recent = groups.Recent.Select(entry => entry.Key).ToArray();
+            // The order of the config and tabs.xml; Filter sorts (the column by the chosen order, the dialog by name).
             choices = connections.Select(connection => new Choice(connection, groups.ForAlias(connection.Alias)))
                 .Concat(groups.Desktops.Select(profile => new Choice(profile, groups.Find(profile.GroupId))))
-                .Concat(groups.Vnc.Select(profile => new Choice(profile, groups.Find(profile.GroupId))))
-                .OrderBy(choice => choice.Target.Alias, StringComparer.OrdinalIgnoreCase).ToArray();
+                .Concat(groups.Vnc.Select(profile => new Choice(profile, groups.Find(profile.GroupId)))).ToArray();
             Filter();
+        }
+
+        /// <summary>Selects a server by SSH alias or RDP/VNC id, switching to its protocol (after a save).</summary>
+        public void SelectServer(string aliasOrId)
+        {
+            if (String.IsNullOrEmpty(aliasOrId)) return;
+            var found = choices.FirstOrDefault(choice => choice.Connection != null
+                ? String.Equals(choice.Connection.Alias, aliasOrId, StringComparison.OrdinalIgnoreCase)
+                : (choice.Target.Desktop?.Id ?? choice.Target.Vnc?.Id) == aliasOrId);
+            if (found == null) return;
+            if (found.Kind != kind) SelectProtocol(found.Kind);
+            for (int index = 0; index < list.Items.Count; index++)
+                if (list.Items[index] is Choice choice && choice.Key == found.Key) { list.SelectedIndex = index; return; }
         }
 
         public void SelectProtocol(CatalogKind next)
         {
+            bool changed = kind != next;
             kind = next;
+            if (changed) ProtocolChanged?.Invoke(next);
             sshTab.Style = next == CatalogKind.Ssh ? ButtonStyle.SelectedTab : ButtonStyle.Tab;
             rdpTab.Style = next == CatalogKind.Rdp ? ButtonStyle.SelectedTab : ButtonStyle.Tab;
             vncTab.Style = next == CatalogKind.Vnc ? ButtonStyle.SelectedTab : ButtonStyle.Tab;
@@ -202,7 +245,9 @@ namespace SshManager
         private void Filter()
         {
             string query = search.Text.Trim();
-            var candidates = choices.Where(choice => choice.Kind == kind).ToArray();
+            var order = grouped && groups != null ? groups.Sort(null, kind) : ServerSort.Name;
+            var candidates = ServerOrder.Apply(choices.Where(choice => choice.Kind == kind), order,
+                choice => choice.Target.Alias, choice => choice.Host).ToArray();
             var visible = candidates.Where(choice => new[] { choice.Target.Alias, choice.Target.Address, choice.Target.Group }
                 .Any(value => value.IndexOf(query, StringComparison.OrdinalIgnoreCase) >= 0)).ToArray();
             if (grouped && groups != null && query.Length == 0)
@@ -243,6 +288,10 @@ namespace SshManager
             var sections = new List<KeyValuePair<Section, Choice[]>>();
             if (latest.Length > 0)
                 sections.Add(new KeyValuePair<Section, Choice[]>(new Section("Недавние", Groups.RecentSection, null, latest.Length), latest));
+            var favorites = visible.Where(choice => groups.IsFavorite(choice.Key)).ToArray();
+            if (favorites.Length > 0)
+                sections.Add(new KeyValuePair<Section, Choice[]>(new Section("Избранное", Groups.FavoritesSection, null, favorites.Length), favorites));
+            int fixedSections = sections.Count;
             foreach (var group in groups.Items)
             {
                 var members = visible.Where(choice => choice.GroupId == group.Id).ToArray();
@@ -253,7 +302,7 @@ namespace SshManager
             var loose = visible.Where(choice => choice.GroupId == null).ToArray();
             if (loose.Length > 0)
             {
-                bool anyGroup = sections.Count > (latest.Length > 0 ? 1 : 0);
+                bool anyGroup = sections.Count > fixedSections;
                 sections.Add(new KeyValuePair<Section, Choice[]>(new Section(anyGroup ? Groups.UngroupedName : "Все серверы",
                     Groups.UngroupedSection, null, loose.Length), loose.Select(choice => choice.Indented()).ToArray()));
             }
@@ -325,7 +374,8 @@ namespace SshManager
             var title = new Rectangle(row.X + S(24), row.Y + S(2), row.Width - S(32), S(22));
             var detail = new Rectangle(row.X + S(24), row.Y + S(22), row.Width - S(32), S(18));
             const TextFormatFlags flags = TextFormatFlags.EndEllipsis | TextFormatFlags.NoPrefix | TextFormatFlags.SingleLine | TextFormatFlags.VerticalCenter;
-            TextRenderer.DrawText(args.Graphics, choice.Target.Alias, Theme.Emphasis, title, Theme.Ink, flags);
+            TextRenderer.DrawText(args.Graphics, (groups != null && groups.IsFavorite(choice.Key) ? "★ " : "") + choice.Target.Alias,
+                Theme.Emphasis, title, Theme.Ink, flags);
             string subtitle = choice.Target.Address + (choice.Target.Group.Length == 0 ? "" : "  ·  " + choice.Target.Group);
             TextRenderer.DrawText(args.Graphics, subtitle, Theme.Body, detail, Theme.Muted, flags);
             args.DrawFocusRectangle();
@@ -354,6 +404,9 @@ namespace SshManager
             public readonly Connection Connection;
             public readonly SessionTarget Target;
             public string GroupId { get; private set; }
+            /// <summary>Host for «По адресу»: HostName, else the alias.</summary>
+            public string Host => Connection != null ? (Connection.Get("hostname").Length > 0 ? Connection.Get("hostname") : Connection.Alias)
+                : Target.Desktop?.Host ?? Target.Vnc?.Host ?? "";
             /// <summary>Drawn under a group header: no group dot.</summary>
             public bool InGroup { get; private set; }
             public object Profile => Target.Desktop ?? (object)Target.Vnc ?? Connection;

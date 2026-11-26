@@ -72,7 +72,10 @@ namespace SshManager
         public readonly List<Snippet> Snippets = new List<Snippet>();
         /// <summary>Folded groups of the «Серверы» column: tab ids, <see cref="UngroupedSection"/> and <see cref="RecentSection"/>.</summary>
         public readonly HashSet<string> Collapsed = new HashSet<string>(StringComparer.Ordinal);
-        public const string UngroupedSection = "ungrouped", RecentSection = "recent";
+        public const string UngroupedSection = "ungrouped", RecentSection = "recent", FavoritesSection = "favorites";
+
+        /// <summary>«Недавние», «Избранное» and «Без вкладки» can be folded like the tabs.</summary>
+        public static bool IsSection(string key) => key == UngroupedSection || key == RecentSection || key == FavoritesSection;
 
         public void ToggleCollapsed(string key)
         {
@@ -314,13 +317,13 @@ namespace SshManager
             string startup = (string)root.Attribute("startupTab");
             if (groups.Find(startup) != null) groups.SetStartupTab(startup);
             foreach (var key in ((string)root.Attribute("collapsed") ?? "").Split(new[] { ' ' }, StringSplitOptions.RemoveEmptyEntries))
-                if (key == Groups.UngroupedSection || key == Groups.RecentSection || groups.Find(key) != null) groups.Collapsed.Add(key);
+                if (Groups.IsSection(key) || groups.Find(key) != null) groups.Collapsed.Add(key);
             return groups;
         }
 
         private static XAttribute CollapsedAttribute(Groups latest)
         {
-            var keys = latest.Collapsed.Where(key => key == Groups.UngroupedSection || key == Groups.RecentSection || latest.Find(key) != null)
+            var keys = latest.Collapsed.Where(key => Groups.IsSection(key) || latest.Find(key) != null)
                 .OrderBy(key => key, StringComparer.Ordinal).ToArray();
             return keys.Length == 0 ? null : new XAttribute("collapsed", String.Join(" ", keys));
         }
