@@ -198,6 +198,13 @@ struct KnownHostsView: View {
 
     private var shown: [KnownHostEntry] { file?.search(query) ?? [] }
 
+    private var pendingSummary: String {
+        guard let pending else { return "" }
+        let entries: [KnownHostEntry] = pending.keys.compactMap { KnownHostEntry.parse($0) }
+        let keys: [String] = entries.map { entry in entry.keyType + " · " + entry.fingerprint }
+        return "Прежние записи этого хоста будут заменены.\n\n" + pending.name + "\n" + keys.joined(separator: "\n")
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             Text("Известные хосты").font(.title3.weight(.semibold))
@@ -245,8 +252,7 @@ struct KnownHostsView: View {
             Button("Нет", role: .cancel) { status = "Ключи не добавлены." }
             Button("Да") { addPending() }
         } message: {
-            Text("Прежние записи этого хоста будут заменены.\n\n" + (pending?.name ?? "") + "\n" +
-                 (pending?.keys.compactMap { KnownHostEntry.parse($0) }.map { $0.keyType + " · " + $0.fingerprint }.joined(separator: "\n") ?? ""))
+            Text(pendingSummary)
         }
         .sheet(isPresented: $adding) { hostKeySheet }
     }
