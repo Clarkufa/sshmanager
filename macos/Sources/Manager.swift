@@ -70,6 +70,10 @@ final class Manager: ObservableObject {
     @Published var editingSettings = false
     @Published var importing = false
     @Published var addingSnippet = false
+    /// True once tabs.xml has been read, so the update check can follow «Проверять обновления при запуске».
+    @Published private(set) var settingsLoaded = false
+    /// SSH sessions waiting for an automatic reconnect, with the attempt number.
+    @Published private(set) var pendingReconnect: [UUID: Int] = [:]
     private var transient: Set<String> = []
     private var reconnectAttempts: [String: Int] = [:]
     @Published private(set) var sessions: [TerminalSession] = []
@@ -101,6 +105,7 @@ final class Manager: ObservableObject {
                     if self.destination == .all, let tab = initial.startup { self.destination = .group(tab) }
                 case .failure(let error): self.show(error)
                 }
+                self.settingsLoaded = true
             }
         }
         reload()
@@ -596,6 +601,7 @@ final class Manager: ObservableObject {
             guard self.settings.preferences.autoReconnect, code != 0, code != 130,
                   self.reconnectAttempts[key, default: 0] < 3 else { return }
             self.reconnectAttempts[key, default: 0] += 1
+            self.pendingReconnect[session.id] = self.reconnectAttempts[key]
             DispatchQueue.main.asyncAfter(deadline: .now() + 5) { [weak self, weak session] in
                 guard let self, let session, self.sessions.contains(where: { $0 === session }) else { return }
                 self.reconnect(.ssh(session), automatic: true)
@@ -662,6 +668,7 @@ final class Manager: ObservableObject {
         switch entry {
         case .rdp(let session): session.start()
         case .ssh(let old):
+            pendingReconnect[old.id] = nil
             if !automatic { reconnectAttempts[Self.key(old.profile)] = 0 }
             startSession(old.profile, noForwarding: old.noForwarding, direct: old.direct, name: old.name, replacing: old)
         }
@@ -701,6 +708,7 @@ final class Manager: ObservableObject {
         switch entry {
         case .ssh(let session):
             session.close()
+            pendingReconnect[session.id] = nil
             sessions.removeAll { $0.id == session.id }
         case .rdp(let session):
             session.stop()

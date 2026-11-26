@@ -30,7 +30,10 @@ extension Color {
 
 /// The Windows glyphs (src/Theme.cs Icon): 16×16 line drawings, 1.5 pt stroke, round caps and joins.
 enum Glyph: String {
-    case plus, refresh, edit, delete, terminal, server, folder, move, moveLeft, copy, key, browse, moon, sun, dot
+    case plus, refresh, edit, delete, terminal, server, folder, move, moveLeft, copy, key, browse, moon, sun, dot, star, settings
+
+    /// Filled shapes; the others are strokes.
+    var filled: Bool { self == .dot || self == .star }
 
     var path: Path {
         var path = Path()
@@ -71,6 +74,21 @@ enum Glyph: String {
             trace(8, 1, 8, 3); trace(8, 13, 8, 15); trace(1, 8, 3, 8); trace(13, 8, 15, 8)
             trace(3, 3, 4, 4); trace(12, 12, 13, 13); trace(12, 4, 13, 3); trace(3, 13, 4, 12)
         case .dot: path.addEllipse(in: CGRect(x: 2, y: 2, width: 12, height: 12))
+        case .star:
+            for index in 0..<10 {
+                let angle = Double.pi / 5 * Double(index) - Double.pi / 2
+                let radius: Double = index % 2 == 0 ? 7 : 3
+                let point = CGPoint(x: 8 + radius * cos(angle), y: 8.5 + radius * sin(angle))
+                if index == 0 { path.move(to: point) } else { path.addLine(to: point) }
+            }
+            path.closeSubpath()
+        case .settings:
+            path.addEllipse(in: CGRect(x: 5.5, y: 5.5, width: 5, height: 5))
+            for index in 0..<8 {
+                let angle = Double.pi / 4 * Double(index)
+                path.move(to: CGPoint(x: 8 + 4.8 * cos(angle), y: 8 + 4.8 * sin(angle)))
+                path.addLine(to: CGPoint(x: 8 + 6.6 * cos(angle), y: 8 + 6.6 * sin(angle)))
+            }
         }
         return path
     }
@@ -82,7 +100,7 @@ struct GlyphView: View {
 
     var body: some View {
         Canvas { context, _ in
-            if glyph == .dot {
+            if glyph.filled {
                 context.fill(glyph.path, with: .color(color))
             } else {
                 context.stroke(glyph.path, with: .color(color),

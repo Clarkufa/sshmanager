@@ -10,10 +10,16 @@ struct SSHManagerApp: App {
             ManagerView(manager: manager, updates: updates)
                 .frame(minWidth: 800, minHeight: 480)
                 .preferredColorScheme(manager.settings.appearance.scheme)
-                .onAppear { updates.check(manual: false) }
+                .onAppear { if manager.settingsLoaded && manager.settings.preferences.checkUpdates { updates.check(manual: false) } }
+                .onChange(of: manager.settingsLoaded) { _, loaded in
+                    if loaded && manager.settings.preferences.checkUpdates { updates.check(manual: false) }
+                }
         }
         .defaultSize(width: 980, height: 570)
         .commands {
+            CommandGroup(replacing: .appSettings) {
+                Button("Настройки…") { manager.editingSettings = true }.keyboardShortcut(",", modifiers: .command)
+            }
             CommandGroup(replacing: .newItem) {
                 Button("Новый сеанс…") { manager.choosingServer = true }
                     .keyboardShortcut("n", modifiers: .command)
@@ -35,7 +41,12 @@ struct SSHManagerApp: App {
                 Button("Обновить") { manager.reloadAll() }
                     .keyboardShortcut("r", modifiers: .command)
                 Button("Открыть OpenSSH config") { manager.openConfig() }
+                Button("Быстрое подключение") {
+                    manager.showServers()
+                    NotificationCenter.default.post(name: .focusQuickConnect, object: nil)
+                }.keyboardShortcut("l", modifiers: .command)
                 Button("Резервные копии…") { manager.managingBackups = true }
+                Button("Импорт из других программ…") { manager.importing = true }
                 Button("Обновления…") { updates.check(manual: true) }
                 Divider()
                 Menu("Оформление") {
@@ -55,6 +66,7 @@ struct SSHManagerApp: App {
 
 extension Notification.Name {
     static let focusSessionSearch = Notification.Name("SSHManagerFocusSessionSearch")
+    static let focusQuickConnect = Notification.Name("SSHManagerFocusQuickConnect")
 }
 
 // MARK: - Root
@@ -79,7 +91,7 @@ private struct ManagerView: View {
         .foregroundStyle(palette.ink)
         .onAppear { AppDelegate.reopen = { openWindow(id: "main") } }
         .sheet(item: $manager.editor) { state in
-            ProfileEditor(state: state, hasPassword: state.original.map(manager.hasPassword) ?? false) {
+            ProfileEditor(state: state, hasPassword: state.original.map(manager.hasPassword) ?? false, defaults: manager.settings.preferences) {
                 try manager.save($0, original: state.original, password: $1, removePassword: $2)
             }
         }
@@ -96,6 +108,11 @@ private struct ManagerView: View {
         .sheet(isPresented: $manager.choosingServer) { ServerPicker(manager: manager) }
         .sheet(isPresented: $manager.managingBackups) { BackupView(manager: manager) }
         .sheet(isPresented: $updates.presented) { MacUpdateView(updates: updates) }
+        .sheet(isPresented: $manager.editingSettings) {
+            SettingsSheet(preferences: manager.settings.preferences) { try manager.savePreferences($0) }
+        }
+        .sheet(isPresented: $manager.importing) { ImportSheet { manager.importConnections($0) } }
+        .sheet(isPresented: $manager.addingSnippet) { SnippetSheet { manager.saveSnippet(name: $0, command: $1) } }
         .sheet(item: Binding(get: { manager.renaming.flatMap { id in manager.entries.first { $0.id == id } }.map(RenameRequest.init) },
                              set: { if $0 == nil { manager.renaming = nil } })) { request in
             RenameSheet(entry: request.entry) { try manager.rename(request.entry, to: $0) }
@@ -214,12 +231,16 @@ private struct CatalogModel {
     let manager: Manager
     var query = ""
 
+    var favorites: Bool { manager.destination == .favorites }
+
     var groupProfiles: [Profile] {
+        if favorites { return manager.profiles.filter { manager.isFavorite(Manager.key($0)) } }
         guard let group = manager.currentGroup else { return manager.profiles }
         return manager.profiles.filter { group.aliases.contains($0.id) }
     }
 
     var groupDesktops: [DesktopProfile] {
+        if favorites { return manager.settings.desktops.filter { manager.isFavorite(Manager.key($0)) } }
         guard let group = manager.currentGroup else { return manager.settings.desktops }
         return manager.settings.desktops.filter { $0.group == group.id }
     }
@@ -260,6 +281,12 @@ private struct CatalogPage: View {
         let model = CatalogModel(manager: manager, query: query)
         VStack(alignment: .leading, spacing: 0) {
             PageHeader(title: rdp ? "RDP-подключения" : "SSH-подключения") {
+                Button { manager.editingSettings = true } label: {
+                    ViewThatFits(in: .horizontal) {
+                        GlyphLabel(title: "Настройки", glyph: .settings, kind: .quiet)
+                        GlyphView(glyph: .settings, color: Palette.of(scheme).teal)
+                    }
+                }.winButton(.quiet).help("Настройки")
                 ThemeButton(manager: manager)
                 Button { manager.showSessionsPage() } label: {
                     GlyphLabel(title: manager.liveCount > 0 ? "Сеансы · \(manager.liveCount)" : "Сеансы", glyph: .terminal)
@@ -277,6 +304,8 @@ private struct CatalogPage: View {
                         .winButton(manager.catalogProtocol == kind ? .selectedTab : .tab)
                         .frame(minWidth: 86)
                 }
+                Spacer(minLength: 12)
+                QuickConnectField(manager: manager)
             }.padding(.bottom, 6)
             TabStrip(manager: manager)
             tools(rdp: rdp, model: model)
@@ -293,6 +322,8 @@ private struct CatalogPage: View {
             Menu {
                 Button("Экспорт архива…") { manager.managingBackups = true }
                 Button("Импорт архива…") { manager.managingBackups = true }
+                Divider()
+                Button("Импорт из других программ…") { manager.importing = true }
             } label: { GlyphLabel(title: "Резервные копии", glyph: .folder) }
                 .menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize()
                 .padding(.horizontal, 10)
@@ -330,6 +361,14 @@ private struct TabStrip: View {
         HStack(spacing: 6) {
             ScrollView(.horizontal, showsIndicators: false) {
                 HStack(spacing: 5) {
+                    if !manager.settings.favorites.isEmpty {
+                        Button { manager.destination = .favorites } label: {
+                            HStack(spacing: 8) {
+                                GlyphView(glyph: .star, color: manager.destination == .favorites ? Palette.of(scheme).teal : Palette.of(scheme).muted)
+                                Text("Избранное").lineLimit(1)
+                            }
+                        }.winButton(manager.destination == .favorites ? .selectedTab : .tab)
+                    }
                     tab(name: "Все серверы", marker: nil, selected: manager.destination == .all) { manager.destination = .all }
                         .contextMenu { startupItem(nil) }
                     ForEach(manager.settings.groups) { group in
@@ -454,6 +493,7 @@ private struct ServerTable: View {
 
     private var emptyText: String {
         if !query.trimmingCharacters(in: .whitespaces).isEmpty { return "По вашему запросу ничего не найдено." }
+        if manager.destination == .favorites { return "Отметьте серверы звёздочкой: «В избранное» в меню строки." }
         if manager.catalogProtocol == .rdp { return "Добавьте RDP-подключение или импортируйте профиль .rdp." }
         if manager.currentGroup != nil { return "Добавьте сервер или перенесите сюда подключение из «Все серверы»." }
         return "Добавьте сервер, чтобы создать первое подключение."
@@ -511,7 +551,11 @@ private struct ServerTable: View {
         let selected = selection == row.id
         return HStack(spacing: 0) {
             HStack(spacing: 8) {
-                GlyphView(glyph: .server, color: palette.teal)
+                if manager.isFavorite(row.ssh.map { Manager.key($0) } ?? row.rdp.map { Manager.key($0) } ?? "") {
+                    GlyphView(glyph: .star, color: GroupMarker.amber.color)
+                } else {
+                    GlyphView(glyph: .server, color: palette.teal)
+                }
                 Text(row.name).font(.system(size: 13, weight: .semibold)).lineLimit(1)
             }
             .padding(.leading, 9).frame(width: widths[0], alignment: .leading)
@@ -573,6 +617,7 @@ private struct ServerTable: View {
         Button { manager.openFiles(profile) } label: { Label("Файлы (SFTP)", systemImage: "folder") }
         Button { manager.openInTerminal(profile) } label: { Label("Открыть в Терминале", systemImage: "apple.terminal") }
         Button { manager.editor = ProfileEditorState(original: profile) } label: { Label("Изменить", systemImage: "pencil") }
+        favoriteItem(Manager.key(profile))
         Menu {
             Button { manager.move(profile, to: nil) } label: {
                 if current == nil { Label("Без вкладки", systemImage: "checkmark") } else { Text("Без вкладки") }
@@ -586,8 +631,16 @@ private struct ServerTable: View {
             Button { manager.moveToNewGroup(profile) } label: { Label("Новая вкладка…", systemImage: "plus") }
         } label: { Label("Переместить во вкладку", systemImage: "arrow.right") }
         Button { manager.copyCommand(profile) } label: { Label("Копировать команду SSH", systemImage: "doc.on.doc") }
+        Button { manager.copyKey(to: profile) } label: { Label("Скопировать ключ на сервер", systemImage: "key") }
         Divider()
         Button(role: .destructive) { manager.remove(profile) } label: { Label("Удалить", systemImage: "trash") }
+    }
+
+    private func favoriteItem(_ key: String) -> some View {
+        let favorite = manager.isFavorite(key)
+        return Button { manager.toggleFavorite(key) } label: {
+            Label(favorite ? "Убрать из избранного" : "В избранное", systemImage: favorite ? "star.slash" : "star")
+        }
     }
 
     @ViewBuilder
@@ -597,6 +650,7 @@ private struct ServerTable: View {
         Button { manager.desktopEditor = DesktopEditorState(original: desktop, group: desktop.group) } label: {
             Label("Изменить", systemImage: "pencil")
         }
+        favoriteItem(Manager.key(desktop))
         Menu {
             Button { manager.moveDesktop(desktop, to: nil) } label: {
                 if desktop.group == nil { Label("Без вкладки", systemImage: "checkmark") } else { Text("Без вкладки") }
@@ -816,6 +870,7 @@ private struct SSHInfo: View {
         InfoLayout(title: session.title,
                    detail: detailLine(["SSH", session.address, groupName, forwarding, session.live ? "" : "завершён"])) {
             Button { manager.openFiles(session.profile) } label: { GlyphLabel(title: "Файлы", glyph: .folder) }.winButton(.outline)
+            SnippetsMenu(manager: manager, session: session)
             Button { manager.duplicate(entry) } label: { GlyphLabel(title: "Новый сеанс этого сервера", glyph: .plus) }.winButton(.quiet)
             Button { manager.closeSession(entry) } label: { GlyphLabel(title: "Закрыть", glyph: nil, danger: true) }
                 .winButton(.quiet, danger: true)
@@ -864,7 +919,96 @@ private struct SSHContent: View {
     let entry: SessionEntry
 
     var body: some View {
-        TerminalView(session: session)
+        VStack(spacing: 0) {
+            TerminalView(session: session)
+            if !session.live { EndedBar(manager: manager, session: session, entry: entry) }
+        }
+    }
+}
+
+/// «Сеанс SSH завершён» under the terminal with «Переподключить» and «Закрыть сеанс» (docs/ui-spec.md §7).
+private struct EndedBar: View {
+    @ObservedObject var manager: Manager
+    @ObservedObject var session: TerminalSession
+    let entry: SessionEntry
+    @Environment(\.colorScheme) private var scheme
+
+    var body: some View {
+        let palette = Palette.of(scheme)
+        let text = manager.pendingReconnect[session.id].map { "Соединение прервано · повтор через 5 с (попытка \($0) из 3)" }
+            ?? "Сеанс SSH завершён (код \(session.exitCode ?? 0))"
+        HStack(spacing: 8) {
+            Text(text).lineLimit(1).truncationMode(.tail).foregroundStyle(palette.ink)
+            Spacer(minLength: 8)
+            if session.remoteCommand == nil {
+                Button { manager.reconnect(entry) } label: { GlyphLabel(title: "Переподключить", glyph: .refresh, kind: .primary) }
+                    .winButton(.primary)
+            }
+            Button { manager.closeSession(entry) } label: { GlyphLabel(title: "Закрыть сеанс", glyph: nil) }.winButton(.outline)
+        }
+        .padding(.top, 7)
+        .frame(height: 44)
+        .background(palette.canvas)
+    }
+}
+
+/// «Команды»: saved commands, «Во все открытые сеансы», «Добавить…» and «Удалить».
+private struct SnippetsMenu: View {
+    @ObservedObject var manager: Manager
+    @ObservedObject var session: TerminalSession
+    @State private var everywhere = false
+
+    var body: some View {
+        Menu {
+            if manager.settings.snippets.isEmpty { Text("Сохранённых команд пока нет.") }
+            ForEach(manager.settings.snippets) { snippet in
+                Button(snippet.name) { manager.send(snippet, to: session, everywhere: everywhere) }.help(snippet.command)
+            }
+            Divider()
+            Toggle("Во все открытые сеансы", isOn: $everywhere)
+            Button("Добавить…") { manager.addingSnippet = true }
+            if !manager.settings.snippets.isEmpty {
+                Menu("Удалить") {
+                    ForEach(manager.settings.snippets) { snippet in Button(snippet.name) { manager.removeSnippet(snippet) } }
+                }
+            }
+        } label: { GlyphLabel(title: "Команды", glyph: .terminal) }
+            .menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize()
+            .padding(.horizontal, 8)
+            .disabled(!session.live)
+            .help("Сохранённые команды")
+    }
+}
+
+/// «Быстрое подключение»: user@host:port or rdp://host, Enter connects (docs/ui-spec.md §7).
+private struct QuickConnectField: View {
+    @ObservedObject var manager: Manager
+    @State private var text = ""
+    @FocusState private var focused: Bool
+    @Environment(\.colorScheme) private var scheme
+
+    var body: some View {
+        let palette = Palette.of(scheme)
+        HStack(spacing: 8) {
+            GlyphView(glyph: .terminal, color: palette.muted)
+            TextField("Быстрое подключение: user@host или rdp://host", text: $text)
+                .textFieldStyle(.plain)
+                .focused($focused)
+                .onSubmit {
+                    let value = text.trimmingCharacters(in: .whitespaces)
+                    guard !value.isEmpty else { return }
+                    text = ""
+                    manager.quickConnect(value)
+                }
+                .onExitCommand { text = "" }
+                .accessibilityLabel("Быстрое подключение")
+        }
+        .padding(.horizontal, 10)
+        .frame(width: 310, height: 32)
+        .background(RoundedRectangle(cornerRadius: 7).fill(palette.surface))
+        .overlay(RoundedRectangle(cornerRadius: 7).strokeBorder(focused ? palette.teal : palette.line, lineWidth: 1))
+        .help("Подключиться без сохранения профиля. Enter — подключиться.")
+        .onReceive(NotificationCenter.default.publisher(for: .focusQuickConnect)) { _ in focused = true }
     }
 }
 
@@ -933,15 +1077,28 @@ private struct ProfileEditor: View {
     @State private var keys: [String]
     @State private var chosenKey: String?
     @State private var available: [String] = privateKeys()
+    @State private var forwardKind = 0
+    @State private var forwardValue = ""
+    @State private var selectedForward: String?
+    @State private var creatingKey = false
+    @State private var keyName = ""
+    @State private var keyMessage: String?
+    private static let forwardNames = ["LocalForward", "RemoteForward", "DynamicForward"]
+    private static let forwardTitles = ["L — локальный", "R — удалённый", "D — SOCKS"]
     private let state: ProfileEditorState
     private let hasPassword: Bool
     private let save: (Profile, String, Bool) throws -> Void
 
-    init(state: ProfileEditorState, hasPassword: Bool, save: @escaping (Profile, String, Bool) throws -> Void) {
+    init(state: ProfileEditorState, hasPassword: Bool, defaults: Preferences = Preferences(),
+         save: @escaping (Profile, String, Bool) throws -> Void) {
         self.state = state
         self.hasPassword = hasPassword
         self.save = save
-        let start = state.original ?? Profile()
+        var start = state.original ?? Profile()
+        if state.original == nil {
+            start.user = defaults.defaultUser
+            start.port = defaults.defaultPort
+        }
         _profile = State(initialValue: start)
         _keys = State(initialValue: start.identities.components(separatedBy: .newlines).filter { !$0.isEmpty })
     }
@@ -975,6 +1132,24 @@ private struct ProfileEditor: View {
                     Color.clear.frame(width: 1, height: 1)
                     Text("Пустые поля используют настройки OpenSSH.").foregroundStyle(palette.muted).font(.callout)
                 }
+                GridRow { Text("Через сервер"); TextField("ProxyJump: bastion или user@host:port", text: $profile.proxyJump) }
+                GridRow(alignment: .top) {
+                    Text("Пробросы портов")
+                    VStack(alignment: .leading, spacing: 6) {
+                        List(profile.forwards, id: \.self, selection: $selectedForward) { forward in
+                            Text(forward).lineLimit(1).truncationMode(.middle)
+                        }.frame(height: 60).listStyle(.bordered)
+                        HStack(spacing: 6) {
+                            Picker("", selection: $forwardKind) {
+                                ForEach(0..<3, id: \.self) { index in Text(Self.forwardTitles[index]).tag(index) }
+                            }.labelsHidden().frame(width: 150)
+                            TextField(forwardKind == 2 ? "1080" : "8080 localhost:80", text: $forwardValue).onSubmit(addForward)
+                            Button { addForward() } label: { GlyphLabel(title: "Добавить", glyph: .plus) }.winButton(.outline)
+                            Button { profile.forwards.removeAll { $0 == selectedForward } } label: { GlyphLabel(title: "Убрать", glyph: .delete) }
+                                .winButton(.outline).disabled(selectedForward == nil)
+                        }
+                    }
+                }
                 GridRow {
                     Text("Доступные ключи")
                     HStack {
@@ -1001,6 +1176,17 @@ private struct ProfileEditor: View {
                         Button { addKey() } label: { GlyphLabel(title: "Добавить ключ", glyph: .key) }.winButton(.outline)
                         Button { replaceKey() } label: { GlyphLabel(title: "Заменить", glyph: .edit) }.winButton(.outline)
                         Button { keys.removeAll { $0 == selectedKey } } label: { GlyphLabel(title: "Убрать", glyph: .delete) }.winButton(.outline)
+                        Button {
+                            let alias = profile.alias.trimmingCharacters(in: .whitespaces)
+                            keyName = alias.isEmpty ? "id_ed25519" : "id_ed25519_" + alias
+                            creatingKey = true
+                        } label: { GlyphLabel(title: "Создать ключ…", glyph: .plus) }.winButton(.outline)
+                    }
+                }
+                if let keyMessage {
+                    GridRow {
+                        Color.clear.frame(width: 1, height: 1)
+                        Text(keyMessage).foregroundStyle(palette.muted).font(.callout).fixedSize(horizontal: false, vertical: true)
                     }
                 }
             }
@@ -1009,8 +1195,35 @@ private struct ProfileEditor: View {
             DialogButtons(commit: "Сохранить", enabled: !profile.alias.trimmingCharacters(in: .whitespaces).isEmpty,
                           cancel: { dismiss() }, submit: submit)
         }
-        .padding(22).frame(width: 640)
+        .padding(22).frame(width: 680)
         .onAppear { if chosenKey == nil { chosenKey = available.first } }
+        .alert("Создать ключ", isPresented: $creatingKey) {
+            TextField("Имя файла в ~/.ssh", text: $keyName)
+            Button("Создать") { createKey() }
+            Button("Отмена", role: .cancel) {}
+        } message: {
+            Text("Ключ ed25519 без пароля в папке ~/.ssh.")
+        }
+    }
+
+    private func addForward() {
+        let value = forwardValue.split(whereSeparator: \.isWhitespace).joined(separator: " ")
+        guard !value.isEmpty else { return }
+        let forward = Self.forwardNames[forwardKind] + " " + value
+        if !profile.forwards.contains(forward) { profile.forwards.append(forward) }
+        selectedForward = forward
+        forwardValue = ""
+    }
+
+    /// «Создать ключ…»: ssh-keygen ed25519, then the new key is selected.
+    private func createKey() {
+        do {
+            let path = try Keys.generate(name: keyName.trimmingCharacters(in: .whitespaces))
+            if !available.contains(path) { available.insert(path, at: 0) }
+            chosenKey = path
+            if !keys.contains(path) { keys.append(path) }
+            keyMessage = "Ключ создан: \(path). Публичную часть можно скопировать на сервер через меню строки «Скопировать ключ на сервер»."
+        } catch { failure = error.localizedDescription }
     }
 
     @State private var selectedKey: String?
@@ -1041,6 +1254,7 @@ private struct ProfileEditor: View {
         profile.host = profile.host.trimmingCharacters(in: .whitespacesAndNewlines)
         profile.user = profile.user.trimmingCharacters(in: .whitespacesAndNewlines)
         profile.port = profile.port.trimmingCharacters(in: .whitespacesAndNewlines)
+        profile.proxyJump = profile.proxyJump.trimmingCharacters(in: .whitespacesAndNewlines)
         profile.identities = keys.joined(separator: "\n")
         do { try save(profile, removePassword ? "" : password, removePassword); dismiss() }
         catch { failure = error.localizedDescription }
@@ -1084,6 +1298,8 @@ private struct DesktopEditor: View {
     @State private var error = ""
     @State private var password = ""
     @State private var removePassword = false
+    @State private var showAdvanced: Bool
+    @State private var selectedDrive: String?
     let creating: Bool
     let hasPassword: Bool
     let importFile: () -> Void
@@ -1099,6 +1315,7 @@ private struct DesktopEditor: View {
         _port = State(initialValue: String(start.port))
         _width = State(initialValue: start.width == 0 ? "" : String(start.width))
         _height = State(initialValue: start.height == 0 ? "" : String(start.height))
+        _showAdvanced = State(initialValue: !start.drives.isEmpty || start.printers || start.multimon || !start.gateway.isEmpty)
         self.save = save
     }
 
@@ -1131,6 +1348,29 @@ private struct DesktopEditor: View {
                 GridRow { Color.clear.frame(width: 1, height: 1); Toggle("Открывать на весь экран", isOn: $profile.fullScreen) }
             }
             .textFieldStyle(.roundedBorder)
+            DisclosureGroup("Дополнительно", isExpanded: $showAdvanced) {
+                Grid(alignment: .leading, horizontalSpacing: 12, verticalSpacing: 8) {
+                    GridRow(alignment: .top) {
+                        Text("Подключать папки")
+                        VStack(alignment: .leading, spacing: 6) {
+                            List(profile.drives, id: \.self, selection: $selectedDrive) { path in
+                                Text(path).lineLimit(1).truncationMode(.middle)
+                            }.frame(height: 56).listStyle(.bordered)
+                            HStack(spacing: 6) {
+                                Button { addDrive() } label: { GlyphLabel(title: "Добавить…", glyph: .plus) }.winButton(.outline)
+                                Button { profile.drives.removeAll { $0 == selectedDrive } } label: { GlyphLabel(title: "Убрать", glyph: .delete) }
+                                    .winButton(.outline).disabled(selectedDrive == nil)
+                            }
+                        }
+                    }
+                    GridRow { Color.clear.frame(width: 1, height: 1); Toggle("Принтеры", isOn: $profile.printers) }
+                    GridRow { Color.clear.frame(width: 1, height: 1); Toggle("Все мониторы", isOn: $profile.multimon) }
+                    GridRow { Text("Шлюз RD Gateway"); TextField("", text: $profile.gateway) }
+                    GridRow { Text("Пользователь шлюза"); TextField("", text: $profile.gatewayUser) }
+                }
+                .textFieldStyle(.roundedBorder)
+                .padding(.top, 6)
+            }
             if !error.isEmpty { Text(error).foregroundStyle(palette.danger).font(.callout) }
             HStack {
                 if creating {
@@ -1138,7 +1378,7 @@ private struct DesktopEditor: View {
                 }
                 DialogButtons(commit: "Сохранить", cancel: { dismiss() }, submit: submit)
             }
-        }.padding(22).frame(width: 545)
+        }.padding(22).frame(width: 565)
     }
 
     private func submit() {
@@ -1148,6 +1388,8 @@ private struct DesktopEditor: View {
         value.host = trim(value.host).trimmingCharacters(in: CharacterSet(charactersIn: "[]"))
         value.domain = trim(value.domain)
         value.user = trim(value.user)
+        value.gateway = trim(value.gateway)
+        value.gatewayUser = trim(value.gatewayUser)
         guard let parsedPort = trim(port).isEmpty ? 3389 : Int(trim(port)),
               let parsedWidth = trim(width).isEmpty ? 0 : Int(trim(width)),
               let parsedHeight = trim(height).isEmpty ? 0 : Int(trim(height)) else {
@@ -1159,6 +1401,16 @@ private struct DesktopEditor: View {
         value.height = parsedHeight
         do { try save(value, removePassword ? "" : password, removePassword); dismiss() }
         catch { self.error = error.localizedDescription }
+    }
+
+    private func addDrive() {
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.allowsMultipleSelection = false
+        panel.message = "Папка, которая будет доступна в удалённом сеансе"
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        if !profile.drives.contains(url.path) { profile.drives.append(url.path) }
     }
 }
 
@@ -1266,7 +1518,31 @@ private struct ServerPicker: View {
         return ServerSort.name.apply(filtered, name: \.name, host: \.address)
     }
 
-    private var chosen: Choice? { visible.first { $0.id == selection } ?? visible.first }
+    /// Up to five recent servers of this protocol while the search is empty (docs/ui-spec.md §7).
+    private var recent: [Choice] {
+        guard query.trimmingCharacters(in: .whitespaces).isEmpty else { return [] }
+        let all = everything
+        return Array(manager.settings.recent.compactMap { entry in all.first { $0.id == entry.key } }.prefix(5))
+    }
+
+    private var chosen: Choice? {
+        if let selection, selection.hasPrefix("recent:") { return recent.first { "recent:" + $0.id == selection } }
+        return visible.first { $0.id == selection } ?? recent.first ?? visible.first
+    }
+
+    private func choiceRow(_ choice: Choice, tag: String, palette: Palette) -> some View {
+        HStack(alignment: .top, spacing: 9) {
+            Circle().fill(choice.color ?? palette.teal).frame(width: 7, height: 7).padding(.top, 5)
+            VStack(alignment: .leading, spacing: 1) {
+                Text(choice.name).font(.system(size: 13, weight: .semibold))
+                Text(choice.address + (choice.group.isEmpty ? "" : "  ·  " + choice.group))
+                    .font(.system(size: 12)).foregroundStyle(palette.muted)
+            }
+        }
+        .tag(tag)
+        .contentShape(Rectangle())
+        .onTapGesture(count: 2) { choose(choice) }
+    }
 
     var body: some View {
         let palette = Palette.of(scheme)
@@ -1279,19 +1555,18 @@ private struct ServerPicker: View {
                 }
             }
             SearchField(placeholder: "Найти сервер", text: $query, focus: $focused) { if let chosen { choose(chosen) } }
-            List(visible, selection: $selection) { choice in
-                HStack(alignment: .top, spacing: 9) {
-                    Circle().fill(choice.color ?? palette.teal).frame(width: 7, height: 7).padding(.top, 5)
-                    VStack(alignment: .leading, spacing: 1) {
-                        Text(choice.name).font(.system(size: 13, weight: .semibold))
-                        Text(choice.address + (choice.group.isEmpty ? "" : "  ·  " + choice.group))
-                            .font(.system(size: 12)).foregroundStyle(palette.muted)
+            List(selection: $selection) {
+                if recent.isEmpty {
+                    ForEach(visible) { choice in choiceRow(choice, tag: choice.id, palette: palette) }
+                } else {
+                    Section("Недавние") {
+                        ForEach(recent) { choice in choiceRow(choice, tag: "recent:" + choice.id, palette: palette) }
+                    }
+                    Section("Все серверы") {
+                        ForEach(visible) { choice in choiceRow(choice, tag: choice.id, palette: palette) }
                     }
                 }
-                .tag(choice.id)
-                .contentShape(Rectangle())
-                .onTapGesture(count: 2) { choose(choice) }
-            }.frame(height: 210).listStyle(.bordered)
+            }.frame(height: 230).listStyle(.bordered)
             Text(!visible.isEmpty ? "Серверов: \(visible.count)" : everything.isEmpty ? "Сохранённых серверов пока нет." : "Серверы не найдены.")
                 .font(.system(size: 12)).foregroundStyle(palette.muted)
             DialogButtons(commit: "Подключиться", enabled: chosen != nil, cancel: { dismiss() }) { if let chosen { choose(chosen) } }
