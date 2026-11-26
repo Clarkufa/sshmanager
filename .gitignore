@@ -1,3 +1,6 @@
 /build/
 *.sshbackup
 ssh-manager-*.zip
+
+# graphify knowledge graph (rebuild with: graphify update .)
+graphify-out/
