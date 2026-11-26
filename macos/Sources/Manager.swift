@@ -898,6 +898,16 @@ final class Manager: ObservableObject {
         objectWillChange.send()
     }
 
+    func openFiles(_ profile: VncProfile) {
+        let current = settings.vnc.first { $0.id == profile.id } ?? profile
+        guard !current.filesVia.isEmpty,
+              let source = profiles.first(where: { $0.alias.caseInsensitiveCompare(current.filesVia) == .orderedSame }) else {
+            show(ManagerError("Выберите SSH-профиль для файлов в настройках VNC-подключения."))
+            return
+        }
+        openFiles(source)
+    }
+
     func openFiles(_ profile: Profile) {
         let window = fileWindows[profile.id] ?? FilesWindow(profile: profile) { [weak self] in self?.fileWindows[profile.id] = nil }
         fileWindows[profile.id] = window

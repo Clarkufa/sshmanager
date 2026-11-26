@@ -14,7 +14,16 @@ namespace SshManager
     /// </summary>
     internal sealed class VncDesktop : RemoteDesktopPanel
     {
+        public Action OpenFiles { get; set; }
+
         private const int ResizeDelay = 450;
+        private const int WmClipboardUpdate = 0x031d;
+        private IntPtr clipboardWindow;
+
+        [DllImport("user32.dll")]
+        private static extern bool AddClipboardFormatListener(IntPtr window);
+        [DllImport("user32.dll")]
+        private static extern bool RemoveClipboardFormatListener(IntPtr window);
         private readonly Timer resizeTimer;
         private readonly Dictionary<Keys, uint> pressed = new Dictionary<Keys, uint>();
         private VncClient client;
@@ -66,7 +75,7 @@ namespace SshManager
 
         public override void OpenInWindow()
         {
-            if (profile != null) VncWindow.Open(profile, password);
+            if (profile != null) VncWindow.Open(profile, password, OpenFiles);
         }
 
         private void Start()
@@ -79,7 +88,7 @@ namespace SshManager
             sizeSynced = false;
             HideEnded();
             UpdateStatus("подключение", true);
-            var current = new VncClient { ViewOnly = profile.ViewOnly };
+            var current = new VncClient { ViewOnly = profile.ViewOnly, ClipboardEnabled = profile.Clipboard };
             client = current;
             current.Connected += () => OnUi(current, OnConnected);
             current.Updated += area => OnUi(current, () => OnUpdated(area));
@@ -146,9 +155,9 @@ namespace SshManager
 
         private void OnClipboard(string text)
         {
-            if (!profile.Clipboard || String.IsNullOrEmpty(text)) return;
-            lastClipboard = text;
-            try { Clipboard.SetText(text); }
+            if (!Visible || !profile.Clipboard || profile.ViewOnly || String.IsNullOrEmpty(text)) return;
+            lastClipboard = text.Replace("\r\n", "\n").Replace("\n", "\r\n");
+            try { Clipboard.SetText(lastClipboard); }
             catch (ExternalException) { }
         }
 
@@ -298,6 +307,28 @@ namespace SshManager
         {
             base.OnLostFocus(e);
             ReleaseKeys();
+        }
+
+        protected override void OnHandleCreated(EventArgs e)
+        {
+            base.OnHandleCreated(e);
+            if (AddClipboardFormatListener(Handle)) clipboardWindow = Handle;
+        }
+
+        protected override void OnHandleDestroyed(EventArgs e)
+        {
+            if (clipboardWindow != IntPtr.Zero)
+            {
+                RemoveClipboardFormatListener(clipboardWindow);
+                clipboardWindow = IntPtr.Zero;
+            }
+            base.OnHandleDestroyed(e);
+        }
+
+        protected override void WndProc(ref Message message)
+        {
+            if (message.Msg == WmClipboardUpdate && ContainsFocus) SendClipboard();
+            base.WndProc(ref message);
         }
 
         protected override void OnGotFocus(EventArgs e)

@@ -176,6 +176,8 @@ class Window(Gtk.ApplicationWindow):
         self.source.hide()
         self.status.hide()
         self.sessions_page.refresh()
+        if self.sessions_page.sidebar_views.get_visible_child_name() == "servers":
+            self.sessions_page.server_panel.render()
         if self.sessions_page.active:
             GLib.idle_add(self.sessions_page.active.focus)
 
@@ -711,6 +713,12 @@ class Window(Gtk.ApplicationWindow):
             message(self, error, Gtk.MessageType.ERROR)
 
     def open_files(self, profile):
+        if isinstance(profile, VncProfile):
+            current = next((item for item in self.vnc_profiles() if item.id == profile.id), profile)
+            profile = self.ssh_profile(current.files_via) if current.files_via else None
+            if profile is None:
+                message(self, "Выберите SSH-профиль для файлов в настройках VNC-подключения.", Gtk.MessageType.ERROR)
+                return
         key = (profile.alias, profile.address)
         if key not in self.files:
             window = FilesWindow(self, profile, self.config, self.vault)
@@ -999,20 +1007,19 @@ class Window(Gtk.ApplicationWindow):
         if session is not None:
             session.set_full_screen(False)
 
-    def pick_server(self):
+    def server_entries(self, protocol):
         names = {group["id"]: group for group in self.settings["groups"]}
+        profiles = (self.desktop_profiles() if protocol == "rdp" else self.vnc_profiles() if protocol == "vnc" else
+                    list(self.document.profiles) if self.document else [])
+        result = []
+        for profile in ordered(profiles, "name"):
+            group = names.get(self.group_of(profile))
+            result.append((profile, group["name"] if group else "",
+                           group["color"] if group and group["color"] else self.theme.color("teal")))
+        return result
 
-        def entries(protocol):
-            profiles = (self.desktop_profiles() if protocol == "rdp" else self.vnc_profiles() if protocol == "vnc" else
-                        list(self.document.profiles) if self.document else [])
-            result = []
-            for profile in ordered(profiles, "name"):
-                group = names.get(self.group_of(profile))
-                result.append((profile, group["name"] if group else "",
-                               group["color"] if group and group["color"] else self.theme.color("teal")))
-            return result
-
-        dialog = ServerPicker(self, self.protocol, entries, [item["key"] for item in self.settings["recent"]])
+    def pick_server(self):
+        dialog = ServerPicker(self, self.protocol, self.server_entries, [item["key"] for item in self.settings["recent"]])
         profile = dialog.chosen() if dialog.run() == Gtk.ResponseType.OK else None
         dialog.destroy()
         if profile is not None:

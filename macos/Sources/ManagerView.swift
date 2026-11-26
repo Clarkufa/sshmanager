@@ -23,7 +23,7 @@ struct SSHManagerApp: App {
             CommandGroup(replacing: .newItem) {
                 Button("Новый сеанс…") { manager.choosingServer = true }
                     .keyboardShortcut("n", modifiers: .command)
-                    .disabled(manager.profiles.isEmpty && manager.settings.desktops.isEmpty)
+                    .disabled(manager.profiles.isEmpty && manager.settings.desktops.isEmpty && manager.settings.vnc.isEmpty)
                 Button("Добавить сервер…") { manager.addCatalogEntry() }
                     .keyboardShortcut("n", modifiers: [.command, .shift])
                 Button("Новая вкладка…") { manager.groupEditor = GroupEditorState() }
@@ -744,6 +744,7 @@ private struct ServerTable: View {
         Button { manager.connectVnc(profile) } label: { Label("Подключиться", systemImage: "server.rack") }
         Button { manager.connectVnc(profile, new: true) } label: { Label("Новый сеанс", systemImage: "plus") }
         Button { manager.connectVnc(profile, new: true) } label: { Label("Открыть в отдельном окне", systemImage: "macwindow") }
+        Button { manager.openFiles(profile) } label: { Label("Файлы (SFTP)", systemImage: "folder") }
         Button { manager.editVnc(profile) } label: { Label("Изменить", systemImage: "pencil") }
         favoriteItem(Manager.key(profile))
         Menu {
@@ -766,6 +767,7 @@ private struct ServerTable: View {
 private struct SessionsPage: View {
     @ObservedObject var manager: Manager
     @State private var query = ""
+    @State private var showingServers = false
     @FocusState private var searchFocused: Bool
     @Environment(\.colorScheme) private var scheme
 
@@ -786,23 +788,17 @@ private struct SessionsPage: View {
             }
             HStack(alignment: .top, spacing: 12) {
                 VStack(alignment: .leading, spacing: 6) {
-                    SearchField(placeholder: "Найти сеанс", text: $query, focus: $searchFocused) {
-                        if let first = entries.first { manager.activate(first.id) }
+                    HStack(spacing: 4) {
+                        Button("Сеансы") { showingServers = false }
+                            .winButton(showingServers ? .tab : .selectedTab)
+                        Button("Серверы") { showingServers = true }
+                            .winButton(showingServers ? .selectedTab : .tab)
                     }
-                    Text("Открыто: \(manager.liveCount)" + (manager.liveCount == manager.entries.count ? "" : " из \(manager.entries.count)")).font(.system(size: 12)).foregroundStyle(palette.muted).padding(.leading, 2)
-                    ScrollView {
-                        LazyVStack(spacing: 0) {
-                            ForEach(entries) { entry in
-                                SessionListRow(entry: entry, color: dotColor(entry, palette: palette),
-                                               selected: entry.id == manager.activeSession, palette: palette)
-                                    .contentShape(Rectangle())
-                                    .onTapGesture { manager.activate(entry.id) }
-                                    .contextMenu { SessionMenu(manager: manager, entry: entry) }
-                            }
-                        }
+                    if showingServers {
+                        ServerPicker(manager: manager, onSelected: { showingServers = false })
+                    } else {
+                        sessionList(entries, palette: palette)
                     }
-                    .background(palette.surface)
-                    .overlay(Rectangle().strokeBorder(palette.line, lineWidth: 1).allowsHitTesting(false))
                 }
                 .frame(width: 234)
                 VStack(alignment: .leading, spacing: 7) {
@@ -814,7 +810,31 @@ private struct SessionsPage: View {
         .padding(.horizontal, 24)
         .padding(.top, 15)
         .padding(.bottom, 8)
-        .onReceive(NotificationCenter.default.publisher(for: .focusSessionSearch)) { _ in searchFocused = true }
+        .onReceive(NotificationCenter.default.publisher(for: .focusSessionSearch)) { _ in
+            if !showingServers { searchFocused = true }
+        }
+    }
+
+    private func sessionList(_ entries: [SessionEntry], palette: Palette) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            SearchField(placeholder: "Найти сеанс", text: $query, focus: $searchFocused) {
+                if let first = entries.first { manager.activate(first.id) }
+            }
+            Text("Открыто: \(manager.liveCount)" + (manager.liveCount == manager.entries.count ? "" : " из \(manager.entries.count)")).font(.system(size: 12)).foregroundStyle(palette.muted).padding(.leading, 2)
+            ScrollView {
+                LazyVStack(spacing: 0) {
+                    ForEach(entries) { entry in
+                        SessionListRow(entry: entry, color: dotColor(entry, palette: palette),
+                                       selected: entry.id == manager.activeSession, palette: palette)
+                            .contentShape(Rectangle())
+                            .onTapGesture { manager.activate(entry.id) }
+                            .contextMenu { SessionMenu(manager: manager, entry: entry) }
+                    }
+                }
+            }
+            .background(palette.surface)
+            .overlay(Rectangle().strokeBorder(palette.line, lineWidth: 1).allowsHitTesting(false))
+        }
     }
 
     private func groupName(_ entry: SessionEntry) -> String {
@@ -913,6 +933,7 @@ private struct SessionMenu: View {
         case .rdp(let session):
             remoteActions(fullScreen: session.live && session.supportsFullScreen, label: "Полноэкранный режим RDP")
         case .vnc(let session):
+            Button { manager.openFiles(session.profile) } label: { Label("Файлы (SFTP)", systemImage: "folder") }
             remoteActions(fullScreen: session.live && session.supportsFullScreen, label: "Весь экран")
         }
         Divider()
@@ -992,6 +1013,9 @@ private struct RemoteInfo<Session: RemoteDesktopSession>: View {
 
     var body: some View {
         InfoLayout(title: session.title, detail: detailLine([entry.protocolName, session.address, groupName, session.status, route])) {
+            if case .vnc(let vnc) = entry {
+                Button { manager.openFiles(vnc.profile) } label: { GlyphLabel(title: "Файлы", glyph: .folder) }.winButton(.outline)
+            }
             Button { manager.reconnect(entry) } label: { GlyphLabel(title: "Переподключить", glyph: .refresh) }.winButton(.outline)
             Button { manager.fullScreen(entry) } label: { GlyphLabel(title: "Весь экран", glyph: .server) }
                 .winButton(.outline).disabled(!session.live || !session.supportsFullScreen)
@@ -1542,6 +1566,7 @@ private struct VncEditor: View {
         self.save = save
         var start = state.original ?? VncProfile(group: state.group)
         start.via = sshAliases.first { $0.caseInsensitiveCompare(start.via) == .orderedSame } ?? start.via
+        start.filesVia = sshAliases.first { $0.caseInsensitiveCompare(start.filesVia) == .orderedSame } ?? start.filesVia
         _profile = State(initialValue: start)
         _port = State(initialValue: String(start.port))
     }
@@ -1569,6 +1594,16 @@ private struct VncEditor: View {
                     Picker("Через SSH-сервер", selection: $profile.via) {
                         Text("Напрямую").tag("")
                         if !profile.via.isEmpty && !sshAliases.contains(profile.via) { Text(profile.via).tag(profile.via) }
+                        ForEach(sshAliases, id: \.self) { Text($0).tag($0) }
+                    }.labelsHidden()
+                }
+                GridRow {
+                    Text("SSH-профиль для файлов")
+                    Picker("SSH-профиль для файлов", selection: $profile.filesVia) {
+                        Text("Не выбран").tag("")
+                        if !profile.filesVia.isEmpty && !sshAliases.contains(profile.filesVia) {
+                            Text(profile.filesVia).tag(profile.filesVia)
+                        }
                         ForEach(sshAliases, id: \.self) { Text($0).tag($0) }
                     }.labelsHidden()
                 }
@@ -1674,6 +1709,8 @@ private struct ServerPicker: View {
     @Environment(\.dismiss) private var dismiss
     @Environment(\.colorScheme) private var scheme
     @ObservedObject var manager: Manager
+    var onSelected: (() -> Void)? = nil
+    private var embedded: Bool { onSelected != nil }
     @State private var query = ""
     @State private var selection: String?
     @State private var kind: ConnectionProtocol = .ssh
@@ -1731,9 +1768,9 @@ private struct ServerPicker: View {
         HStack(alignment: .top, spacing: 9) {
             Circle().fill(choice.color ?? palette.teal).frame(width: 7, height: 7).padding(.top, 5)
             VStack(alignment: .leading, spacing: 1) {
-                Text(choice.name).font(.system(size: 13, weight: .semibold))
+                Text(choice.name).font(.system(size: 13, weight: .semibold)).lineLimit(1)
                 Text(choice.address + (choice.group.isEmpty ? "" : "  ·  " + choice.group))
-                    .font(.system(size: 12)).foregroundStyle(palette.muted)
+                    .font(.system(size: 12)).foregroundStyle(palette.muted).lineLimit(1)
             }
         }
         .tag(tag)
@@ -1744,10 +1781,12 @@ private struct ServerPicker: View {
     var body: some View {
         let palette = Palette.of(scheme)
         VStack(alignment: .leading, spacing: 10) {
-            Text("Новый сеанс").font(.title3.weight(.semibold))
+            if !embedded { Text("Новый сеанс").font(.title3.weight(.semibold)) }
             HStack(spacing: 4) {
                 ForEach(ConnectionProtocol.allCases) { value in
-                    Button { kind = value; selection = nil } label: { GlyphLabel(title: value.rawValue, glyph: value == .ssh ? .terminal : .server) }
+                    Button { kind = value; selection = nil } label: {
+                        GlyphLabel(title: value.rawValue, glyph: embedded ? nil : value == .ssh ? .terminal : .server)
+                    }
                         .winButton(kind == value ? .selectedTab : .tab)
                 }
             }
@@ -1763,19 +1802,26 @@ private struct ServerPicker: View {
                         ForEach(visible) { choice in choiceRow(choice, tag: choice.id, palette: palette) }
                     }
                 }
-            }.frame(height: 230).listStyle(.bordered)
+            }.frame(height: embedded ? nil : 230).listStyle(.bordered)
             Text(!visible.isEmpty ? "Серверов: \(visible.count)" : everything.isEmpty ? "Сохранённых серверов пока нет." : "Серверы не найдены.")
                 .font(.system(size: 12)).foregroundStyle(palette.muted)
-            DialogButtons(commit: "Подключиться", enabled: chosen != nil, cancel: { dismiss() }) { if let chosen { choose(chosen) } }
+            if embedded {
+                Button("Подключиться") { if let chosen { choose(chosen) } }.winButton(.primary).disabled(chosen == nil)
+            } else {
+                DialogButtons(commit: "Подключиться", enabled: chosen != nil, cancel: { dismiss() }) { if let chosen { choose(chosen) } }
+            }
         }
-        .padding(20).frame(width: 495)
+        .padding(embedded ? 0 : 20).frame(width: embedded ? nil : 495)
         .onAppear { kind = manager.catalogProtocol; focused = true }
+        .onReceive(NotificationCenter.default.publisher(for: .focusSessionSearch)) { _ in
+            if embedded { focused = true }
+        }
     }
 
     private func choose(_ choice: Choice) {
-        dismiss()
-        if let profile = choice.ssh { manager.connect(profile, new: true) }
-        if let desktop = choice.rdp { manager.connectDesktop(desktop, new: true) }
-        if let profile = choice.vnc { manager.connectVnc(profile, new: true) }
+        if let onSelected { onSelected() } else { dismiss() }
+        if let profile = choice.ssh { manager.connect(profile, new: !embedded) }
+        if let desktop = choice.rdp { manager.connectDesktop(desktop, new: !embedded) }
+        if let profile = choice.vnc { manager.connectVnc(profile, new: !embedded) }
     }
 }

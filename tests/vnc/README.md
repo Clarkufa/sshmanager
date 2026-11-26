@@ -27,6 +27,8 @@ sh tests/linux-ui/run-vnc-check.sh
 
 Для Windows используйте `tests/windows/live-vnc.ps1` с уже запущенным стендом. Скрипт проверяет прямой вход и туннель за один прогон. [Команды проверки Windows](../windows/README.md)
 
+Для проверки Unicode-буфера Windows запустите `tests/windows/live-vnc-clipboard.ps1 -Exe build/check/SshManager.exe` против стенда. Скрипт проверяет многострочный UTF-8 в обе стороны.
+
 Остановить и удалить: `docker rm -f sshm-vnc`.
 
 WSL останавливает Docker примерно через минуту после выхода последней команды `wsl.exe`. На время проверок держите в фоне `wsl.exe -e sleep 5400`.

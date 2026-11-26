@@ -11,7 +11,7 @@ import gi
 from gi.repository import Gdk, Gio, GLib, GObject, Gtk, Pango, Vte
 
 from .auth import AskPass, account_for, ssh_args
-from .dialogs import LogonDialog, VncLogonDialog
+from .dialogs import LogonDialog, ServerPickerPanel, VncLogonDialog
 from .theme import TERMINAL, mark, rgba
 from .widgets import Item, action_button, confirm, menu_at, message
 from .vnc import MISSING_CLIENT, SshTunnel, TunnelError
@@ -705,11 +705,18 @@ class VncSession(Session):
             "vnc-auth-unsupported": self.on_auth_unsupported,
             "vnc-error": self.on_error,
             "vnc-disconnected": self.on_disconnected,
-            "vnc-server-cut-text": self.on_server_text,
         }
+        if hasattr(display, "set_clipboard_sync"):
+            disabled = GtkVnc.DisplayClipboardSync.NONE
+            enabled = GtkVnc.DisplayClipboardSync.BOTH if self.profile.clipboard and not self.profile.view_only else disabled
+            display.set_clipboard_sync(disabled)
+            display.connect("map", lambda widget: widget.set_clipboard_sync(enabled))
+            display.connect("unmap", lambda widget: widget.set_clipboard_sync(disabled))
+        else:
+            handlers["vnc-server-cut-text"] = self.on_server_text
+            display.connect("focus-in-event", lambda *_: self.send_clipboard())
         for signal_name, handler in handlers.items():
             display.connect(signal_name, lambda widget, *args, handler=handler: handler(generation, *args))
-        display.connect("focus-in-event", lambda *_: self.send_clipboard())
         display.connect("button-press-event", lambda widget, event: widget.grab_focus() and False)
         if fit:
             self.holder.pack_start(display, True, True, 0)
@@ -809,7 +816,7 @@ class VncSession(Session):
             self.ended("Сервер VNC закрыл соединение.", failed=not self.initialized)
 
     def on_server_text(self, generation, text):
-        if self.current(generation) and self.profile.clipboard and not self.profile.view_only and text:
+        if self.current(generation) and self.display.get_mapped() and self.profile.clipboard and not self.profile.view_only and text:
             self.received = text
             self.clipboard.set_text(text, -1)
 
@@ -819,7 +826,8 @@ class VncSession(Session):
             self.send_clipboard()
 
     def send_clipboard(self):
-        if self.display is None or not self.initialized or not self.profile.clipboard or self.profile.view_only:
+        if (self.display is None or hasattr(self.display, "set_clipboard_sync") or not self.initialized
+                or not self.profile.clipboard or self.profile.view_only):
             return False
         generation = self.generation
 
@@ -912,8 +920,8 @@ class VncWindow(Gtk.Window):
         self.toolbar.pack_start(title, True, True, 0)
         self.session = VncSession(owner, profile, 1, credential, window=self)
         self.full = action_button("Весь экран", lambda: self.set_full_screen(True), "outline", icon="server", width=116)
-        for widget in (self.full,
-                       action_button("Переподключить", self.session.restart, "outline", icon="refresh", width=150),
+        for widget in (action_button("Файлы", lambda: owner.open_files(profile), "outline", icon="folder", width=86),
+                       self.full, action_button("Переподключить", self.session.restart, "outline", icon="refresh", width=150),
                        action_button("Отключить", self.destroy, "outline", danger=True, width=100)):
             self.toolbar.pack_start(widget, False, False, 0)
         box.pack_start(self.toolbar, False, False, 0)
@@ -1018,13 +1026,29 @@ class SessionsPage(Gtk.Box):
 
         sidebar = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
         sidebar.set_size_request(234, -1)
+        mode = Gtk.Box(spacing=4)
+        self.session_tab = action_button("Сеансы", lambda: self.select_sidebar(False), "tab", width=98)
+        self.server_tab = action_button("Серверы", lambda: self.select_sidebar(True), "tab", width=98)
+        mode.pack_start(self.session_tab, False, False, 0)
+        mode.pack_start(self.server_tab, False, False, 0)
+        sidebar.pack_start(mode, False, False, 0)
+        self.sidebar_views = Gtk.Stack(vhomogeneous=False, hhomogeneous=False)
+        sidebar.pack_start(self.sidebar_views, True, True, 0)
+        session_list = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        self.sidebar_views.add_named(session_list, "sessions")
+        self.server_panel = ServerPickerPanel(owner.protocol, owner.server_entries,
+                                               lambda: [item["key"] for item in owner.settings["recent"]],
+                                               self.open_saved_server, compact=True)
+        self.sidebar_views.add_named(self.server_panel, "servers")
+        self.session_tab.get_style_context().add_class("selected")
+        self.sidebar_views.set_visible_child_name("sessions")
         self.search = Gtk.SearchEntry(placeholder_text="Найти сеанс")
         self.search.connect("search-changed", lambda *_: self.refresh())
         self.search.connect("activate", lambda *_: self.open_first())
-        sidebar.pack_start(self.search, False, False, 0)
+        session_list.pack_start(self.search, False, False, 0)
         self.count = Gtk.Label(xalign=0, margin_start=2)
         mark(self.count, "sshm-muted")
-        sidebar.pack_start(self.count, False, False, 0)
+        session_list.pack_start(self.count, False, False, 0)
         self.list = Gtk.ListBox()
         self.list.connect("row-selected", self.row_selected)
         self.list.connect("button-press-event", self.list_pressed)
@@ -1033,7 +1057,7 @@ class SessionsPage(Gtk.Box):
         scroll = Gtk.ScrolledWindow(vexpand=True, hscrollbar_policy=Gtk.PolicyType.NEVER)
         scroll.add(self.list)
         mark(scroll, "sshm-frame")
-        sidebar.pack_start(scroll, True, True, 0)
+        session_list.pack_start(scroll, True, True, 0)
         body.pack_start(sidebar, False, False, 0)
         self.sidebar = sidebar
 
@@ -1057,7 +1081,8 @@ class SessionsPage(Gtk.Box):
         self.snippets = action_button("Команды", lambda: self.active and self.snippet_menu(self.snippets), icon="terminal",
                                       width=110, tooltip="Сохранённые команды")
         self.duplicate = action_button("Новый сеанс этого сервера", lambda: self.active and owner.duplicate_session(self.active),
-                                       "quiet", icon="plus", width=220)
+                                       "quiet", icon="plus", width=220, tooltip="Новый сеанс этого сервера")
+        self.duplicate.get_accessible().set_name("Новый сеанс этого сервера")
         self.close = action_button("Закрыть", lambda: self.active and owner.close_session(self.active), "quiet",
                                    danger=True, width=81)
         for widget in (self.files, self.snippets, self.reconnect, self.detach, self.full_screen, self.duplicate, self.close):
@@ -1141,7 +1166,10 @@ class SessionsPage(Gtk.Box):
                 parts.append(session.status)
             self.detail.set_text("  ·  ".join(parts))
         rdp = isinstance(session, (RdpSession, VncSession))
-        self.files.set_visible(session is not None and not rdp)
+        vnc = isinstance(session, VncSession)
+        self.files.set_visible(session is not None and (not rdp or vnc))
+        self.duplicate.label.set_visible(not vnc)
+        self.duplicate.set_size_request(38 if vnc else 220, -1)
         self.snippets.set_visible(session is not None and not rdp)
         for widget in (self.reconnect, self.detach, self.full_screen):
             widget.set_visible(rdp)
@@ -1170,8 +1198,23 @@ class SessionsPage(Gtk.Box):
         if row is not None:
             self.activate(row.session, focus=True)
 
+    def open_saved_server(self, profile):
+        self.select_sidebar(False, focus=False)
+        self.owner.connect_profile(profile)
+
+    def select_sidebar(self, servers, focus=True):
+        self.sidebar_views.set_visible_child_name("servers" if servers else "sessions")
+        for tab, selected in ((self.session_tab, not servers), (self.server_tab, servers)):
+            context = tab.get_style_context()
+            (context.add_class if selected else context.remove_class)("selected")
+        if servers:
+            self.server_panel.render()
+        if focus:
+            self.focus_search()
+
     def focus_search(self):
-        self.search.grab_focus()
+        search = self.server_panel.search if self.sidebar_views.get_visible_child_name() == "servers" else self.search
+        search.grab_focus()
 
     def cycle(self):
         others = [item for item in self.owner.sessions if item is not self.active and item.live]
@@ -1185,9 +1228,9 @@ class SessionsPage(Gtk.Box):
         rdp = isinstance(session, (RdpSession, VncSession))
         items = [Item("Переименовать сеанс", lambda: owner.rename_session(session), icon="edit"),
                  Item("Новый сеанс этого сервера", lambda: owner.duplicate_session(session), icon="plus")]
-        if not rdp:
+        if not rdp or isinstance(session, VncSession):
             items.append(Item("Файлы (SFTP)", lambda: owner.open_files(session.profile), icon="folder"))
-        else:
+        if rdp:
             if session.live and session.embedded and session.status == "подключён":
                 items.append(Item(f"Полноэкранный режим {session.protocol}", lambda: owner.enter_full_screen(session),
                                   icon="server"))

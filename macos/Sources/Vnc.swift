@@ -19,6 +19,7 @@ struct VncProfile: Identifiable, Equatable {
     var clipboard = true
     var fullScreen = false
     var via = ""
+    var filesVia = ""
 
     var address: String { "\(Self.formatHost(host)):\(port)" }
     var keychainAccount: String { "vnc\n" + id }
@@ -37,6 +38,9 @@ struct VncProfile: Identifiable, Equatable {
         guard (1...65535).contains(port) else { throw ManagerError("Укажите порт от 1 до 65535.") }
         guard via.isEmpty || Profile.validAlias(via) else {
             throw ManagerError("Выберите SSH-сервер из списка или «Напрямую».")
+        }
+        guard filesVia.isEmpty || Profile.validAlias(filesVia) else {
+            throw ManagerError("Выберите SSH-профиль для файлов в настройках VNC-подключения.")
         }
     }
 
@@ -58,6 +62,7 @@ struct VncProfile: Identifiable, Equatable {
         clipboard = field("clipboard") != "0"
         fullScreen = field("fullScreen") == "1"
         via = field("via") ?? ""
+        filesVia = field("filesVia") ?? ""
         try validate()
     }
 
@@ -68,6 +73,7 @@ struct VncProfile: Identifiable, Equatable {
         if viewOnly { fields["viewOnly"] = "1" }
         if fullScreen { fields["fullScreen"] = "1" }
         if !via.isEmpty { fields["via"] = via }
+        if !filesVia.isEmpty { fields["filesVia"] = filesVia }
         return fields
     }
 

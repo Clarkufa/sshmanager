@@ -11,12 +11,16 @@ namespace SshManager
     {
         public const int DefaultPort = 5900;
         public const string FitScale = "fit", NativeScale = "native";
-        public readonly string Id, Name, Host, User, GroupId, Via, Scale;
+        public readonly string Id, Name, Host, User, GroupId, Via, FilesVia, Scale;
         public readonly int Port;
         public readonly bool ViewOnly, Clipboard, FullScreen;
 
         public VncProfile(string id, string name, string host, int port, string user, string groupId,
             string scale = FitScale, bool viewOnly = false, bool clipboard = true, bool fullScreen = false, string via = "")
+            : this(id, name, host, port, user, groupId, scale, viewOnly, clipboard, fullScreen, via, "") { }
+
+        public VncProfile(string id, string name, string host, int port, string user, string groupId,
+            string scale, bool viewOnly, bool clipboard, bool fullScreen, string via, string filesVia)
         {
             if (!Guid.TryParseExact(id, "N", out _)) throw new ArgumentException("Некорректный идентификатор VNC-профиля.");
             Id = id.ToLowerInvariant();
@@ -40,13 +44,16 @@ namespace SshManager
             Via = (via ?? "").Trim();
             if (Via.Length > 0 && !ConfigDocument.IsAlias(Via))
                 throw new ArgumentException("Выберите SSH-сервер из списка или «Напрямую».");
+            FilesVia = (filesVia ?? "").Trim();
+            if (FilesVia.Length > 0 && !ConfigDocument.IsAlias(FilesVia))
+                throw new ArgumentException("Выберите SSH-профиль для файлов в настройках VNC-подключения.");
         }
 
         public string Address => (Host.Contains(":") ? "[" + Host + "]" : Host) + ":" + Port.ToString(CultureInfo.InvariantCulture);
         public string Key => "VNC:" + Id;
 
         public VncProfile InGroup(string id) =>
-            new VncProfile(Id, Name, Host, Port, User, id, Scale, ViewOnly, Clipboard, FullScreen, Via);
+            new VncProfile(Id, Name, Host, Port, User, id, Scale, ViewOnly, Clipboard, FullScreen, Via, FilesVia);
 
         private static string Text(string input, int limit)
         {
@@ -58,16 +65,19 @@ namespace SshManager
         public static VncProfile Parse(XElement node, string groupId)
         {
             var via = (string)node.Attribute("via") ?? "";
+            var filesVia = (string)node.Attribute("filesVia") ?? "";
             return new VncProfile((string)node.Attribute("id"), (string)node.Attribute("name"), (string)node.Attribute("host"),
                 (int?)node.Attribute("port") ?? DefaultPort, (string)node.Attribute("user"), groupId,
                 (string)node.Attribute("scale"), (string)node.Attribute("viewOnly") == "1", (string)node.Attribute("clipboard") != "0",
-                (string)node.Attribute("fullScreen") == "1", ConfigDocument.IsAlias(via) ? via : "");
+                (string)node.Attribute("fullScreen") == "1", ConfigDocument.IsAlias(via) ? via : "",
+                ConfigDocument.IsAlias(filesVia) ? filesVia : "");
         }
 
         public XElement ToXml() => new XElement("vnc", new XAttribute("id", Id), new XAttribute("name", Name),
             new XAttribute("host", Host), new XAttribute("port", Port), new XAttribute("user", User),
             GroupId == null ? null : new XAttribute("group", GroupId), new XAttribute("scale", Scale),
             ViewOnly ? new XAttribute("viewOnly", 1) : null, new XAttribute("clipboard", Clipboard ? 1 : 0),
-            FullScreen ? new XAttribute("fullScreen", 1) : null, Via.Length == 0 ? null : new XAttribute("via", Via));
+            FullScreen ? new XAttribute("fullScreen", 1) : null, Via.Length == 0 ? null : new XAttribute("via", Via),
+            FilesVia.Length == 0 ? null : new XAttribute("filesVia", FilesVia));
     }
 }

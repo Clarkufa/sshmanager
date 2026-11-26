@@ -8,22 +8,10 @@ namespace SshManager
 {
     internal sealed class ServerPickerDialog : ThemedForm
     {
-        private readonly Choice[] choices;
-        private readonly TextBox search;
-        private readonly ListBox list;
-        private readonly Button connect;
-        private readonly Label status;
-        private readonly SurfaceButton sshTab, rdpTab, vncTab;
-        private readonly string[] recent;
-        private CatalogKind kind;
+        private readonly ServerPickerPanel panel;
 
         public ServerPickerDialog(IEnumerable<Connection> connections, Groups groups, CatalogKind preferred)
         {
-            recent = groups.Recent.Select(entry => entry.Key).ToArray();
-            choices = connections.Select(connection => new Choice(connection, groups.ForAlias(connection.Alias)))
-                .Concat(groups.Desktops.Select(profile => new Choice(profile, groups.Find(profile.GroupId))))
-                .Concat(groups.Vnc.Select(profile => new Choice(profile, groups.Find(profile.GroupId))))
-                .OrderBy(choice => choice.Target.Alias, StringComparer.OrdinalIgnoreCase).ToArray();
             Text = "Новый сеанс";
             Font = Theme.Body;
             ForeColor = Theme.Ink;
@@ -35,7 +23,47 @@ namespace SshManager
             MinimumSize = new Size(430, 305);
             ShowInTaskbar = MaximizeBox = MinimizeBox = false;
 
-            var layout = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 5, Padding = new Padding(18, 14, 18, 14) };
+            panel = new ServerPickerPanel(compact: false);
+            panel.UpdateServers(connections, groups);
+            panel.SelectProtocol(preferred);
+            panel.Submitted += target => DialogResult = DialogResult.OK;
+            Controls.Add(panel);
+            AcceptButton = panel.ConnectButton;
+            CancelButton = panel.CancelButton;
+            Theme.ScaleToDpi(this);
+            ResumeLayout();
+            Shown += (sender, args) => panel.FocusSearch();
+        }
+
+        public Connection SelectedConnection => panel.SelectedConnection;
+        public RdpProfile SelectedProfile => panel.SelectedTarget?.Desktop;
+        public VncProfile SelectedVnc => panel.SelectedTarget?.Vnc;
+    }
+
+    internal sealed class ServerPickerPanel : UserControl
+    {
+        private Choice[] choices = new Choice[0];
+        private string[] recent = new string[0];
+        private readonly TextBox search;
+        private readonly ListBox list;
+        private readonly Button connect;
+        private readonly Label status;
+        private readonly SurfaceButton sshTab, rdpTab, vncTab;
+        private CatalogKind kind;
+        public event Action<SessionTarget> Submitted;
+        public Button ConnectButton => connect;
+        public Button CancelButton { get; }
+        public Connection SelectedConnection => (list.SelectedItem as Choice)?.Connection;
+        public SessionTarget SelectedTarget => (list.SelectedItem as Choice)?.Target;
+
+        public ServerPickerPanel(bool compact)
+        {
+            Dock = DockStyle.Fill;
+            Margin = Padding.Empty;
+            BackColor = Theme.Canvas;
+            ForeColor = Theme.Ink;
+            Font = Theme.Body;
+            var layout = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 5, Padding = compact ? Padding.Empty : new Padding(18, 14, 18, 14) };
             layout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
             layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 39));
             layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 45));
@@ -45,9 +73,9 @@ namespace SshManager
             Controls.Add(layout);
 
             var protocols = new FlowLayoutPanel { Dock = DockStyle.Fill, WrapContents = false, Margin = Padding.Empty };
-            sshTab = Theme.Button("SSH", 86, glyph: Glyph.Terminal);
-            rdpTab = Theme.Button("RDP", 86, glyph: Glyph.Server);
-            vncTab = Theme.Button("VNC", 86, glyph: Glyph.Server);
+            sshTab = Theme.Button("SSH", compact ? 62 : 86, glyph: compact ? Glyph.None : Glyph.Terminal);
+            rdpTab = Theme.Button("RDP", compact ? 62 : 86, glyph: compact ? Glyph.None : Glyph.Server);
+            vncTab = Theme.Button("VNC", compact ? 62 : 86, glyph: compact ? Glyph.None : Glyph.Server);
             sshTab.AccessibleRole = rdpTab.AccessibleRole = vncTab.AccessibleRole = AccessibleRole.PageTab;
             sshTab.Click += (sender, args) => SelectProtocol(CatalogKind.Ssh);
             rdpTab.Click += (sender, args) => SelectProtocol(CatalogKind.Rdp);
@@ -71,16 +99,24 @@ namespace SshManager
             var actions = new FlowLayoutPanel { Dock = DockStyle.Fill, FlowDirection = FlowDirection.RightToLeft, WrapContents = false, Margin = new Padding(0) };
             connect = Theme.Button("Подключиться", 128, true);
             connect.Click += (sender, args) => Submit();
-            var cancel = Theme.Button("Отмена", 88);
-            cancel.DialogResult = DialogResult.Cancel;
-            actions.Controls.AddRange(new Control[] { connect, cancel });
+            actions.Controls.Add(connect);
+            if (!compact)
+            {
+                CancelButton = Theme.Button("Отмена", 88);
+                CancelButton.DialogResult = DialogResult.Cancel;
+                actions.Controls.Add(CancelButton);
+            }
             layout.Controls.Add(actions, 0, 4);
-            AcceptButton = connect;
-            CancelButton = cancel;
 
             search.TextChanged += (sender, args) => Filter();
             search.KeyDown += (sender, args) =>
             {
+                if (args.KeyCode == Keys.Enter)
+                {
+                    args.SuppressKeyPress = true;
+                    Submit();
+                    return;
+                }
                 if (list.Items.Count == 0 || (args.KeyCode != Keys.Down && args.KeyCode != Keys.Up)) return;
                 int step = args.KeyCode == Keys.Down ? 1 : -1;
                 int next = list.SelectedIndex + step;
@@ -88,33 +124,34 @@ namespace SshManager
                 if (next >= 0 && next < list.Items.Count) list.SelectedIndex = next;
                 args.SuppressKeyPress = true;
             };
-            SelectProtocol(preferred);
-            Theme.ScaleToDpi(this);
-            ResumeLayout();
+            SelectProtocol(CatalogKind.Ssh);
         }
 
-        public Connection SelectedConnection { get; private set; }
-        public RdpProfile SelectedProfile { get; private set; }
-        public VncProfile SelectedVnc { get; private set; }
+        public void FocusSearch() { search.Focus(); search.SelectAll(); }
 
-        private void SelectProtocol(CatalogKind next)
+        public void UpdateServers(IEnumerable<Connection> connections, Groups groups)
+        {
+            recent = groups.Recent.Select(entry => entry.Key).ToArray();
+            choices = connections.Select(connection => new Choice(connection, groups.ForAlias(connection.Alias)))
+                .Concat(groups.Desktops.Select(profile => new Choice(profile, groups.Find(profile.GroupId))))
+                .Concat(groups.Vnc.Select(profile => new Choice(profile, groups.Find(profile.GroupId))))
+                .OrderBy(choice => choice.Target.Alias, StringComparer.OrdinalIgnoreCase).ToArray();
+            Filter();
+        }
+
+        public void SelectProtocol(CatalogKind next)
         {
             kind = next;
             sshTab.Style = next == CatalogKind.Ssh ? ButtonStyle.SelectedTab : ButtonStyle.Tab;
             rdpTab.Style = next == CatalogKind.Rdp ? ButtonStyle.SelectedTab : ButtonStyle.Tab;
             vncTab.Style = next == CatalogKind.Vnc ? ButtonStyle.SelectedTab : ButtonStyle.Tab;
-            ActiveControl = search;
+            if (ContainsFocus) search.Focus();
             Filter();
         }
 
         private void Submit()
         {
-            var choice = list.SelectedItem as Choice;
-            if (choice == null) return;
-            SelectedConnection = choice.Connection;
-            SelectedProfile = choice.Target.Desktop;
-            SelectedVnc = choice.Target.Vnc;
-            DialogResult = DialogResult.OK;
+            if (SelectedTarget is SessionTarget target) Submitted?.Invoke(target);
         }
 
         private void Filter()

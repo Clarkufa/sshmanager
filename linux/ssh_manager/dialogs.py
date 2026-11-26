@@ -393,20 +393,30 @@ class VncDialog(Gtk.Dialog):
             self.via.append(value, value)
         self.via.set_active_id(self.profile.via or DIRECT)
         grid.attach(self.via, 1, 7, 2, 1)
-        grid.attach(_label("Масштаб"), 0, 8, 1, 1)
+        grid.attach(_label("SSH-профиль для файлов"), 0, 8, 1, 1)
+        self.files_via = Gtk.ComboBoxText(hexpand=True)
+        self.files_via.append("", "Не выбран")
+        file_aliases = set(aliases)
+        if self.profile.files_via:
+            file_aliases.add(self.profile.files_via)
+        for alias in sorted(file_aliases, key=str.casefold):
+            self.files_via.append(alias, alias)
+        self.files_via.set_active_id(self.profile.files_via)
+        grid.attach(self.files_via, 1, 8, 2, 1)
+        grid.attach(_label("Масштаб"), 0, 9, 1, 1)
         self.scale = Gtk.ComboBoxText(hexpand=True)
         self.scale.append("fit", "По размеру окна")
         self.scale.append("native", "Исходный размер")
         self.scale.set_active_id(self.profile.scale)
-        grid.attach(self.scale, 1, 8, 2, 1)
+        grid.attach(self.scale, 1, 9, 2, 1)
         self.view_only = Gtk.CheckButton(label="Только просмотр", active=self.profile.view_only)
         self.clipboard = Gtk.CheckButton(label="Общий буфер обмена", active=self.profile.clipboard)
         self.fullscreen = Gtk.CheckButton(label="Открывать на весь экран", active=self.profile.fullscreen)
-        for row, check in enumerate((self.view_only, self.clipboard, self.fullscreen), start=9):
+        for row, check in enumerate((self.view_only, self.clipboard, self.fullscreen), start=10):
             grid.attach(check, 1, row, 2, 1)
         self.error = _label("", wrap=True)
         mark(self.error, "sshm-danger")
-        grid.attach(self.error, 1, 12, 2, 1)
+        grid.attach(self.error, 1, 13, 2, 1)
         self.show_all()
         self.forget.set_visible(has_password)
 
@@ -423,7 +433,8 @@ class VncDialog(Gtk.Dialog):
         via = self.via.get_active_id() or DIRECT
         profile = replace(self.profile, **fields, scale=self.scale.get_active_id() or "fit",
                           view_only=self.view_only.get_active(), clipboard=self.clipboard.get_active(),
-                          fullscreen=self.fullscreen.get_active(), via="" if via == DIRECT else via).validate()
+                          fullscreen=self.fullscreen.get_active(), via="" if via == DIRECT else via,
+                          files_via=self.files_via.get_active_id() or "").validate()
         password = "" if self.forget.get_active() else self.password.get_text()
         if any(char in password for char in "\0\r\n"):
             raise ValueError("Пароль должен быть одной строкой.")
@@ -456,42 +467,66 @@ class VncLogonDialog(Gtk.Dialog):
 
 
 class ServerPicker(Gtk.Dialog):
-    """«Новый сеанс»: protocol switch, search, list with group dots and a status line (src/ServerPickerDialog.cs)."""
-
     def __init__(self, owner, protocol, entries, recent=()):
-        """entries(protocol) -> [(profile, group_name, group_color)] sorted by name; recent: keys like "ssh:alias"."""
-        self.recent = list(recent)
         super().__init__(title="Новый сеанс", transient_for=owner, modal=True)
         themed(self)
         self.set_default_size(495, 389)
         dialog_buttons(self, "Подключиться")
+        self.panel = ServerPickerPanel(protocol, entries, lambda: recent,
+                                       lambda _profile: self.response(Gtk.ResponseType.OK))
+        self.panel.set_border_width(14)
+        self.get_content_area().pack_start(self.panel, True, True, 0)
+        self.panel.listing.connect("row-selected", lambda *_: self.update_action())
+        self.update_action()
+        self.show_all()
+        self.panel.search.grab_focus()
+
+    def update_action(self):
+        self.set_response_sensitive(Gtk.ResponseType.OK, self.chosen() is not None)
+
+    def chosen(self):
+        return self.panel.chosen()
+
+
+class ServerPickerPanel(Gtk.Box):
+    def __init__(self, protocol, entries, recent, submit, compact=False):
+        super().__init__(orientation=Gtk.Orientation.VERTICAL, spacing=8, vexpand=True)
+        self.recent = recent
         self.entries = entries
         self.protocol = protocol
-        area = self.get_content_area()
-        area.set_spacing(8)
-        area.set_border_width(14)
+        self.submit = submit
+        area = self
         switch = Gtk.Box(spacing=4)
         self.tabs = {}
         for kind, caption, icon in (("ssh", "SSH", "terminal"), ("rdp", "RDP", "server"), ("vnc", "VNC", "server")):
-            tab = action_button(caption, lambda kind=kind: self.select(kind), "tab", icon=icon, width=86)
+            tab = action_button(caption, lambda kind=kind: self.select(kind), "tab", icon=None if compact else icon, width=62 if compact else 86)
             self.tabs[kind] = tab
             switch.pack_start(tab, False, False, 0)
         area.pack_start(switch, False, False, 0)
         self.search = Gtk.SearchEntry(placeholder_text="Найти сервер")
         self.search.connect("search-changed", lambda *_: self.render())
         self.search.connect("key-press-event", self.navigate)
-        self.search.connect("activate", lambda *_: self.response(Gtk.ResponseType.OK))
+        self.search.connect("activate", lambda *_: self.activate())
         area.pack_start(self.search, False, False, 0)
         self.listing = Gtk.ListBox(activate_on_single_click=False)
-        self.listing.connect("row-activated", lambda *_: self.response(Gtk.ResponseType.OK))
-        scroll = Gtk.ScrolledWindow(vexpand=True)
+        self.listing.connect("row-activated", lambda _listing, row: self.activate(row))
+        scroll = Gtk.ScrolledWindow(vexpand=True, hscrollbar_policy=Gtk.PolicyType.NEVER if compact else Gtk.PolicyType.AUTOMATIC)
         scroll.add(self.listing)
         mark(scroll, "sshm-frame")
         area.pack_start(scroll, True, True, 0)
         self.status = _label("", muted=True)
         area.pack_start(self.status, False, False, 0)
+        if compact:
+            self.connect_button = action_button("Подключиться", self.activate, "primary", width=128)
+            area.pack_end(self.connect_button, False, False, 0)
+            self.listing.connect("row-selected", lambda *_: self.connect_button.set_sensitive(self.chosen() is not None))
         self.show_all()
         self.select(protocol)
+
+    def activate(self, row=None):
+        profile = row.profile if row is not None else self.chosen()
+        if profile is not None:
+            self.submit(profile)
 
     def select(self, protocol):
         self.protocol = protocol
@@ -508,7 +543,7 @@ class ServerPicker(Gtk.Dialog):
         shown = [entry for entry in everything if query in (entry[0].alias + " " + entry[0].address + " " + entry[1]).casefold()]
         recent = []
         if not query:
-            keys = [key for key in self.recent if key.startswith(self.protocol + ":")][:5]
+            keys = [key for key in self.recent() if key.startswith(self.protocol + ":")][:5]
             by_key = {self.key(entry[0]): entry for entry in shown}
             recent = [by_key[key] for key in keys if key in by_key]
         sections = [("Недавние", recent), ("Все серверы", shown)] if recent else [(None, shown)]
@@ -529,7 +564,6 @@ class ServerPicker(Gtk.Dialog):
             self.listing.select_row(first)
         self.status.set_text(f"Серверов: {len(shown)}" if shown else
                              "Серверы не найдены." if everything else "Сохранённых серверов пока нет.")
-        self.set_response_sensitive(Gtk.ResponseType.OK, bool(shown))
 
     @staticmethod
     def key(profile):
@@ -545,8 +579,10 @@ class ServerPicker(Gtk.Dialog):
         dot.set_markup(f'<span foreground="{color}">●</span>')
         line.pack_start(dot, False, False, 0)
         texts = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
-        texts.pack_start(_label(profile.alias, bold=True), False, False, 0)
-        texts.pack_start(_label(profile.address + (f"  ·  {group}" if group else ""), muted=True), False, False, 0)
+        for caption in (_label(profile.alias, bold=True),
+                        _label(profile.address + (f"  ·  {group}" if group else ""), muted=True)):
+            caption.set_ellipsize(Pango.EllipsizeMode.END)
+            texts.pack_start(caption, False, False, 0)
         line.pack_start(texts, True, True, 0)
         row.add(line)
         return row

@@ -179,6 +179,9 @@ namespace SshManager
         private readonly NativeTerminalView terminal;
         private readonly Panel display;
         private readonly TextBox search;
+        private readonly ServerPickerPanel serverPicker;
+        private readonly SurfaceButton sessionsTab, serversTab;
+        private readonly TableLayoutPanel sessionList;
         private readonly ListBox list;
         private readonly Label count, selectedTitle, selectedDetail, empty;
         private readonly Button duplicate, close, files, fullScreenButton, windowButton, reconnectButton, snippetsButton;
@@ -203,6 +206,8 @@ namespace SshManager
         public event Action Changed;
         public event Action ShowServers;
         public event Action PickServer;
+        public event Action<SessionTarget> OpenServer;
+        public event Action<ServerPickerPanel> LoadServers;
         public event Action ThemeRequested;
         public event Action<SessionTarget> ShowFiles;
         public event Action AddSnippet;
@@ -260,11 +265,24 @@ namespace SshManager
             layout.Controls.Add(header, 0, 0);
             layout.SetColumnSpan(header, 2);
 
-            var sidebar = new TableLayoutPanel { Dock = DockStyle.Fill, Margin = new Padding(0, 0, 12, 0), ColumnCount = 1, RowCount = 3 };
+            var sidebar = new TableLayoutPanel { Dock = DockStyle.Fill, Margin = new Padding(0, 0, 12, 0), ColumnCount = 1, RowCount = 2 };
             sidebar.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-            sidebar.RowStyles.Add(new RowStyle(SizeType.Absolute, 43));
-            sidebar.RowStyles.Add(new RowStyle(SizeType.Absolute, 28));
+            sidebar.RowStyles.Add(new RowStyle(SizeType.Absolute, 39));
             sidebar.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+            var tabs = new FlowLayoutPanel { Dock = DockStyle.Fill, WrapContents = false, Margin = Padding.Empty };
+            sessionsTab = Theme.Button("Сеансы", 98);
+            serversTab = Theme.Button("Серверы", 98);
+            sessionsTab.AccessibleRole = serversTab.AccessibleRole = AccessibleRole.PageTab;
+            sessionsTab.Click += (sender, args) => ShowServerList(false);
+            serversTab.Click += (sender, args) => ShowServerList(true);
+            tabs.Controls.AddRange(new Control[] { sessionsTab, serversTab });
+            sidebar.Controls.Add(tabs, 0, 0);
+
+            sessionList = new TableLayoutPanel { Dock = DockStyle.Fill, Margin = Padding.Empty, ColumnCount = 1, RowCount = 3 };
+            sessionList.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+            sessionList.RowStyles.Add(new RowStyle(SizeType.Absolute, 43));
+            sessionList.RowStyles.Add(new RowStyle(SizeType.Absolute, 28));
+            sessionList.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
             var filter = new ServerSearch("Найти сеанс", "Поиск открытых сеансов") { Dock = DockStyle.Top };
             search = filter.Input;
             search.TextChanged += (sender, args) => RefreshList();
@@ -274,9 +292,9 @@ namespace SshManager
                 args.SuppressKeyPress = true;
                 Activate(list.SelectedItem as TerminalSession ?? (TerminalSession)list.Items[0], true);
             };
-            sidebar.Controls.Add(filter, 0, 0);
+            sessionList.Controls.Add(filter, 0, 0);
             count = new Label { Dock = DockStyle.Fill, TextAlign = ContentAlignment.MiddleLeft, ForeColor = Theme.Muted, Margin = new Padding(2, 0, 0, 0) };
-            sidebar.Controls.Add(count, 0, 1);
+            sessionList.Controls.Add(count, 0, 1);
             list = new ListBox { AccessibleName = "Список сеансов", Dock = DockStyle.Fill, Margin = new Padding(0), IntegralHeight = false,
                 BackColor = Theme.Surface, ForeColor = Theme.Ink, BorderStyle = BorderStyle.FixedSingle, DrawMode = DrawMode.OwnerDrawFixed, ItemHeight = Theme.Scaled(this, 46) };
             list.DrawItem += DrawSession;
@@ -313,7 +331,7 @@ namespace SshManager
             {
                 args.Cancel = active == null || list.SelectedItem == null;
                 withoutForwarding.Available = active != null && active.ForwardingFailed;
-                sessionFiles.Available = active != null && active.Desktop == null;
+                sessionFiles.Available = active != null && (active.Desktop == null || active.Target.Vnc != null);
                 fullScreen.Available = active?.Desktop?.IsConnected == true;
                 detach.Available = reconnect.Available = active?.Desktop != null;
             };
@@ -322,7 +340,18 @@ namespace SshManager
             {
                 if (args.Button == MouseButtons.Right) list.SelectedIndex = list.IndexFromPoint(args.Location);
             };
-            sidebar.Controls.Add(Theme.Frame(list, Padding.Empty), 0, 2);
+            sessionList.Controls.Add(Theme.Frame(list, Padding.Empty), 0, 2);
+            var listArea = new Panel { Dock = DockStyle.Fill, Margin = Padding.Empty };
+            serverPicker = new ServerPickerPanel(compact: true) { Visible = false };
+            serverPicker.Submitted += target =>
+            {
+                SetServerList(false);
+                OpenServer?.Invoke(target);
+            };
+            listArea.Controls.Add(serverPicker);
+            listArea.Controls.Add(sessionList);
+            sidebar.Controls.Add(listArea, 0, 1);
+            SetServerList(false);
             layout.Controls.Add(sidebar, 0, 1);
 
             var workspace = new TableLayoutPanel { Dock = DockStyle.Fill, Margin = new Padding(0), ColumnCount = 1, RowCount = 3 };
@@ -461,7 +490,39 @@ namespace SshManager
             view.Select();
             view.Focus();
         }
-        public void FocusSearch() { search.Focus(); search.SelectAll(); }
+        private bool showingServerList;
+
+        protected override void OnVisibleChanged(EventArgs e)
+        {
+            base.OnVisibleChanged(e);
+            if (Visible && showingServerList) LoadServers?.Invoke(serverPicker);
+        }
+
+        private void SetServerList(bool show)
+        {
+            showingServerList = show;
+            sessionList.Visible = !show;
+            serverPicker.Visible = show;
+            sessionsTab.Style = show ? ButtonStyle.Tab : ButtonStyle.SelectedTab;
+            serversTab.Style = show ? ButtonStyle.SelectedTab : ButtonStyle.Tab;
+        }
+
+        private void ShowServerList(bool show)
+        {
+            SetServerList(show);
+            if (show)
+            {
+                LoadServers?.Invoke(serverPicker);
+                serverPicker.FocusSearch();
+            }
+            else FocusSearch();
+        }
+
+        public void FocusSearch()
+        {
+            if (showingServerList) serverPicker.FocusSearch();
+            else { search.Focus(); search.SelectAll(); }
+        }
 
         public void Cycle()
         {
@@ -530,6 +591,7 @@ namespace SshManager
             var previous = active;
             var view = new VncDesktop { Visible = false };
             view.PasswordPrompt = (profile, wrong) => VncLogonDialog.Ask(FindForm(), profile, wrong);
+            view.OpenFiles = () => ShowFiles?.Invoke(target);
             Theme.ScaleToDpi(view);
             var opened = new TerminalSession(target, view, number);
             sessions.Add(opened);
@@ -640,7 +702,7 @@ namespace SshManager
                 (active.ForwardingFailed ? "  ·  ошибка проброса порта" : active.Target.WithoutForwarding ? "  ·  без проброса" : "") +
                 (active.Status.Length == 0 ? "" : "  ·  " + active.Status);
             close.Enabled = duplicate.Enabled = active != null;
-            files.Visible = active != null && active.Desktop == null;
+            files.Visible = active != null && (active.Desktop == null || active.Target.Vnc != null);
             windowButton.Visible = reconnectButton.Visible = fullScreenButton.Visible = active?.Desktop != null;
             fullScreenButton.Enabled = active?.Desktop?.IsConnected == true;
             snippetsButton.Visible = active != null && active.Desktop == null;
@@ -670,6 +732,7 @@ namespace SshManager
                 var shown = new List<Control> { duplicate, close };
                 if (active?.Desktop != null) shown.InsertRange(0, new Control[] { reconnectButton, windowButton, fullScreenButton });
                 else if (active != null) shown.InsertRange(0, new Control[] { files, snippetsButton });
+                if (active?.Target.Vnc != null) shown.Insert(0, files);
                 int available = info.ClientSize.Width - Theme.Scaled(this, 160);
                 int Needed() => shown.Sum(button => button.Width + button.Margin.Horizontal);
                 if (Needed() > available) SetCompact(duplicate, true);
@@ -769,7 +832,7 @@ namespace SshManager
 
         private void OpenFiles()
         {
-            if (active != null && active.Desktop == null) ShowFiles?.Invoke(active.Target);
+            if (active != null && (active.Desktop == null || active.Target.Vnc != null)) ShowFiles?.Invoke(active.Target);
         }
 
         private void DrawSession(object sender, DrawItemEventArgs args)

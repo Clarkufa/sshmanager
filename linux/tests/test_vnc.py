@@ -29,7 +29,7 @@ class VncProfileTest(unittest.TestCase):
         self.assertEqual(profile(host="fe80::1").address, "[fe80::1]:5901")
 
     def test_validation(self):
-        for values in ({"port": 0}, {"port": 70000}, {"scale": "zoom"}, {"via": "bad alias"}, {"via": "-x"},
+        for values in ({"port": 0}, {"port": 70000}, {"scale": "zoom"}, {"via": "bad alias"}, {"via": "-x"}, {"files_via": "bad alias"},
                        {"host": "a b"}, {"name": " "}, {"id": "xyz"}, {"view_only": "1"}, {"name": "a\nb"}):
             with self.subTest(values=values), self.assertRaises(ValueError):
                 profile(**values)
@@ -46,7 +46,7 @@ class VncProfileTest(unittest.TestCase):
 class VncSettingsTest(unittest.TestCase):
     def test_parse(self):
         group = "e" * 32
-        entry = asdict(profile(group=group, scale="native", view_only=True, clipboard=False, via="bastion"))
+        entry = asdict(profile(group=group, scale="native", view_only=True, clipboard=False, via="bastion", files_via="fileserver"))
         entry["future_field"] = 1
         settings = parse_settings(json.dumps({
             "groups": [{"id": group, "name": "Цех", "color": ""}], "vnc": [entry],
@@ -54,6 +54,7 @@ class VncSettingsTest(unittest.TestCase):
         self.assertEqual(len(settings["vnc"]), 1)
         self.assertNotIn("future_field", settings["vnc"][0])
         self.assertEqual(settings["vnc"][0]["via"], "bastion")
+        self.assertEqual(settings["vnc"][0]["files_via"], "fileserver")
         self.assertEqual(settings["sort"], {"vnc:" + group: "address_desc"})
 
     def test_old_settings_have_an_empty_list(self):

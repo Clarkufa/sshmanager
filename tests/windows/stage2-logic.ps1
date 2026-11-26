@@ -51,14 +51,14 @@ $vncTabs = Join-Path $dir 'vnc.xml'
 @'
 <tabs vncSort="name">
   <tab id="bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" name="Цех" vncSort="addressDescending"/>
-  <vnc id="66666666666666666666666666666666" name="Камера" host="10.0.0.7" port="5901" user="" group="bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" scale="native" viewOnly="1" clipboard="0" via="bastion"/>
+  <vnc id="66666666666666666666666666666666" name="Камера" host="10.0.0.7" port="5901" user="" group="bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" scale="native" viewOnly="1" clipboard="0" via="bastion" filesVia="fileserver"/>
   <vnc id="77777777777777777777777777777777" name="Сборка" host="build.local" via="bad alias"/>
 </tabs>
 '@ | Set-Content -Encoding UTF8 $vncTabs
 $vf = New 'GroupFile' @($vncTabs)
 $vg = $vf.Load()
 $v = $vg.Vnc[0]
-Check 'vnc parsed' ($vg.Vnc.Count -eq 2 -and $v.Port -eq 5901 -and $v.Scale -eq 'native' -and $v.ViewOnly -and -not $v.Clipboard -and $v.Via -eq 'bastion' -and $v.GroupId -eq 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb')
+Check 'vnc parsed' ($vg.Vnc.Count -eq 2 -and $v.Port -eq 5901 -and $v.Scale -eq 'native' -and $v.ViewOnly -and -not $v.Clipboard -and $v.Via -eq 'bastion' -and $v.FilesVia -eq 'fileserver' -and $v.GroupId -eq 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb')
 Check 'vnc defaults and a broken via dropped' ($vg.Vnc[1].Port -eq 5900 -and $vg.Vnc[1].Clipboard -and $vg.Vnc[1].Via -eq '' -and $vg.Vnc[1].Scale -eq 'fit')
 Check 'vnc sort per tab' ((Call $vg 'Sort' @('bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb', [Enum]::Parse((T 'CatalogKind'), 'Vnc'))).ToString() -eq 'AddressDescending')
 $removeTab = [scriptblock]{ param($x) Call $x 'RemoveTab' @('bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb') | Out-Null } -as [Action`1].MakeGenericType((T 'Groups'))

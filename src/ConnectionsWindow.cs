@@ -910,7 +910,8 @@ namespace SshManager
             {
                 Theme.MenuItem("Подключиться", Glyph.Server, (sender, args) => ConnectVnc(profile)),
                 Theme.MenuItem("Новый сеанс", Glyph.Plus, (sender, args) => ConnectVnc(profile, true)),
-                Theme.MenuItem("Открыть в отдельном окне", Glyph.Move, (sender, args) => VncWindow.Open(profile)),
+                Theme.MenuItem("Открыть в отдельном окне", Glyph.Move, (sender, args) => VncWindow.Open(profile, openFiles: () => OpenVncFiles(profile))),
+                Theme.MenuItem("Файлы (SFTP)", Glyph.Folder, (sender, args) => OpenVncFiles(profile)),
                 Theme.MenuItem("Изменить", Glyph.Edit, (sender, args) => EditVnc(profile)),
                 Theme.MenuItem(groups.IsFavorite(Groups.Key(profile)) ? "Убрать из избранного" : "В избранное", Glyph.Star,
                     (sender, args) => ToggleFavorite(Groups.Key(profile), profile.Id)),
@@ -1405,8 +1406,22 @@ namespace SshManager
             if (connection != null) OpenFiles(new SessionTarget(connection, groups.ForAlias(connection.Alias)));
         }
 
+        private void OpenVncFiles(VncProfile profile)
+        {
+            var latest = groups.Vnc.FirstOrDefault(item => item.Id == profile.Id) ?? profile;
+            var source = document?.Connections().FirstOrDefault(item =>
+                String.Equals(item.Alias, latest.FilesVia, StringComparison.OrdinalIgnoreCase));
+            if (source == null)
+            {
+                Theme.ShowError(this, new ArgumentException("Выберите SSH-профиль для файлов в настройках VNC-подключения."));
+                return;
+            }
+            OpenFiles(source);
+        }
+
         private void OpenFiles(SessionTarget target)
         {
+            if (target.Vnc != null) { OpenVncFiles(target.Vnc); return; }
             string id = target.Alias + "\n" + target.Address;
             if (fileWindows.TryGetValue(id, out var open))
             {
@@ -1441,6 +1456,19 @@ namespace SshManager
             sessions.RemoveSnippet += RemoveSnippet;
             sessions.ThemeRequested += ToggleTheme;
             sessions.ShowFiles += OpenFiles;
+            sessions.LoadServers += picker =>
+                picker.UpdateServers(document == null ? new Connection[0] : document.Connections().ToArray(), groups);
+            sessions.OpenServer += target =>
+            {
+                if (target.Vnc != null) ConnectVnc(target.Vnc);
+                else if (target.Desktop != null) ConnectDesktop(target.Desktop);
+                else if (document != null)
+                {
+                    var connection = document.Connections().FirstOrDefault(item =>
+                        String.Equals(item.Alias, target.Alias, StringComparison.OrdinalIgnoreCase));
+                    if (connection != null) Connect(connection);
+                }
+            };
             sessions.PickServer += () =>
             {
                 var connections = document == null ? new Connection[0] : document.Connections().ToArray();

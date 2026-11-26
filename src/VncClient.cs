@@ -73,7 +73,7 @@ namespace SshManager
     internal sealed class VncClient : IDisposable
     {
         private const int Raw = 0, CopyRect = 1, Hextile = 5, Zrle = 16, DesktopSize = -223, ExtendedDesktopSize = -308;
-        private const int MaxText = 1024 * 1024;
+        private readonly VncClipboard clipboard;
         private readonly object writeLock = new object();
         private TcpClient tcp;
         private Stream input, output;
@@ -93,6 +93,9 @@ namespace SshManager
         /// <summary>The server announced ExtendedDesktopSize: it may accept a new size (SetDesktopSize).</summary>
         public bool CanResize { get; private set; }
         public bool ViewOnly { get; set; }
+        public bool ClipboardEnabled { get; set; } = true;
+
+        public VncClient() { clipboard = new VncClipboard(TryWrite); }
 
         public event Action Connected;
         public event Action<Rectangle> Updated;
@@ -188,12 +191,13 @@ namespace SshManager
             format[14] = 16; format[15] = 8; format[16] = 0; // red, green, blue shifts
             Write(format);
 
-            var encodings = EncodingsOverride == null ? new[] { Zrle, Hextile, CopyRect, Raw, DesktopSize, ExtendedDesktopSize }
-                : new List<int>(EncodingsOverride) { DesktopSize, ExtendedDesktopSize }.ToArray();
-            var message = new byte[4 + encodings.Length * 4];
+            var encodings = new List<int>(EncodingsOverride ?? new[] { Zrle, Hextile, CopyRect, Raw })
+                { DesktopSize, ExtendedDesktopSize };
+            if (ClipboardEnabled && !ViewOnly) encodings.Add(VncClipboard.EncodingId);
+            var message = new byte[4 + encodings.Count * 4];
             message[0] = 2;
-            message[2] = 0; message[3] = (byte)encodings.Length;
-            for (int i = 0; i < encodings.Length; i++) PutS32(message, 4 + i * 4, encodings[i]);
+            PutU16(message, 2, encodings.Count);
+            for (int i = 0; i < encodings.Count; i++) PutS32(message, 4 + i * 4, encodings[i]);
             Write(message);
             RequestUpdate(false);
         }
@@ -233,10 +237,15 @@ namespace SshManager
                     case 2: break; // Bell
                     case 3:
                         ReadExact(3);
-                        int length = (int)ReadU32();
-                        if (length < 0 || length > MaxText) throw new RfbException("Сервер VNC прислал слишком большой буфер обмена.");
-                        var text = Encoding.GetEncoding(28591).GetString(ReadExact(length));
-                        ClipboardReceived?.Invoke(text);
+                        int length = ReadS32();
+                        if (length < -VncClipboard.MaxMessage || length > VncClipboard.MaxText)
+                            throw new RfbException("Сервер VNC прислал слишком большой буфер обмена.");
+                        var payload = ReadExact(Math.Abs(length));
+                        if (ClipboardEnabled && !ViewOnly)
+                        {
+                            var text = clipboard.Receive(payload, length < 0);
+                            if (text != null) ClipboardReceived?.Invoke(text);
+                        }
                         break;
                     default: throw new RfbException("Сервер VNC прислал неизвестное сообщение " + type + ".");
                 }
@@ -527,17 +536,9 @@ namespace SshManager
             TryWrite(message);
         }
 
-        /// <summary>ClientCutText carries Latin-1 only; other characters become "?".</summary>
         public void SendClipboard(string text)
         {
-            if (ViewOnly || text == null) return;
-            if (text.Length > MaxText) text = text.Substring(0, MaxText);
-            var bytes = Encoding.GetEncoding(28591, new EncoderReplacementFallback("?"), DecoderFallback.ReplacementFallback).GetBytes(text);
-            var message = new byte[8 + bytes.Length];
-            message[0] = 6;
-            PutU32(message, 4, (uint)bytes.Length);
-            Buffer.BlockCopy(bytes, 0, message, 8, bytes.Length);
-            TryWrite(message);
+            if (ClipboardEnabled && !ViewOnly && text != null) clipboard.Send(text);
         }
 
         /// <summary>SetDesktopSize (ExtendedDesktopSize servers): one screen of the given size.</summary>

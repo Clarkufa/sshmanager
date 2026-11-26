@@ -10,17 +10,17 @@ namespace SshManager
     /// <summary>«Новое VNC-подключение» / «Изменить VNC-подключение» (docs/ui-spec.md §8).</summary>
     internal sealed class VncDialog : FormDialog
     {
-        private const string Direct = "Напрямую";
+        private const string Direct = "Напрямую", NoFiles = "Не выбран";
         private readonly VncProfile profile;
         private readonly string groupId;
         private readonly Action<VncProfile, string, bool> save;
         private readonly TextBox name, host, port, user, password;
         private readonly CheckBox forgetPassword, viewOnly, clipboard, fullScreen;
-        private readonly ComboBox via, scale;
+        private readonly ComboBox via, filesVia, scale;
 
         public VncDialog(VncProfile profile, string groupId, bool hasPassword, IEnumerable<string> sshAliases,
             Action<VncProfile, string, bool> save)
-            : base(profile == null ? "Новое VNC-подключение" : "Изменить VNC-подключение", new Size(565, 500), "Сохранить", 170)
+            : base(profile == null ? "Новое VNC-подключение" : "Изменить VNC-подключение", new Size(565, 534), "Сохранить", 170)
         {
             this.profile = profile;
             this.groupId = groupId;
@@ -41,11 +41,9 @@ namespace SshManager
             AddRow(null, new Label { AutoSize = true, ForeColor = Theme.Muted, Anchor = AnchorStyles.Left,
                 Text = "VNC-пароль: учитываются первые 8 символов." }, 24);
 
-            via = Choice("Через SSH-сервер");
-            via.Items.Add(Direct);
-            foreach (var alias in sshAliases.OrderBy(alias => alias, StringComparer.OrdinalIgnoreCase)) via.Items.Add(alias);
-            if (profile != null && profile.Via.Length > 0 && !via.Items.Contains(profile.Via)) via.Items.Add(profile.Via);
-            via.SelectedItem = profile != null && profile.Via.Length > 0 ? profile.Via : Direct;
+            var aliases = sshAliases.OrderBy(alias => alias, StringComparer.OrdinalIgnoreCase).ToArray();
+            via = SshChoice("Через SSH-сервер", Direct, profile?.Via, aliases);
+            filesVia = SshChoice("SSH-профиль для файлов", NoFiles, profile?.FilesVia, aliases);
             scale = Choice("Масштаб");
             scale.Items.AddRange(new object[] { "По размеру окна", "Исходный размер" });
             scale.SelectedIndex = profile?.Scale == VncProfile.NativeScale ? 1 : 0;
@@ -54,6 +52,16 @@ namespace SshManager
             fullScreen = AddCheck("Открывать на весь экран", profile?.FullScreen == true);
             Finish();
             ActiveControl = name;
+        }
+
+        private ComboBox SshChoice(string label, string empty, string current, string[] aliases)
+        {
+            var box = Choice(label);
+            box.Items.Add(empty);
+            box.Items.AddRange(aliases);
+            if (!String.IsNullOrEmpty(current) && !box.Items.Contains(current)) box.Items.Add(current);
+            box.SelectedItem = String.IsNullOrEmpty(current) ? empty : current;
+            return box;
         }
 
         private ComboBox Choice(string label)
@@ -73,7 +81,7 @@ namespace SshManager
             string chosenVia = (string)via.SelectedItem == Direct ? "" : (string)via.SelectedItem;
             var result = new VncProfile(profile?.Id ?? Guid.NewGuid().ToString("N"), name.Text, host.Text, number, user.Text,
                 profile == null ? groupId : profile.GroupId, scale.SelectedIndex == 1 ? VncProfile.NativeScale : VncProfile.FitScale,
-                viewOnly.Checked, clipboard.Checked, fullScreen.Checked, chosenVia);
+                viewOnly.Checked, clipboard.Checked, fullScreen.Checked, chosenVia, filesVia.SelectedIndex == 0 ? "" : (string)filesVia.SelectedItem);
             save(result, forgetPassword.Checked ? "" : password.Text, forgetPassword.Checked);
             password.Clear();
         }

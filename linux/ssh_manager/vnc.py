@@ -33,6 +33,7 @@ class VncProfile:
     clipboard: bool = True
     fullscreen: bool = False
     via: str = ""
+    files_via: str = ""
 
     @property
     def alias(self):
@@ -52,7 +53,7 @@ class VncProfile:
         return f"[{self.host}]:{self.port}" if ":" in self.host else f"{self.host}:{self.port}"
 
     def validate(self):
-        for value, limit in ((self.name, 80), (self.host, 253), (self.user, 128), (self.via, 253)):
+        for value, limit in ((self.name, 80), (self.host, 253), (self.user, 128), (self.via, 253), (self.files_via, 253)):
             if not isinstance(value, str) or len(value) > limit or any(unicodedata.category(c) == "Cc" for c in value):
                 raise ValueError("Некорректный текст в настройках VNC-подключения.")
         if not self.name.strip() or not self.host or not isinstance(self.id, str) or not re.fullmatch("[0-9a-f]{32}", self.id):
@@ -71,6 +72,8 @@ class VncProfile:
             raise ValueError("Некорректный масштаб VNC-подключения.")
         if self.via and not ALIAS.fullmatch(self.via):
             raise ValueError("Укажите SSH-сервер из каталога или «Напрямую».")
+        if self.files_via and not ALIAS.fullmatch(self.files_via):
+            raise ValueError("Выберите SSH-профиль для файлов в настройках VNC-подключения.")
         if (not isinstance(self.group, str) or not isinstance(self.view_only, bool) or
                 not isinstance(self.clipboard, bool) or not isinstance(self.fullscreen, bool)):
             raise ValueError("Некорректные параметры VNC-подключения.")

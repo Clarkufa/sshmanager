@@ -2,7 +2,7 @@
 # VNC password: VncTest1 (classic VNC passwords use 8 characters). SSH: tester / Vnc-Test-2026.
 FROM ubuntu:24.04
 RUN apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-        tigervnc-standalone-server tigervnc-tools xfce4 xfce4-terminal dbus-x11 x11-xserver-utils xauth \
+        tigervnc-standalone-server tigervnc-tools xfce4 xfce4-terminal dbus-x11 x11-xserver-utils xauth xclip \
         openssh-server \
     && rm -rf /var/lib/apt/lists/* \
     && useradd -m -s /bin/bash tester && echo 'tester:Vnc-Test-2026' | chpasswd \

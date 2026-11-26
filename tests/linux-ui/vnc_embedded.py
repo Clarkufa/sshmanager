@@ -16,7 +16,7 @@ os.environ.setdefault("GSETTINGS_BACKEND", "memory")
 # ssh asks the launcher for the saved SSH password (AskPass): point it at the real launcher, not this script.
 sys.argv[0] = str(ROOT / "linux" / "ssh-manager")
 
-from ssh_manager import app, sessions, update_ui  # noqa: E402
+from ssh_manager import app, files as file_ui, sessions, update_ui  # noqa: E402
 from ssh_manager.app import Application, Config, Gtk  # noqa: E402
 from ssh_manager.auth import account_for  # noqa: E402
 from ssh_manager.sessions import VncSession, VncWindow  # noqa: E402
@@ -53,14 +53,17 @@ def answer_prompt(owner, parent, profile, wrong=False):
 
 
 app.Vault = MemoryVault
+file_ui.message = lambda _owner, error, *_args: print(str(error), flush=True)
 sessions.ask_vnc_password = answer_prompt
 update_ui.UpdateController.check = lambda self, manual=False: None
 home = Path(tempfile.mkdtemp())
 (home / "ssh").mkdir()
 (home / "ssh/config").write_text(f"Host bench\n    HostName {HOST}\n    User tester\n    Port 22\n"
+                                 "    StrictHostKeyChecking no\n    UserKnownHostsFile /dev/null\n"
+                                 f"Host files\n    HostName {HOST}\n    User tester\n    Port 22\n"
                                  "    StrictHostKeyChecking no\n    UserKnownHostsFile /dev/null\n")
 direct = {"id": "a" * 32, "name": "vnc", "host": HOST, "port": 5901}
-tunnelled = {"id": "b" * 32, "name": "vnc-ssh", "host": "127.0.0.1", "port": 5901, "via": "bench"}
+tunnelled = {"id": "b" * 32, "name": "vnc-ssh", "host": "127.0.0.1", "port": 5901, "via": "bench", "files_via": "files"}
 (home / "state").mkdir()
 (home / "state/settings.json").write_text(json.dumps({"vnc": [direct, tunnelled], "dark": False}))
 
@@ -74,7 +77,8 @@ profiles = {profile.name: profile for profile in window.vnc_profiles()}
 # A wrong saved password first: the app must ask again and connect with the new one.
 MemoryVault.items[profiles["vnc"].secret.key] = "WrongPw1"
 MemoryVault.items[profiles["vnc-ssh"].secret.key] = VNC_PASSWORD
-MemoryVault.items[account_for(window.ssh_profile("bench")).key] = SSH_PASSWORD
+for alias in ("bench", "files"):
+    MemoryVault.items[account_for(window.ssh_profile(alias)).key] = SSH_PASSWORD
 
 
 def wait(predicate, seconds):
@@ -145,10 +149,23 @@ def steps():
     global shutdown_process
     window.select_protocol("vnc")
     shot("30-vnc-catalog")
-    window.connect_profile(profiles["vnc"])
+    window.show_sessions()
+    side = window.sessions_page
+    side.select_sidebar(True)
+    side.server_panel.select("vnc")
+    side.server_panel.search.set_text(HOST)
+    side.server_panel.render()
+    check("the sidebar searches saved VNC servers", side.server_panel.chosen() == profiles["vnc"])
+    side.server_panel.activate()
+    check("opening from the sidebar returns to the sessions list", side.sidebar_views.get_visible_child_name() == "sessions")
     session = next(item for item in window.sessions if isinstance(item, VncSession))
     check("connected to the VNC bench", wait(lambda: session.status == "подключён", 30))
     check("a wrong saved password asks again", prompts == [True])
+    side.select_sidebar(True)
+    side.server_panel.search.set_text(HOST)
+    side.server_panel.render()
+    side.server_panel.activate()
+    check("the sidebar reuses the live VNC session", window.sessions == [session])
     check("the remote desktop follows the window", follows(session))
     report("window", session)
     pump(1)
@@ -192,6 +209,21 @@ def steps():
     tunnelled = next(item for item in window.sessions if isinstance(item, VncSession))
     check("connected through the SSH tunnel", wait(lambda: tunnelled.status == "подключён", 40))
     check("the details name the SSH server", tunnelled.address.endswith("через bench"))
+    window.open_files(tunnelled.profile)
+    files = next(iter(window.files.values()))
+    check("VNC files use the configured SSH profile", files.profile.alias == "files")
+    check("the file manager reads the remote directory", wait(lambda: bool(files.right.path), 15))
+    transfer_source = home / "vnc-files-probe.txt"
+    transfer_source.write_text("VNC SFTP test", encoding="utf-8")
+    files.left.path = str(home / "state")
+    files.transfer([str(transfer_source)], True)
+    check("upload through the VNC file manager", wait(lambda: files.operation is None, 15)
+          and files.status.get_text() == "Передано файлов: 1")
+    files.transfer([transfer_source.name], False)
+    received = home / "state" / transfer_source.name
+    check("download through the VNC file manager", wait(lambda: files.operation is None, 15)
+          and received.is_file() and received.read_bytes() == transfer_source.read_bytes())
+    files.destroy()
     process = tunnelled.tunnel.process if tunnelled.tunnel else None
     shot("35-vnc-ssh")
     window.close_session(tunnelled, confirm_close=False)
