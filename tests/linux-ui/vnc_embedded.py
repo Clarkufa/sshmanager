@@ -155,6 +155,7 @@ def steps():
     side.server_panel.select("vnc")
     side.server_panel.search.set_text(HOST)
     side.server_panel.render()
+    shot("36-session-servers")
     check("the sidebar searches saved VNC servers", side.server_panel.chosen() == profiles["vnc"])
     side.server_panel.activate()
     check("opening from the sidebar returns to the sessions list", side.sidebar_views.get_visible_child_name() == "sessions")

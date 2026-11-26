@@ -201,7 +201,7 @@ namespace SshManager
         private readonly Timer timer;
         private TerminalSession active;
         private long activationOrder;
-        private bool refreshingList;
+        private bool refreshingList, showingServerList;
 
         public event Action Changed;
         public event Action ShowServers;
@@ -443,7 +443,9 @@ namespace SshManager
         protected override void OnVisibleChanged(EventArgs e)
         {
             base.OnVisibleChanged(e);
-            if (Visible) FitButtons();
+            if (!Visible) return;
+            FitButtons();
+            if (showingServerList) LoadServers?.Invoke(serverPicker);
         }
 
         public int CountOpen(string alias = null)
@@ -489,13 +491,6 @@ namespace SshManager
             if (active == null || !view.Visible) return;
             view.Select();
             view.Focus();
-        }
-        private bool showingServerList;
-
-        protected override void OnVisibleChanged(EventArgs e)
-        {
-            base.OnVisibleChanged(e);
-            if (Visible && showingServerList) LoadServers?.Invoke(serverPicker);
         }
 
         private void SetServerList(bool show)

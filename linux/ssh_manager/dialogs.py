@@ -396,7 +396,7 @@ class VncDialog(Gtk.Dialog):
         grid.attach(_label("SSH-профиль для файлов"), 0, 8, 1, 1)
         self.files_via = Gtk.ComboBoxText(hexpand=True)
         self.files_via.append("", "Не выбран")
-        file_aliases = set(aliases)
+        file_aliases = set(ssh_aliases)
         if self.profile.files_via:
             file_aliases.add(self.profile.files_via)
         for alias in sorted(file_aliases, key=str.casefold):

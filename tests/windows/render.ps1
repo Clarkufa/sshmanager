@@ -143,6 +143,10 @@ if ((Want 'main') -or (Want 'sessions')) {
         Call $main 'Connect' @($connections[0], $true) | Out-Null; Pump 1
         Call $main 'Connect' @($connections[2], $false) | Out-Null; Pump 1.5
         Snap $main 'sessions-ssh'
+        Call $page 'ShowServerList' @($true); Pump
+        Call (Field $page 'serverPicker') 'SelectProtocol' @((Kind 'Vnc')); Pump
+        Snap $main 'sessions-server-list'
+        Call $page 'ShowServerList' @($false); Pump
         if (Want 'stage2') {
             Call $main 'Connect' @($connections[1], $false) | Out-Null; Pump 1.5
             Snap $main 'sessions-reconnecting'
