@@ -2,6 +2,8 @@
 
 Скрипты загружают собранный `SshManager.exe` через `Assembly.LoadFrom` и вызывают его внутренние классы через reflection. Запускать в **Windows PowerShell 5.1** (`powershell.exe`, не `pwsh`): приложение собрано под .NET Framework.
 
+Сборка Windows требует .NET SDK и Visual Studio 2022 с инструментами C++ и CMake. Скрипт скачивает закреплённые исходники FreeRDP и собирает дочерние процессы для x64 и x86. Оба встраиваются в переносимый EXE.
+
 Сначала соберите приложение:
 
 ```powershell
@@ -14,13 +16,13 @@
 | `render.ps1` | Снимки окон и диалогов в PNG, с имитацией DPI и тёмной темы | `powershell -NoProfile -ExecutionPolicy Bypass -File tests/windows/render.ps1 -Exe build/check/SshManager.exe -Out build/shots -Scale 1.5 -Scenes 'main,sessions,dialogs,sftp,rdpwindow,stage2' [-Dark]` |
 | `montage.ps1` | Склеивает несколько PNG в один лист для просмотра | `powershell -NoProfile -File tests/windows/montage.ps1 -Out build/sheet.png -Width 2000 a.png b.png …` |
 | `live-ssh.ps1` | Настоящий SSH к стенду `tests/xrdp` (порт 2223): копирование ключа, ProxyJump, LocalForward, команды, автопереподключение | см. ниже |
-| `live-rdp.ps1` | Встроенный RDP к стенду `tests/xrdp` (порт 3390) с папками и принтерами | `powershell -NoProfile -STA -ExecutionPolicy Bypass -File tests/windows/live-rdp.ps1 -Exe build/check/SshManager.exe` |
+| `live-rdp.ps1` | Два сеанса FreeRDP к стенду `tests/xrdp` (порт 3390), перенаправление выбранной папки и независимое завершение процессов | `powershell -NoProfile -STA -ExecutionPolicy Bypass -File tests/windows/live-rdp.ps1 -Exe build/check/SshManager.exe` |
 | `tight-files.ps1` | Согласование файлового расширения TightVNC 2, загрузка и скачивание без SSH, отказ сервера и обрыв файлового канала. Требует Python 3.8+ | `powershell -NoProfile -ExecutionPolicy Bypass -File tests/windows/tight-files.ps1 -Exe build/check/SshManager.exe` |
 | `live-vnc.ps1` | VNC через TigerVNC напрямую и через SSH, изменение разрешения и восстановление после рестарта | `powershell -NoProfile -STA -ExecutionPolicy Bypass -File tests/windows/live-vnc.ps1 -Exe build/check/SshManager.exe` |
 
 Для VNC запустите [стенд TigerVNC](../vnc/README.md). Скрипт перезапускает тестовый контейнер `sshm-vnc` и добавляет в него временный открытый SSH-ключ.
 
-Стенд для живых проверок (только тестовая учётная запись `tester`):
+Стенд для живых проверок (только тестовая учётная запись `tester`). Для проверки папок в `live-rdp.ps1` добавьте к `docker run` параметры FUSE из [инструкции стенда](../xrdp/README.md).
 
 ```sh
 docker build -t sshm-xrdp-test tests/xrdp

@@ -1,9 +1,14 @@
 using System;
 using System.Collections.Generic;
+using System.ComponentModel;
 using System.Drawing;
-using System.Reflection;
+using System.Drawing.Drawing2D;
+using System.Globalization;
+using System.IO;
 using System.Runtime.InteropServices;
+using System.Text;
 using System.Windows.Forms;
+using Packet = SshManager.RdpWorker.Packet;
 
 namespace SshManager
 {
@@ -29,31 +34,40 @@ namespace SshManager
 
     internal sealed class RdpDesktop : RemoteDesktopPanel
     {
-        private const int ResizeDelay = 450, RetryDelay = 1500, MaxRetries = 6;
-        private static readonly Guid EventInterface = new Guid("336d5562-efa8-482e-8cb3-c5c0fc7a7db6");
-        private readonly List<KeyValuePair<int, Delegate>> handlers = new List<KeyValuePair<int, Delegate>>();
-        private readonly Timer resizeTimer;
-        private RdpClientHost host;
-        private object client;
+        private const int WmClipboardUpdate = 0x031D, WmKeyDown = 0x0100, WmKeyUp = 0x0101;
+        private const int WmSysKeyDown = 0x0104, WmSysKeyUp = 0x0105;
+        private readonly Timer updates = new Timer { Interval = 33 };
+        private readonly Timer resize = new Timer { Interval = 350 };
+        private readonly HashSet<int> pressed = new HashSet<int>();
+        private RdpWorker worker;
         private RdpProfile profile;
         private RdpCredential credential;
-        private Size appliedSize;
-        private int appliedDpi, retries;
-        private bool loggedIn, fullScreenMode;
+        private Bitmap frame;
+        private Form fullScreenForm;
+        private Button fullScreenExit;
+        private string lastClipboard, error;
+        private bool connected, disconnecting, awaitingPrompt;
+        private Point? pointer;
+        private IntPtr clipboardWindow;
+        private long disconnectStarted;
 
-        // Server authentication level: 2 warns about an unverified server. Tests against a throwaway server lower it.
-        internal static uint ServerAuthentication = 2;
+        internal Func<string, string, bool> ConfirmCertificate;
+        public Size DesktopSize => frame?.Size ?? Size.Empty;
+        public override bool IsConnected => connected && IsOpen;
+        protected override string TargetLine => profile == null ? "" : profile.Name + " · " + profile.Address;
 
         public RdpDesktop()
         {
-            resizeTimer = new Timer { Interval = ResizeDelay };
-            resizeTimer.Tick += (sender, args) => { resizeTimer.Stop(); SyncDisplay(); };
+            SetStyle(ControlStyles.Selectable | ControlStyles.UserPaint | ControlStyles.AllPaintingInWmPaint |
+                     ControlStyles.OptimizedDoubleBuffer, true);
+            TabStop = true;
+            updates.Tick += (sender, args) => RefreshDesktop();
+            resize.Tick += (sender, args) =>
+            {
+                resize.Stop();
+                if (IsConnected) SendSize();
+            };
         }
-
-        public override bool IsConnected => loggedIn && IsOpen;
-        protected override string TargetLine => profile == null ? "" : profile.Name + " · " + profile.Address;
-        public RdpProfile Profile => profile;
-        public RdpCredential Credential => credential;
 
         public override void OpenInWindow()
         {
@@ -67,413 +81,432 @@ namespace SshManager
             Start();
         }
 
-        public override void Reconnect()
-        {
-            if (profile == null) return;
-            try { Start(); }
-            catch (Exception error) when (error is ExternalException || error is TargetInvocationException ||
-                error is InvalidOperationException || error is ArgumentException)
-            {
-                ShowEndedDesktop("Не удалось подключиться", (error.InnerException ?? error).Message);
-                UpdateStatus("ошибка подключения", false);
-            }
-        }
-
-        public override void Disconnect()
-        {
-            if (client == null || !IsOpen) return;
-            try { Call(client, "Disconnect"); }
-            catch (Exception error) when (IsComError(error)) { }
-        }
-
-        public override void FullScreen()
-        {
-            if (client != null && IsOpen) Set(client, "FullScreen", true);
-        }
-
         private void Start()
         {
-            ReleaseClient();
-            loggedIn = false;
-            fullScreenMode = false;
-            retries = 0;
-            appliedSize = Size.Empty;
+            Release();
+            connected = disconnecting = awaitingPrompt = false;
+            lastClipboard = error = null;
             HideEnded();
-            host = new RdpClientHost();
-            Controls.Add(host);
-            host.BringToFront();
-            host.SizeChanged += (sender, args) => ScheduleSync();
-            host.CreateControl();
-            client = host.Client;
-
-            var settings = Get(client, "AdvancedSettings8");
-            var size = InitialSize();
-            Set(client, "Server", profile.Host);
-            var account = LogonAccount(credential.User, credential.Domain);
-            Set(client, "UserName", account.Key);
-            Set(client, "Domain", account.Value);
-            Set(client, "DesktopWidth", size.Width);
-            Set(client, "DesktopHeight", size.Height);
-            TrySet(client, "ConnectingText", "Подключение к " + profile.Address + "…");
-            TrySet(client, "DisconnectedText", " ");
-            TrySet(client, "FullScreenTitle", profile.Name + " — RDP");
-            Set(settings, "RDPPort", profile.Port);
-            Set(settings, "SmartSizing", true);
-            Set(settings, "EnableCredSspSupport", true);
-            Set(settings, "AuthenticationLevel", ServerAuthentication);
-            Set(settings, "RedirectClipboard", profile.Clipboard);
-            Set(settings, "RedirectDrives", false);
-            Set(settings, "RedirectPrinters", profile.Options.Printers);
-            RedirectDrives(client, profile.Options);
-            UseGateway(client, profile.Options);
-            TrySet(settings, "EnableAutoReconnect", true);
-            TrySet(settings, "GrabFocusOnConnect", true);
-            TrySet(settings, "BitmapPersistence", 1);
-            TrySet(settings, "DisplayConnectionBar", true);
-            if (credential.Password.Length > 0) SetPassword(client, settings, credential.Password);
-            ApplyScale(client, DeviceDpi);
-            appliedDpi = DeviceDpi;
-
-            Listen(1, new Action(() => UpdateStatus("подключение", true)));
-            // Windows servers report OnLoginComplete; xrdp and some appliances only report OnConnected.
-            Listen(2, new Action(OnLogin));
-            Listen(3, new Action(OnLogin));
-            Listen(4, new Action<int>(OnDisconnected));
-            // The client shows full screen in a window of its own, so the session follows that window, not ours.
-            Listen(5, new Action(() => { fullScreenMode = true; ScheduleSync(); }));
-            Listen(6, new Action(() => { fullScreenMode = false; ScheduleSync(); }));
-            Listen(10, new Action<int>(code =>
-            {
-                loggedIn = false;
-                resizeTimer.Stop();
-                ShowEndedDesktop("Ошибка RDP-клиента", "Код ошибки: " + code);
-                UpdateStatus("ошибка подключения", false);
-            }));
             UpdateStatus("подключение", true);
-            Call(client, "Connect");
-        }
-
-        private void OnLogin()
-        {
-            bool first = !loggedIn;
-            loggedIn = true;
-            if (first && host != null) appliedSize = profile.Width != 0 ? new Size(profile.Width, profile.Height) : Fit(host.ClientSize);
-            UpdateStatus("подключён", true);
-            if (first && profile.FullScreen && Visible)
-            {
-                try { FullScreen(); }
-                catch (Exception error) when (IsComError(error)) { }
-            }
-            ScheduleSync();
-        }
-
-        private void OnDisconnected(int reason)
-        {
-            loggedIn = false;
-            resizeTimer.Stop();
-            string description = Describe(reason);
-            bool normal = reason <= 3;
-            UpdateStatus(normal ? "отключён" : "отключён (код " + reason + ")", false);
-            ShowEndedDesktop(normal ? "Сеанс завершён" : "Подключение прервано", description);
-        }
-
-        private string Describe(int reason)
-        {
-            string text = "";
             try
             {
-                uint extended = Convert.ToUInt32(Get(client, "ExtendedDisconnectReason"));
-                text = Convert.ToString(Call(client, "GetErrorDescription", (uint)reason, extended)) ?? "";
+                // The handle is needed even when this tab is hidden while the connection starts.
+                var handle = Handle;
+                var next = new RdpWorker();
+                worker = next;
+                next.Received += (type, bytes) => OnUi(next, () => Receive(type, bytes));
+                next.Ended += reason => OnUi(next, () => Finish(error ?? reason));
+                next.Start(Arguments());
+                updates.Start();
             }
-            catch (Exception error) when (IsComError(error) || error is InvalidCastException || error is OverflowException) { }
-            if (reason <= 3 && text.Length == 0) text = "Удалённый сеанс закрыт.";
-            return (text.Trim() + (reason > 3 ? "\nКод: " + reason : "")).Trim();
-        }
-
-        private void ShowEndedDesktop(string title, string detail)
-        {
-            if (IsDisposed) return;
-            if (host != null) host.Visible = false;
-            ShowEnded(title, detail);
-        }
-
-        /// <summary>
-        /// The user and domain sent through CredSSP. With an empty domain Windows qualifies the name with this
-        /// computer's own name (for example PC\Administrator), which a remote domain controller rejects. "." names the
-        /// account database of the remote server itself: local accounts there, domain accounts on a domain controller.
-        /// </summary>
-        internal static KeyValuePair<string, string> LogonAccount(string user, string domain)
-        {
-            user = (user ?? "").Trim();
-            domain = (domain ?? "").Trim();
-            if (domain.Length == 0)
+            catch (Exception ex) when (ex is IOException || ex is Win32Exception ||
+                                       ex is UnauthorizedAccessException || ex is InvalidOperationException)
             {
-                int slash = user.IndexOf('\\');
-                if (slash > 0) return new KeyValuePair<string, string>(user.Substring(slash + 1), user.Substring(0, slash));
-                if (user.Length > 0 && user.IndexOf('@') < 0) domain = ".";
+                Finish(ex.Message);
             }
-            return new KeyValuePair<string, string>(user, domain);
         }
 
-        private Size InitialSize()
+        private IEnumerable<string> Arguments()
         {
-            if (profile.Width != 0) return new Size(profile.Width, profile.Height);
-            var area = host.ClientSize.Width >= 200 && host.ClientSize.Height >= 200 ? host.ClientSize : ClientSize;
-            return Fit(area);
+            var resolution = TargetSize();
+            yield return "/v:" + profile.Address;
+            yield return "/size:" + resolution.Width.ToString(CultureInfo.InvariantCulture) + "x" +
+                         resolution.Height.ToString(CultureInfo.InvariantCulture);
+            yield return "/bpp:32";
+            var layout = new StringBuilder(9);
+            if (GetKeyboardLayoutName(layout)) yield return "/kbd:layout:0x" + layout;
+            yield return "/dynamic-resolution";
+            yield return "/timeout:15000";
+            yield return "+auto-reconnect";
+            yield return "/auto-reconnect-max-retries:3";
+            yield return profile.Clipboard ? "+clipboard" : "-clipboard";
+            if (credential.User.Length != 0) yield return "/u:" + credential.User;
+            if (credential.Domain.Length != 0) yield return "/d:" + credential.Domain;
+            if (credential.Password.Length != 0) yield return "/p:" + credential.Password;
+            if (profile.Options.Gateway.Length != 0)
+            {
+                yield return "/gateway:g:" + profile.Options.Gateway;
+                if (profile.Options.GatewayUser.Length != 0)
+                    yield return "/gu:" + profile.Options.GatewayUser;
+            }
+            if (profile.Options.Printers) yield return "/printer";
+            foreach (string folder in profile.Options.Drives)
+                yield return "/sshm-folder:" + (folder.Length == 2 ? folder + "\\" : folder);
         }
 
-        private static Size Fit(Size area) =>
-            new Size(Math.Max(640, Math.Min(area.Width, 8192)) & ~1, Math.Max(480, Math.Min(area.Height, 8192)) & ~1);
-
-        private void ScheduleSync()
+        private void OnUi(RdpWorker source, Action action)
         {
-            if (!loggedIn || profile == null) return;
-            resizeTimer.Stop();
-            resizeTimer.Interval = ResizeDelay;
-            resizeTimer.Start();
+            try
+            {
+                BeginInvoke(new Action(() => { if (worker == source && !IsDisposed) action(); }));
+            }
+            catch (InvalidOperationException) { }
+        }
+
+        private void Receive(Packet type, byte[] bytes)
+        {
+            switch (type)
+            {
+                case Packet.Connected:
+                    connected = true;
+                    UpdateStatus("подключён", true);
+                    if (profile.FullScreen && Visible) FullScreen();
+                    SendSize();
+                    SyncFocus();
+                    break;
+                case Packet.Error:
+                    if (bytes.Length == 4) error = "Код FreeRDP: 0x" + BitConverter.ToUInt32(bytes, 0).ToString("X8");
+                    break;
+                case Packet.Certificate:
+                    var details = Encoding.UTF8.GetString(bytes).Split(new[] { '\n' }, 3);
+                    if (details.Length != 3) break;
+                    awaitingPrompt = true;
+                    try
+                    {
+                        var source = worker;
+                        bool allow = ConfirmCertificate != null
+                            ? ConfirmCertificate(details[1], details[2])
+                            : MessageBox.Show(FindForm(),
+                                (details[0] == "1" ? "Сертификат RDP изменился." : "Не удалось проверить сертификат RDP.") +
+                                "\n\n" + details[1] + "\n" + details[2] + "\n\nПродолжить один раз?",
+                                "Сертификат RDP", MessageBoxButtons.YesNo, MessageBoxIcon.Warning,
+                                MessageBoxDefaultButton.Button2) == DialogResult.Yes;
+                        if (source == worker) worker?.Send(Packet.TrustCertificate, new[] { (byte)(allow ? 1 : 0) });
+                    }
+                    finally { awaitingPrompt = false; }
+                    break;
+                case Packet.RemoteClipboard:
+                    if (profile.Clipboard && ContainsFocus)
+                    {
+                        try
+                        {
+                            string text = Encoding.UTF8.GetString(bytes);
+                            if (text.Length == 0) Clipboard.Clear();
+                            else Clipboard.SetText(text);
+                            lastClipboard = text;
+                        }
+                        catch (ExternalException) { }
+                    }
+                    break;
+                case Packet.Authenticate:
+                    if (bytes.Length != 1) break;
+                    bool gateway = bytes[0] != 0;
+                    var peer = worker;
+                    awaitingPrompt = true;
+                    try
+                    {
+                        var login = gateway
+                            ? RdpLogonDialog.Ask(FindForm(), profile.Name, profile.Options.Gateway,
+                                profile.Options.GatewayUser, "")
+                            : RdpLogonDialog.Ask(FindForm(), profile.Name, profile.Address, credential.User, credential.Domain);
+                        if (peer == worker)
+                            peer.Send(Packet.Credentials, login == null ? new byte[0] :
+                                Encoding.UTF8.GetBytes(login.User + "\0" + login.Domain + "\0" + login.Password + "\0"));
+                    }
+                    finally { awaitingPrompt = false; }
+                    break;
+            }
+        }
+
+        private void RefreshDesktop()
+        {
+            if (worker == null) return;
+            if ((disconnecting && StopwatchSeconds(disconnectStarted) > 3) ||
+                (!awaitingPrompt && worker.SecondsSinceActivity > (connected ? 25 : 45)))
+            {
+                Finish(disconnecting ? null : "Процесс FreeRDP перестал отвечать.");
+                return;
+            }
+            if (pointer.HasValue)
+            {
+                SendPointer(0x0800, pointer.Value);
+                pointer = null;
+            }
+            if (Visible && worker.ReadFrame(ref frame)) Invalidate();
+        }
+
+        private static double StopwatchSeconds(long since) =>
+            (System.Diagnostics.Stopwatch.GetTimestamp() - since) / (double)System.Diagnostics.Stopwatch.Frequency;
+
+        private Size TargetSize()
+        {
+            if (profile.Width > 0 && fullScreenForm == null) return new Size(profile.Width, profile.Height);
+            var size = fullScreenForm?.ClientSize ?? ClientSize;
+            return new Size(Math.Max(640, Math.Min(8192, size.Width)) & ~1, Math.Max(480, Math.Min(8192, size.Height)));
+        }
+
+        private void SendSize()
+        {
+            var size = TargetSize();
+            worker?.Send(Packet.Resize, size.Width, size.Height, DeviceDpi);
+        }
+
+        protected override void OnSizeChanged(EventArgs e)
+        {
+            base.OnSizeChanged(e);
+            ScheduleResize();
         }
 
         protected override void OnDpiChangedAfterParent(EventArgs e)
         {
             base.OnDpiChangedAfterParent(e);
-            ScheduleSync();
+            ScheduleResize();
         }
 
-        protected override void OnVisibleChanged(EventArgs e)
+        private void ScheduleResize()
         {
-            base.OnVisibleChanged(e);
-            if (Visible) ScheduleSync();
+            if (resize == null || !IsConnected) return;
+            resize.Stop();
+            resize.Start();
         }
 
-        private void SyncDisplay()
+        private Rectangle ScreenArea
         {
-            if (!loggedIn || client == null || host == null || !host.Visible) return;
-            // Full screen uses the whole monitor even for a fixed size: the client's full-screen window does not
-            // stretch the picture, so a smaller desktop would sit in black borders. Leaving it restores the fixed size.
-            Size size;
-            if (fullScreenMode) size = Fit(Screen.FromControl(host).Bounds.Size);
-            else if (profile.Width != 0) size = new Size(profile.Width, profile.Height);
+            get
+            {
+                if (frame == null || Width == 0 || Height == 0) return Rectangle.Empty;
+                double scale = Math.Min((double)Width / frame.Width, (double)Height / frame.Height);
+                int w = Math.Max(1, (int)(frame.Width * scale)), h = Math.Max(1, (int)(frame.Height * scale));
+                return new Rectangle((Width - w) / 2, (Height - h) / 2, w, h);
+            }
+        }
+
+        protected override void OnPaint(PaintEventArgs e)
+        {
+            base.OnPaint(e);
+            if (frame == null) return;
+            var area = ScreenArea;
+            if (area.Size == frame.Size) e.Graphics.DrawImageUnscaled(frame, area.Location);
             else
             {
-                var area = host.ClientSize;
-                if (area.Width < 200 || area.Height < 200) return;
-                size = Fit(area);
-            }
-            int dpi = DeviceDpi;
-            if (size == appliedSize && dpi == appliedDpi) return;
-            try
-            {
-                Call(client, "UpdateSessionDisplaySettings", (uint)size.Width, (uint)size.Height,
-                    (uint)(size.Width * 254 / (dpi * 10)), (uint)(size.Height * 254 / (dpi * 10)), 0u,
-                    (uint)DesktopScale(dpi), (uint)DeviceScale(dpi));
-                appliedSize = size;
-                appliedDpi = dpi;
-                retries = 0;
-            }
-            catch (Exception error) when (IsComError(error))
-            {
-                // The display channel opens shortly after logon; older servers never support it and keep smart sizing.
-                if (++retries > MaxRetries) return;
-                resizeTimer.Interval = RetryDelay;
-                resizeTimer.Start();
+                e.Graphics.InterpolationMode = InterpolationMode.Bilinear;
+                e.Graphics.DrawImage(frame, area);
             }
         }
 
-        private static int DesktopScale(int dpi)
+        protected override void OnHandleCreated(EventArgs e)
         {
-            int percent = dpi * 100 / 96, best = 100;
-            foreach (int option in new[] { 100, 125, 150, 175, 200, 250, 300, 400, 500 })
-                if (Math.Abs(option - percent) < Math.Abs(best - percent)) best = option;
-            return best;
+            base.OnHandleCreated(e);
+            clipboardWindow = Handle;
+            AddClipboardFormatListener(clipboardWindow);
         }
 
-        private static int DeviceScale(int dpi) => dpi >= 192 ? 180 : dpi >= 134 ? 140 : 100;
-
-        private static void ApplyScale(object client, int dpi)
+        protected override void OnHandleDestroyed(EventArgs e)
         {
-            if (dpi <= 96) return;
-            try
-            {
-                var extended = (IMsRdpExtendedSettings)client;
-                object desktop = (uint)DesktopScale(dpi), device = (uint)DeviceScale(dpi);
-                extended.PutProperty("DesktopScaleFactor", ref desktop);
-                extended.PutProperty("DeviceScaleFactor", ref device);
-            }
-            catch (Exception error) when (IsComError(error) || error is InvalidCastException) { }
+            if (clipboardWindow != IntPtr.Zero) RemoveClipboardFormatListener(clipboardWindow);
+            clipboardWindow = IntPtr.Zero;
+            base.OnHandleDestroyed(e);
         }
 
-        /// <summary>Shares the drives that hold the chosen folders: the client redirects whole drives, never single folders.</summary>
-        private static void RedirectDrives(object client, RdpOptions options)
+        protected override void WndProc(ref Message msg)
         {
-            if (options.Drives.Length == 0) return;
-            var letters = new HashSet<char>(options.DriveLetters);
-            try
+            if (msg.Msg == WmClipboardUpdate && ContainsFocus) SendClipboard();
+            if (!SendKey(msg)) base.WndProc(ref msg);
+        }
+
+        public override bool PreProcessMessage(ref Message msg) => SendKey(msg) || base.PreProcessMessage(ref msg);
+
+        private bool SendKey(Message msg)
+        {
+            bool up = msg.Msg == WmKeyUp || msg.Msg == WmSysKeyUp;
+            if (!IsConnected || (!up && msg.Msg != WmKeyDown && msg.Msg != WmSysKeyDown)) return false;
+            var key = (Keys)(int)msg.WParam;
+            if (key == Keys.Cancel && (ModifierKeys & (Keys.Control | Keys.Alt)) == (Keys.Control | Keys.Alt))
             {
-                var settings = (IMsRdpClientNonScriptable3)client;
-                Marshal.ThrowExceptionForHR(settings.GetDriveCollection(out var drives));
-                Marshal.ThrowExceptionForHR(drives.GetDriveCount(out uint count));
-                for (uint index = 0; index < count; index++)
+                if (!up)
                 {
-                    if (drives.GetDriveByIndex(index, out var drive) != 0 || drive == null) continue;
-                    if (drive.GetName(out var name) != 0 || name == null) continue;
-                    var letter = System.Text.RegularExpressions.Regex.Match(name, @"([A-Za-z]):");
-                    if (letter.Success && letters.Contains(char.ToUpperInvariant(letter.Groups[1].Value[0])))
-                        drive.PutRedirectionState(-1);
+                    if (fullScreenForm == null) FullScreen();
+                    else fullScreenForm.Close();
                 }
+                return true;
             }
-            catch (Exception error) when (IsComError(error) || error is InvalidCastException) { }
+            int scan = (int)(msg.LParam.ToInt64() >> 16) & 0x1ff;
+            if (scan == 0) return true;
+            if (up) pressed.Remove(scan);
+            else pressed.Add(scan);
+            worker.Send(Packet.Key, (up ? 0x8000 : 0) | (scan & 0x100), scan & 0xff);
+            return true;
         }
 
-        /// <summary>RD Gateway with the session's own credentials.</summary>
-        private static void UseGateway(object client, RdpOptions options)
+        protected override void OnGotFocus(EventArgs e)
         {
-            if (options.Gateway.Length == 0) return;
-            object transport;
-            try { transport = Get(client, "TransportSettings2"); }
-            catch (Exception error) when (IsComError(error)) { transport = Get(client, "TransportSettings"); }
-            Set(transport, "GatewayHostname", options.Gateway);
-            Set(transport, "GatewayUsageMethod", 1u);         // TSC_PROXY_MODE_DIRECT
-            Set(transport, "GatewayProfileUsageMethod", 1u);  // use these settings
-            TrySet(transport, "GatewayCredsSource", 0u);      // TSC_PROXY_CREDS_MODE_USERPASS
-            TrySet(transport, "GatewayCredSharing", 1u);
-            if (options.GatewayUser.Length > 0) TrySet(transport, "GatewayUsername", options.GatewayUser);
+            base.OnGotFocus(e);
+            SyncFocus();
         }
 
-        private static void SetPassword(object client, object settings, string password)
+        private void SyncFocus()
         {
-            try { Set(settings, "ClearTextPassword", password); return; }
-            catch (Exception error) when (IsComError(error)) { }
-            ((IMsTscNonScriptable)client).PutClearTextPassword(password);
+            if (!IsConnected || !ContainsFocus) return;
+            int toggles = (Control.IsKeyLocked(Keys.Scroll) ? 1 : 0) |
+                          (Control.IsKeyLocked(Keys.NumLock) ? 2 : 0) |
+                          (Control.IsKeyLocked(Keys.CapsLock) ? 4 : 0);
+            worker.Send(Packet.Focus, toggles);
+            SendClipboard();
         }
 
-        private void Listen(int id, Delegate handler)
+        protected override void OnLostFocus(EventArgs e)
         {
-            ComEventsHelper.Combine(client, EventInterface, id, handler);
-            handlers.Add(new KeyValuePair<int, Delegate>(id, handler));
+            foreach (int scan in pressed)
+                worker?.Send(Packet.Key, 0x8000 | (scan & 0x100), scan & 0xff);
+            pressed.Clear();
+            base.OnLostFocus(e);
         }
 
-        private void ReleaseClient()
+        private void SendClipboard()
         {
-            resizeTimer.Stop();
-            if (host == null) return;
-            var closing = host;
-            var instance = client;
-            host = null;
-            client = null;
+            if (!IsConnected || !profile.Clipboard) return;
             try
             {
-                foreach (var handler in handlers) ComEventsHelper.Remove(instance, EventInterface, handler.Key, handler.Value);
-                if (IsOpen) Call(instance, "Disconnect");
+                string text = Clipboard.GetText(TextDataFormat.UnicodeText);
+                if (text == lastClipboard || Encoding.UTF8.GetByteCount(text) > 1024 * 1024) return;
+                if (worker.Send(Packet.LocalClipboard, Encoding.UTF8.GetBytes(text))) lastClipboard = text;
             }
-            catch (Exception error) when (IsComError(error))
-            {
-                // AxHost can release its COM wrapper when destroying the parent window's handle.
-            }
-            handlers.Clear();
-            Controls.Remove(closing);
-            closing.Dispose();
+            catch (ExternalException) { }
         }
 
-        private static bool IsComError(Exception error) => error is COMException || error is TargetInvocationException ||
-            error is InvalidComObjectException || error is MissingMethodException || error is ArgumentException;
-
-        private static object Get(object target, string name) =>
-            target.GetType().InvokeMember(name, BindingFlags.GetProperty, null, target, null);
-
-        private static void Set(object target, string name, object value) =>
-            target.GetType().InvokeMember(name, BindingFlags.SetProperty, null, target, new[] { value });
-
-        private static void TrySet(object target, string name, object value)
+        private void SendPointer(int flags, Point point)
         {
-            try { Set(target, name, value); }
-            catch (Exception error) when (IsComError(error)) { }
+            var area = ScreenArea;
+            if (!IsConnected || area.IsEmpty) return;
+            int x = Math.Max(0, Math.Min(frame.Width - 1, (point.X - area.X) * frame.Width / area.Width));
+            int y = Math.Max(0, Math.Min(frame.Height - 1, (point.Y - area.Y) * frame.Height / area.Height));
+            worker.Send(Packet.Mouse, flags, x, y);
         }
 
-        private static object Call(object target, string name, params object[] args) =>
-            target.GetType().InvokeMember(name, BindingFlags.InvokeMethod, null, target, args);
+        private static int ButtonFlags(MouseButtons button)
+        {
+            switch (button)
+            {
+                case MouseButtons.Left: return 0x1000;
+                case MouseButtons.Right: return 0x2000;
+                case MouseButtons.Middle: return 0x4000;
+                case MouseButtons.XButton1: return 0x10001;
+                case MouseButtons.XButton2: return 0x10002;
+                default: return 0;
+            }
+        }
+
+        protected override void OnMouseDown(MouseEventArgs e)
+        {
+            base.OnMouseDown(e);
+            Focus();
+            pointer = null;
+            if (ScreenArea.Contains(e.Location)) SendPointer(ButtonFlags(e.Button) | 0x8000, e.Location);
+        }
+
+        protected override void OnMouseUp(MouseEventArgs e)
+        {
+            base.OnMouseUp(e);
+            pointer = null;
+            SendPointer(ButtonFlags(e.Button), e.Location);
+        }
+
+        protected override void OnMouseMove(MouseEventArgs e)
+        {
+            base.OnMouseMove(e);
+            if (fullScreenExit != null) fullScreenExit.Visible = e.Y < 4 || (fullScreenExit.Visible && e.Y < fullScreenExit.Height);
+            pointer = e.Location;
+        }
+
+        protected override void OnMouseWheel(MouseEventArgs e)
+        {
+            base.OnMouseWheel(e);
+            int delta = Math.Max(-255, Math.Min(255, e.Delta));
+            SendPointer(0x0200 | (delta & 0x1ff), e.Location);
+        }
+
+        public override void FullScreen()
+        {
+            if (!IsConnected || fullScreenForm != null || Parent == null) return;
+            var home = Parent;
+            var owner = FindForm();
+            int index = home.Controls.GetChildIndex(this);
+            var form = new Form
+            {
+                FormBorderStyle = FormBorderStyle.None, StartPosition = FormStartPosition.Manual,
+                Bounds = Screen.FromControl(this).Bounds, ShowInTaskbar = false, TopMost = true,
+                BackColor = BackColor, Text = profile.Name + " — RDP"
+            };
+            var exit = Theme.Button("Выйти из полноэкранного режима", 250, glyph: Glyph.MoveLeft);
+            exit.Anchor = AnchorStyles.Top | AnchorStyles.Right;
+            exit.Left = form.ClientSize.Width - exit.Width;
+            exit.Visible = false;
+            exit.Click += (sender, args) => form.Close();
+            fullScreenForm = form;
+            fullScreenExit = exit;
+            form.Controls.Add(this);
+            form.Controls.Add(exit);
+            exit.BringToFront();
+            form.FormClosed += (sender, args) =>
+            {
+                fullScreenForm = null;
+                fullScreenExit = null;
+                if (IsDisposed || home.IsDisposed || home.Disposing) return;
+                home.Controls.Add(this);
+                home.Controls.SetChildIndex(this, Math.Min(index, home.Controls.Count - 1));
+                Focus();
+                ScheduleResize();
+            };
+            form.Show(owner);
+            Focus();
+            ScheduleResize();
+        }
+
+        public override void Reconnect()
+        {
+            if (profile != null) Start();
+        }
+
+        public override void Disconnect()
+        {
+            if (worker == null) return;
+            disconnecting = true;
+            disconnectStarted = System.Diagnostics.Stopwatch.GetTimestamp();
+            if (connected && worker.Send(Packet.Stop)) UpdateStatus("отключение", true);
+            else Finish(null);
+        }
+
+        private void Finish(string reason)
+        {
+            bool normal = disconnecting || (reason == null && connected);
+            connected = false;
+            Release();
+            fullScreenForm?.Close();
+            UpdateStatus(normal ? "отключён" : "ошибка подключения", false);
+            ShowEnded(normal ? "Сеанс завершён" : "Подключение прервано", normal ? "" : reason ?? "Процесс FreeRDP завершился.");
+        }
+
+        private void Release()
+        {
+            updates.Stop();
+            resize.Stop();
+            var old = worker;
+            worker = null;
+            old?.Dispose();
+            pressed.Clear();
+            pointer = null;
+            frame?.Dispose();
+            frame = null;
+            Invalidate();
+        }
 
         protected override void Dispose(bool disposing)
         {
             if (disposing)
             {
-                ReleaseClient();
-                resizeTimer.Dispose();
+                fullScreenForm?.Close();
+                Release();
+                updates.Dispose();
+                resize.Dispose();
             }
             base.Dispose(disposing);
         }
 
-        private sealed class RdpClientHost : AxHost
-        {
-            // MsRdpClient9NotSafeForScripting: allows passwords and per-session display updates.
-            public RdpClientHost() : base("8B918B82-7985-4C24-89DF-C33AD2BBFBCD")
-            {
-                Dock = DockStyle.Fill;
-                AccessibleName = "Удалённый рабочий стол";
-            }
-
-            public object Client => GetOcx();
-        }
-
-        [ComImport, Guid("C1E6743A-41C1-4A74-832A-0DD06C1C7A0E"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
-        private interface IMsTscNonScriptable
-        {
-            void PutClearTextPassword([MarshalAs(UnmanagedType.BStr)] string password);
-        }
-
-        // Vtable order read from the mstscax.dll type library (slots 3-30); later members are not used.
-        [ComImport, Guid("B3378D90-0728-45C7-8ED7-B6159FB92219"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
-        private interface IMsRdpClientNonScriptable3
-        {
-            [PreserveSig] int PutClearTextPassword(IntPtr value);
-            [PreserveSig] int PutPortablePassword(IntPtr value);
-            [PreserveSig] int GetPortablePassword(out IntPtr value);
-            [PreserveSig] int PutPortableSalt(IntPtr value);
-            [PreserveSig] int GetPortableSalt(out IntPtr value);
-            [PreserveSig] int PutBinaryPassword(IntPtr value);
-            [PreserveSig] int GetBinaryPassword(out IntPtr value);
-            [PreserveSig] int PutBinarySalt(IntPtr value);
-            [PreserveSig] int GetBinarySalt(out IntPtr value);
-            [PreserveSig] int ResetPassword();
-            [PreserveSig] int NotifyRedirectDeviceChange(UIntPtr wParam, IntPtr lParam);
-            [PreserveSig] int SendKeys(int count, IntPtr keyUp, IntPtr keyData);
-            [PreserveSig] int PutUIParentWindowHandle(IntPtr value);
-            [PreserveSig] int GetUIParentWindowHandle(out IntPtr value);
-            [PreserveSig] int PutShowRedirectionWarningDialog(short value);
-            [PreserveSig] int GetShowRedirectionWarningDialog(out short value);
-            [PreserveSig] int PutPromptForCredentials(short value);
-            [PreserveSig] int GetPromptForCredentials(out short value);
-            [PreserveSig] int PutNegotiateSecurityLayer(short value);
-            [PreserveSig] int GetNegotiateSecurityLayer(out short value);
-            [PreserveSig] int PutEnableCredSspSupport(short value);
-            [PreserveSig] int GetEnableCredSspSupport(out short value);
-            [PreserveSig] int PutRedirectDynamicDrives(short value);
-            [PreserveSig] int GetRedirectDynamicDrives(out short value);
-            [PreserveSig] int PutRedirectDynamicDevices(short value);
-            [PreserveSig] int GetRedirectDynamicDevices(out short value);
-            [PreserveSig] int GetDeviceCollection(out IntPtr value);
-            [PreserveSig] int GetDriveCollection([MarshalAs(UnmanagedType.Interface)] out IMsRdpDriveCollection value);
-        }
-
-        [ComImport, Guid("7FF17599-DA2C-4677-AD35-F60C04FE1585"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
-        private interface IMsRdpDriveCollection
-        {
-            [PreserveSig] int RescanDrives(short dynamicOnly);
-            [PreserveSig] int GetDriveByIndex(uint index, [MarshalAs(UnmanagedType.Interface)] out IMsRdpDrive drive);
-            [PreserveSig] int GetDriveCount(out uint count);
-        }
-
-        [ComImport, Guid("D28B5458-F694-47A8-8E61-40356A767E46"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
-        private interface IMsRdpDrive
-        {
-            [PreserveSig] int GetName([MarshalAs(UnmanagedType.BStr)] out string name);
-            [PreserveSig] int PutRedirectionState(short state);
-            [PreserveSig] int GetRedirectionState(out short state);
-        }
-
-        [ComImport, Guid("302D8188-0052-4807-806A-362B628F9AC5"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
-        private interface IMsRdpExtendedSettings
-        {
-            void PutProperty([MarshalAs(UnmanagedType.BStr)] string name, [In] ref object value);
-        }
+        [DllImport("user32.dll")]
+        private static extern bool AddClipboardFormatListener(IntPtr window);
+        [DllImport("user32.dll")]
+        private static extern bool RemoveClipboardFormatListener(IntPtr window);
+        [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+        private static extern bool GetKeyboardLayoutName(StringBuilder layout);
     }
 }

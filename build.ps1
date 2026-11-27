@@ -47,9 +47,12 @@ $projectLicense = Join-Path $PSScriptRoot 'LICENSE'
 $icon = Join-Path $PSScriptRoot 'assets\SshManager.ico'
 $mark = Join-Path $PSScriptRoot 'assets\AppMark.png'
 $manifest = Join-Path $PSScriptRoot 'installer\app.manifest'
+$rdp = & (Join-Path $PSScriptRoot 'native/rdp/build.ps1') -BuildDirectory (Join-Path $PSScriptRoot 'build/freerdp-deps')
 & $dotnet $compiler /nologo /noconfig /nostdlib+ /target:winexe /platform:anycpu /optimize+ /deterministic+ /codepage:65001 `
     "/out:$app" "/win32icon:$icon" "/win32manifest:$manifest" "/resource:$mark,SshManager.AppMark.png" `
-    "/resource:$vtLicense,SshManager.VtNetCore-LICENSE.txt" "/resource:$projectLicense,SshManager.LICENSE.txt" $refs $sources
+    "/resource:$vtLicense,SshManager.VtNetCore-LICENSE.txt" "/resource:$projectLicense,SshManager.LICENSE.txt" `
+    "/resource:$($rdp.Executables.x64),SshManager.RdpWorker.x64.exe" "/resource:$($rdp.Executables.x86),SshManager.RdpWorker.x86.exe" `
+    "/resource:$($rdp.Licenses),SshManager.Rdp-LICENSES.txt" $refs $sources
 if ($LASTEXITCODE -ne 0) { throw 'App compilation failed.' }
 
 if (-not $AppOnly) {

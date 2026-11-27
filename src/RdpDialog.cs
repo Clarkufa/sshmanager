@@ -178,9 +178,9 @@ namespace SshManager
         private readonly TextBox account, password;
         private readonly CheckBox remember;
 
-        private RdpLogonDialog(RdpProfile profile)
+        private RdpLogonDialog(string name, string address, string defaultAccount, bool canSave)
         {
-            Text = "Вход: " + profile.Name;
+            Text = "Вход: " + name;
             Font = Theme.Body;
             ForeColor = Theme.Ink;
             BackColor = Theme.Canvas;
@@ -199,14 +199,14 @@ namespace SshManager
             layout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
             Controls.Add(layout);
 
-            var target = new Label { Text = profile.Address, AutoSize = true, ForeColor = Theme.Muted, Anchor = AnchorStyles.Left };
+            var target = new Label { Text = address, AutoSize = true, ForeColor = Theme.Muted, Anchor = AnchorStyles.Left };
             layout.Controls.Add(target, 0, 0);
             layout.SetColumnSpan(target, 2);
-            account = AddField(layout, 1, "Пользователь", profile.Account);
+            account = AddField(layout, 1, "Пользователь", defaultAccount);
             password = AddField(layout, 2, "Па&роль", "");
             password.UseSystemPasswordChar = true;
             password.MaxLength = SshPasswords.MaxBytes;
-            remember = new CheckBox { Text = "Сохранить пароль в Windows", AutoSize = true, Anchor = AnchorStyles.Left };
+            remember = new CheckBox { Text = "Сохранить пароль в Windows", AutoSize = true, Anchor = AnchorStyles.Left, Visible = canSave };
             layout.Controls.Add(remember, 1, 3);
 
             var buttons = new FlowLayoutPanel { Dock = DockStyle.Fill, FlowDirection = FlowDirection.RightToLeft, WrapContents = false, Margin = Padding.Empty };
@@ -249,7 +249,7 @@ namespace SshManager
             // A saved password always goes with the user and domain of this exact profile (host and port).
             if (saved != null && profile.User.Length > 0) return new RdpCredential(profile.User, profile.Domain, saved);
 
-            using (var dialog = new RdpLogonDialog(profile))
+            using (var dialog = new RdpLogonDialog(profile.Name, profile.Address, profile.Account, true))
             {
                 if (dialog.ShowDialog(owner) != DialogResult.OK) return null;
                 var credential = RdpCredential.FromAccount(dialog.account.Text, profile.Domain, dialog.password.Text);
@@ -265,6 +265,17 @@ namespace SshManager
                         catch (System.IO.IOException error) { Theme.ShowError(owner, error); }
                     }
                 }
+                return credential;
+            }
+        }
+
+        public static RdpCredential Ask(IWin32Window owner, string name, string address, string account, string domain)
+        {
+            using (var dialog = new RdpLogonDialog(name, address, account, false))
+            {
+                if (dialog.ShowDialog(owner) != DialogResult.OK) return null;
+                var credential = RdpCredential.FromAccount(dialog.account.Text, domain, dialog.password.Text);
+                dialog.password.Clear();
                 return credential;
             }
         }
