@@ -83,17 +83,29 @@ if (-not $recipe.Contains($upstreamHash)) { throw 'The pinned vcpkg OpenSSL reci
 $triplets = (New-Item -ItemType Directory -Path (Join-Path $root 'triplets') -Force).FullName
 
 $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
-$cmake = (Get-Command cmake.exe -ErrorAction SilentlyContinue).Source
-if (-not $cmake) {
-    $cmake = & $vswhere -latest -products '*' -find '**\CMake\bin\cmake.exe' | Select-Object -First 1
+if (-not (Test-Path -LiteralPath $vswhere)) { throw 'Install Visual Studio with C++ tools to build the Windows RDP client.' }
+$studio = & $vswhere -latest -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -format json |
+    ConvertFrom-Json | Select-Object -First 1
+if (-not $studio) { throw 'No installation of Visual Studio with C++ tools was found.' }
+$studioMajor = ([version]$studio.installationVersion).Major
+$generator = switch ($studioMajor) {
+    17 { 'Visual Studio 17 2022' }
+    18 { 'Visual Studio 18 2026' }
+    default { throw "Visual Studio $studioMajor is unsupported by the Windows RDP build." }
 }
-if (-not $cmake) { throw 'Install Visual Studio 2022 C++ tools and CMake to build the Windows RDP client.' }
+$systemCmake = (Get-Command cmake.exe -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1).Source
+$bundledCmake = Join-Path $studio.installationPath 'Common7/IDE/CommonExtensions/Microsoft/CMake/CMake/bin/cmake.exe'
+$cmake = @($systemCmake, $bundledCmake) | Where-Object {
+    $_ -and (Test-Path -LiteralPath $_) -and (& $_ --help | Select-String -SimpleMatch $generator -Quiet)
+} | Select-Object -First 1
+if (-not $cmake) { throw "Install a version of CMake that supports $generator." }
 
 $executables = @{}
 foreach ($arch in 'x64', 'x86') {
     $platform = if ($arch -eq 'x64') { 'x64' } else { 'Win32' }
     $triplet = "$arch-windows-static"
     $destination = Join-Path $root "worker-$arch-$opensslVersion"
+    if ($studioMajor -ne 17) { $destination += "-vs$studioMajor" }
     $baseTriplet = Join-Path $vcpkg "triplets/$triplet.cmake"
     if (-not (Test-Path -LiteralPath $baseTriplet)) {
         $baseTriplet = Join-Path $vcpkg "triplets/community/$triplet.cmake"
@@ -104,7 +116,7 @@ foreach ($arch in 'x64', 'x86') {
         "--overlay-ports=$ports", "--overlay-triplets=$triplets", "--x-install-root=$installed")
     $opensslHeader = [IO.File]::ReadAllText((Join-Path $installed "$triplet/include/openssl/opensslv.h"))
     if (-not $opensslHeader.Contains('"' + $opensslVersion + '"')) { throw 'Unexpected OpenSSL build version.' }
-    Run $cmake @('-S', $PSScriptRoot, '-B', $destination, '-G', 'Visual Studio 17 2022', '-A', $platform,
+    Run $cmake @('-S', $PSScriptRoot, '-B', $destination, '-G', $generator, '-A', $platform,
         "-DFREERDP_SOURCE=$source", "-DCMAKE_TOOLCHAIN_FILE=$vcpkg/scripts/buildsystems/vcpkg.cmake",
         "-DVCPKG_TARGET_TRIPLET=$triplet", "-DVCPKG_INSTALLED_DIR=$installed", "-DVCPKG_OVERLAY_TRIPLETS=$triplets")
     Run $cmake @('--build', $destination, '--config', 'Release', '--target', 'SshManagerRdp', '--parallel')
