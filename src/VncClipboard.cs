@@ -1,4 +1,5 @@
 using System;
+using System.Linq;
 using System.IO;
 using System.IO.Compression;
 using System.Text;
@@ -21,12 +22,39 @@ namespace SshManager
 
         internal VncClipboard(Action<byte[]> send) { this.send = send; }
 
+        /// <summary>Cut text of servers without Extended Clipboard. The protocol says Latin-1, but servers on Linux often
+        /// send UTF-8 and servers on Windows their ANSI code page (cp1251 for Russian): valid UTF-8 is read as UTF-8,
+        /// other text in the ANSI code page of this PC.</summary>
+        internal static string DecodeLegacy(byte[] bytes)
+        {
+            if (bytes.All(value => value < 0x80)) return Encoding.ASCII.GetString(bytes);
+            try { return Utf8.GetString(bytes); }
+            catch (DecoderFallbackException) { return Ansi().GetString(bytes); }
+        }
+
+        /// <summary>The ANSI code page; with the system-wide UTF-8 option it is 65001, so the culture's one is used.</summary>
+        private static Encoding Ansi()
+        {
+            int page = Encoding.Default.CodePage;
+            if (page == 65001) page = System.Globalization.CultureInfo.CurrentCulture.TextInfo.ANSICodePage;
+            try { return Encoding.GetEncoding(page, new EncoderReplacementFallback("?"), DecoderFallback.ReplacementFallback); }
+            catch (ArgumentException) { return Latin1; }
+            catch (NotSupportedException) { return Latin1; }
+        }
+
+        /// <summary>Latin-1 when it fits (the protocol), otherwise the ANSI code page, so Cyrillic reaches Windows servers.</summary>
+        internal static byte[] EncodeLegacy(string text)
+        {
+            if (text.All(ch => ch < 0x100)) return Latin1.GetBytes(text);
+            return Ansi().GetBytes(text);
+        }
+
         internal string Receive(byte[] message, bool extended)
         {
             if (!extended)
             {
                 lock (sync) localText = null;
-                return Latin1.GetString(message);
+                return DecodeLegacy(message);
             }
             if (message.Length < 4) return null;
             uint flags = ReadU32(message, 0);
@@ -80,7 +108,7 @@ namespace SshManager
                 if ((peerCaps & Text) != 0 && (peerCaps & (Notify | Provide)) != 0) Announce();
                 else
                 {
-                    var legacy = Latin1.GetBytes(lines);
+                    var legacy = EncodeLegacy(lines);
                     var message = new byte[8 + legacy.Length];
                     message[0] = 6;
                     PutU32(message, 4, (uint)legacy.Length);
