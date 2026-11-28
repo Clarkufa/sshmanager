@@ -17,6 +17,17 @@ jobs:
       - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: '3.12'
+      # The FreeRDP workers (with OpenSSL and zlib) are rebuilt only when native/rdp or Visual Studio changes.
+      - name: Visual Studio version
+        id: studio
+        shell: pwsh
+        run: |
+          $version = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -property installationVersion
+          "major=$(([version]$version).Major)" >> $env:GITHUB_OUTPUT
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: build/freerdp-deps/worker-cache
+          key: rdp-workers-vs${{ steps.studio.outputs.major }}-${{ hashFiles('native/rdp/**') }}
       - name: Build MSI and portable EXE
         shell: pwsh
         run: ./build.ps1 -OutputDirectory build/release

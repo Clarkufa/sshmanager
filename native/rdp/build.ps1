@@ -17,6 +17,37 @@ function Run([string] $Program, [string[]] $Arguments) {
     }
 }
 
+$vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
+if (-not (Test-Path -LiteralPath $vswhere)) { throw 'Install Visual Studio with C++ tools to build the Windows RDP client.' }
+$studio = & $vswhere -latest -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -format json |
+    ConvertFrom-Json | Select-Object -First 1
+if (-not $studio) { throw 'No installation of Visual Studio with C++ tools was found.' }
+$studioMajor = ([version]$studio.installationVersion).Major
+$generator = switch ($studioMajor) {
+    17 { 'Visual Studio 17 2022' }
+    18 { 'Visual Studio 18 2026' }
+    default { throw "Visual Studio $studioMajor is unsupported by the Windows RDP build." }
+}
+
+# Finished workers are kept by a key over this folder (versions, patch, worker source) and the Visual Studio version,
+# so later builds, and CI with a cached worker-cache folder, skip the download, vcpkg and CMake entirely.
+$inputs = Get-ChildItem -LiteralPath $PSScriptRoot -Recurse -File | Sort-Object Name | ForEach-Object {
+    $_.Name + ':' + (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash
+}
+$sha = [Security.Cryptography.SHA256]::Create()
+$key = -join ($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes(($inputs -join "`n") + "`nvs$studioMajor")) |
+    Select-Object -First 8 | ForEach-Object { $_.ToString('x2') })
+$cache = Join-Path $root "worker-cache/$key"
+$cached = [pscustomobject]@{
+    Executables = @{ x64 = Join-Path $cache 'x64/SshManagerRdp.exe'; x86 = Join-Path $cache 'x86/SshManagerRdp.exe' }
+    Licenses = Join-Path $cache 'Rdp-LICENSES.txt'
+}
+if ((Test-Path -LiteralPath $cached.Executables.x64) -and (Test-Path -LiteralPath $cached.Executables.x86) -and
+    (Test-Path -LiteralPath $cached.Licenses)) {
+    Write-Host "RDP workers are up to date ($key)."
+    return $cached
+}
+
 if (-not (Test-Path -LiteralPath $archive) -or (Get-FileHash -LiteralPath $archive).Hash -ne $sourceHash) {
     $download = "$archive.download"
     Run 'curl.exe' @('--fail', '--location', '--silent', '--show-error', '--retry', '2',
@@ -82,17 +113,6 @@ if (-not $recipe.Contains($upstreamHash)) { throw 'The pinned vcpkg OpenSSL reci
 
 $triplets = (New-Item -ItemType Directory -Path (Join-Path $root 'triplets') -Force).FullName
 
-$vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
-if (-not (Test-Path -LiteralPath $vswhere)) { throw 'Install Visual Studio with C++ tools to build the Windows RDP client.' }
-$studio = & $vswhere -latest -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -format json |
-    ConvertFrom-Json | Select-Object -First 1
-if (-not $studio) { throw 'No installation of Visual Studio with C++ tools was found.' }
-$studioMajor = ([version]$studio.installationVersion).Major
-$generator = switch ($studioMajor) {
-    17 { 'Visual Studio 17 2022' }
-    18 { 'Visual Studio 18 2026' }
-    default { throw "Visual Studio $studioMajor is unsupported by the Windows RDP build." }
-}
 $systemCmake = (Get-Command cmake.exe -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1).Source
 $bundledCmake = Join-Path $studio.installationPath 'Common7/IDE/CommonExtensions/Microsoft/CMake/CMake/bin/cmake.exe'
 $cmake = @($systemCmake, $bundledCmake) | Where-Object {
@@ -130,7 +150,9 @@ $licenses = @(
 ) | ForEach-Object { [IO.File]::ReadAllText($_) }
 $licenseFile = Join-Path $root 'Rdp-LICENSES.txt'
 [IO.File]::WriteAllText($licenseFile, ($licenses -join "`r`n`r`n"))
-[pscustomobject]@{
-    Executables = $executables
-    Licenses = $licenseFile
+foreach ($arch in 'x64', 'x86') {
+    New-Item -ItemType Directory -Path (Join-Path $cache $arch) -Force | Out-Null
+    Copy-Item -LiteralPath $executables[$arch] -Destination $cached.Executables[$arch] -Force
 }
+Copy-Item -LiteralPath $licenseFile -Destination $cached.Licenses -Force
+$cached
