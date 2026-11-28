@@ -161,10 +161,12 @@ namespace SshManager
 
         private static string ReadText(byte[] message)
         {
-            if (message.Length < 10) return null; // flags, zlib header and checksum
+            if (message.Length < 10) return null; // flags, zlib header and at least a length
             try
             {
-                using (var buffer = new MemoryStream(message, 6, message.Length - 10, false))
+                // Servers end the zlib stream either with a checksum or only with a sync flush (UltraVNC, TigerVNC),
+                // so everything after the header goes to the decoder, which stops after the final block.
+                using (var buffer = new MemoryStream(message, 6, message.Length - 6, false))
                 using (var deflate = new DeflateStream(buffer, CompressionMode.Decompress))
                 {
                     var length = new byte[4];
